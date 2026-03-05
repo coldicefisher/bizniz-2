@@ -1,0 +1,24 @@
+################################################################################################
+# OPENAI SETTINGS
+################################################################################################
+is_azure: true
+api_base: "https://jhescloudmuseoai01.openai.azure.com/"
+
+api_version: "2024-10-21"
+
+available_models:
+  "gpt-4o": "2024-10-21"
+  "o4-mini": "2024-12-01-preview"
+
+default_model: "o4-mini"
+
+alt_text_prompt: |
+  Please provide alt text for this image. Please describe this image without any emotional 
+  language or bias. Only describe what the image is visually. If the image is an artifact, 
+  please return true for is_artifact and 'artifact' for alt_text.
+  Artifacts are defined as: A visual element that is purely decorative or structural and does not convey meaningful content, 
+  such as borders, logos used for branding, or background patterns. For any foreign language, please also include an English translation.
+  Please do no use any special characters like bullet points. Do not use line breaks. Please reserve the alt text to be shorter than 150 
+  characters.
+
+log_dir: "/usr/local/alt_text_ai/logs"
