@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Tuple
 
 
 from autocoder.clients.chatgpt.types.response_format import ResponseFormat
-# from python_core.data_connectors.mysql_connector import MySQLConnector
+
 
 from autocoder.clients.chatgpt.messages import Message, MessageList
 

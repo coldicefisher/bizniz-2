@@ -5,7 +5,7 @@ import pytest
 
 from autocoder.autocoder import AutocoderProcessError, AutocoderBadAIResponseError, AutocoderProcessResult, Autocoder, AutocoderConfig, AutocoderEnvironment
 
-from autocoder.clients.chatgpt.chatgpt_client import ChatGPTClient
+from autocoder.clients.chatgpt.openai_chatgpt_client import ChatGPTClient
 
 from typing import Optional, Callable, Any, Dict, List
 from pydantic import ValidationError
@@ -23,17 +23,17 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
     -- Error is raised if code_directory is not provided in the config
     -- The default module_name is set to "code"
     -- The default filename is set to "generated_code.py"
-    -- The default code_directory is set to /etc/autocoder/autocoder_config/{module_name
+    -- The default code_directory is set to /tmp/autocoder/autocoder_config/{module_name
     -- The code directory is created if it does not exist
     -- Error is raised if the code_directory is not passed
     -- Error is raised if the module_name is set to None
     
     The configuration_directory specifies where the autocoder will store its configuration files. By 
-    default, it should be set to /etc/autocoder/autocoder_config. This test checks that the default 
+    default, it should be set to /tmp/autocoder/autocoder_config. This test checks that the default 
     configuration directory is set correctly when no custom config is provided. The configuration
     directory should be created if it does not exist. It cannot be set to None.
     This test checks that:
-    -- The default configuration_directory is set to /etc/autocoder/autocoder_config
+    -- The default configuration_directory is set to /tmp/autocoder/autocoder_config
     -- The configuration directory is created if it does not exist
     -- Error is raised if the configuration_directory is set to None
     
@@ -48,7 +48,7 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
             input_data=input_data,
             process_prompt=process_prompt,
             max_retries=2,
-            client=ChatGPTClient(config=azure_config),
+            client=ChatGPTClient(config=azure_config, api_key="test_api_key"),
             validator=Validator(),
             config=AutocoderConfig(),
         )
@@ -61,7 +61,7 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
         input_data=input_data,
         process_prompt=process_prompt,
         max_retries=2,
-        client=ChatGPTClient(config=azure_config),
+        client=ChatGPTClient(config=azure_config, api_key="test_api_key"),
         validator=Validator(),
         config=AutocoderConfig(
             code_directory="/tmp/autocoder/code_generator"
@@ -82,7 +82,7 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
     assert os.path.exists(os.path.join(autocoder._config.code_directory, autocoder._config.module_name, autocoder._config.filename))
     
     # Check the default configuration directory is set correctly and created
-    assert autocoder._config.configuration_directory == "/etc/autocoder/autocoder_config"
+    assert autocoder._config.configuration_directory == "/tmp/autocoder/autocoder_config"
     assert os.path.exists(autocoder._config.configuration_directory)
     
     # TEST ERROR IS RAISED IF MODULE_NAME IS SET TO NONE //////////////////////////////////
@@ -91,7 +91,7 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
             input_data=input_data,
             process_prompt=process_prompt,
             max_retries=2,
-            client=ChatGPTClient(config=azure_config),
+            client=ChatGPTClient(config=azure_config, api_key="test_api_key"),
             validator=Validator(),
             config=AutocoderConfig(
                 code_directory="/tmp/autocoder_tmp",
@@ -106,13 +106,13 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
         input_data=input_data,
         process_prompt=process_prompt,
         max_retries=2,
-        client=ChatGPTClient(config=azure_config),
+        client=ChatGPTClient(config=azure_config, api_key="test_api_key"),
         validator=Validator(),
         config=AutocoderConfig(
             code_directory="/tmp/autocoder_tmp"
         ),
     )
-    assert autocoder._config.configuration_directory == "/etc/autocoder/autocoder_config"
+    assert autocoder._config.configuration_directory == "/tmp/autocoder/autocoder_config"
     assert os.path.exists(autocoder._config.configuration_directory)
     
     # CLEANUP CREATED DIRECTORIES AND FILES ///////////////////////////////////////////////////////
@@ -121,7 +121,7 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
     except Exception as e:
         print(f"Error cleaning up code directory: {e}")
     try:
-        shutil.rmtree("/etc/autocoder/autocoder_config")
+        shutil.rmtree("/tmp/autocoder/autocoder_config")
     except Exception as e:
         print(f"Error cleaning up configuration directory: {e}")
     try:        
@@ -146,7 +146,7 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
             input_data=input_data,
             process_prompt=process_prompt,
             max_retries=2,
-            client=ChatGPTClient(config=azure_config),
+            client=ChatGPTClient(config=azure_config, api_key="test_api_key"),
             validator=Validator(),
             config=AutocoderConfig(),
         )
@@ -159,7 +159,7 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
         input_data=input_data,
         process_prompt=process_prompt,
         max_retries=2,
-        client=ChatGPTClient(config=azure_config),
+        client=ChatGPTClient(config=azure_config, api_key="test_api_key"),
         validator=Validator(),
         config=AutocoderConfig(
             code_directory="/tmp/autocoder/code_generator",
@@ -181,7 +181,7 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
     assert os.path.exists(os.path.join(autocoder._config.code_directory, autocoder._config.module_name, autocoder._config.filename))
     
     # Check the default configuration directory is set correctly and created
-    assert autocoder._config.configuration_directory == "/etc/autocoder/autocoder_config"
+    assert autocoder._config.configuration_directory == "/tmp/autocoder/autocoder_config"
     assert os.path.exists(autocoder._config.configuration_directory)
     
     # TEST ERROR IS RAISED IF MODULE_NAME IS SET TO NONE //////////////////////////////////
@@ -190,7 +190,7 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
             input_data=input_data,
             process_prompt=process_prompt,
             max_retries=2,
-            client=ChatGPTClient(config=azure_config),
+            client=ChatGPTClient(config=azure_config, api_key="test_api_key"),
             validator=Validator(),
             config=AutocoderConfig(
                 code_directory="/tmp/autocoder_tmp",
@@ -205,13 +205,13 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
         input_data=input_data,
         process_prompt=process_prompt,
         max_retries=2,
-        client=ChatGPTClient(config=azure_config),
+        client=ChatGPTClient(config=azure_config, api_key="test_api_key"),
         validator=Validator(),
         config=AutocoderConfig(
             code_directory="/tmp/autocoder_tmp"
         ),
     )
-    assert autocoder._config.configuration_directory == "/etc/autocoder/autocoder_config"
+    assert autocoder._config.configuration_directory == "/tmp/autocoder/autocoder_config"
     assert os.path.exists(autocoder._config.configuration_directory)
     
     # CLEANUP CREATED DIRECTORIES AND FILES ///////////////////////////////////////////////////////
@@ -220,7 +220,7 @@ def test_autocoder_initialization_configs(azure_config, validator_factory, input
     except Exception as e:
         print(f"Error cleaning up code directory: {e}")
     try:
-        shutil.rmtree("/etc/autocoder/autocoder_config")
+        shutil.rmtree("/tmp/autocoder/autocoder_config")
     except Exception as e:
         print(f"Error cleaning up configuration directory: {e}")
     try:        
@@ -247,7 +247,7 @@ def test_autocoder_callbacks_passed_in_config(azure_config, validator_factory, i
         input_data=input_data,
         process_prompt=process_prompt,
         max_retries=2,
-        client=ChatGPTClient(config=azure_config),
+        client=ChatGPTClient(config=azure_config, api_key="test_api_key"),
         validator=Validator(),
         config=AutocoderConfig(
             code_directory="/tmp/autocoder_tmp",
@@ -263,7 +263,7 @@ def test_autocoder_callbacks_passed_in_config(azure_config, validator_factory, i
         input_data=input_data,
         process_prompt=process_prompt,
         max_retries=2,
-        client=ChatGPTClient(config=azure_config),
+        client=ChatGPTClient(config=azure_config, api_key="test_api_key"),
         validator=Validator(),
         config=AutocoderConfig(
             code_directory="/tmp/autocoder_tmp",
@@ -277,7 +277,7 @@ def test_autocoder_callbacks_passed_in_config(azure_config, validator_factory, i
     except Exception as e:
         print(f"Error cleaning up code directory: {e}")
     try:
-        shutil.rmtree("/etc/autocoder/autocoder_config")
+        shutil.rmtree("/tmp/autocoder/autocoder_config")
     except Exception as e:
         print(f"Error cleaning up configuration directory: {e}")
     try:        

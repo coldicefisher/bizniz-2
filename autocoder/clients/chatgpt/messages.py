@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List
-from python_core.clients.openai.types.roles import Role
-from python_core.clients.openai.types.response_format import ResponseFormat
+from autocoder.clients.chatgpt.types.roles import Role
+from autocoder.clients.chatgpt.types.response_format import ResponseFormat
 
 
 @dataclass

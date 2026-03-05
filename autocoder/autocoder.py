@@ -57,7 +57,7 @@ class AutocoderConfig(BaseModel):
     filename: str = "generated_code.py"
     module_name: Optional[str] = "code"
     
-    configuration_directory: Optional[str] = "/etc/autocoder/autocoder_config"
+    configuration_directory: Optional[str] = "/tmp/autocoder/autocoder_config"
     environment_settings: Optional[AutocoderEnvironment] = None
     build_on_current_code: bool = True
     
@@ -360,7 +360,8 @@ class Autocoder:
             
             # Manual validation
             validation = self._validator.validate(
-                output,
+                input_data=self._input_data,
+                output_data=output,
             )
 
             if not validation.is_valid:
@@ -424,34 +425,52 @@ class Autocoder:
         
         text = None
         job_id = None
-        for attempt in range(1, attempts + 1):
-            try:
-                text, job_id = self._client.get_text(
-                    instruction_messages=[{
-                        "role": "system",
-                        "content": system_prompt
-                    }],
-                    messages=messages or []
-                )
-                
-                if not text or not text.strip():
-                    continue
-                
-                json_response = json.loads(text)
-                
-                if json_response.get("cannot_process"):
-                    raise AutocoderProcessError("Assistant determined input data cannot be processed.")
-                
-                return self._strip_code_block(json_response.get("code", ""))
-            
-            except Exception as e:
-                last_error = e
-                continue
-            
-        raise AutocoderBadAIResponseError(
-            "Assistant failed after multiple attempts.\n"
-            f"Last error: {last_error}"
+        text, job_id = self._client.get_text(
+            instruction_messages=[{
+                "role": "system",
+                "content": system_prompt
+            }],
+            messages=messages or []
         )
+        
+                
+        json_response = json.loads(text)
+                
+        if json_response.get("cannot_process"):
+            raise AutocoderProcessError("Assistant determined input data cannot be processed.")
+        
+        return self._strip_code_block(json_response.get("code", ""))
+    
+    
+        # ACTUAL CODE ///////////////////////////////////////////////////////////////////////////
+        # for attempt in range(1, attempts + 1):
+        #     try:
+        #         text, job_id = self._client.get_text(
+        #             instruction_messages=[{
+        #                 "role": "system",
+        #                 "content": system_prompt
+        #             }],
+        #             messages=messages or []
+        #         )
+                
+        #         if not text or not text.strip():
+        #             continue
+                
+        #         json_response = json.loads(text)
+                
+        #         if json_response.get("cannot_process"):
+        #             raise AutocoderProcessError("Assistant determined input data cannot be processed.")
+                
+        #         return self._strip_code_block(json_response.get("code", ""))
+            
+        #     except Exception as e:
+        #         last_error = e
+        #         continue
+            
+        # raise AutocoderBadAIResponseError(
+        #     "Assistant failed after multiple attempts.\n"
+        #     f"Last error: {last_error}"
+        # )
     
     
     # Repair Loop ////////////////////////////////////////////////////////////////////////

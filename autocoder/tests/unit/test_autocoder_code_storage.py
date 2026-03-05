@@ -6,7 +6,7 @@ import json
 
 from autocoder.autocoder import AutocoderProcessError, AutocoderBadAIResponseError, AutocoderProcessResult, Autocoder, AutocoderConfig, AutocoderEnvironment
 
-from autocoder.clients.chatgpt.chatgpt_client import ChatGPTClient
+from autocoder.clients.chatgpt.openai_chatgpt_client import ChatGPTClient
 
 from typing import Optional, Callable, Any, Dict, List
 from pydantic import ValidationError

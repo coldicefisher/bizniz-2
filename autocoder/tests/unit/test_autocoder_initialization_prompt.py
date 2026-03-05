@@ -5,7 +5,7 @@ import pytest
 
 from autocoder.autocoder import AutocoderProcessError, AutocoderBadAIResponseError, AutocoderProcessResult, Autocoder, AutocoderConfig, AutocoderEnvironment
 
-from autocoder.clients.chatgpt.chatgpt_client import ChatGPTClient
+from autocoder.clients.chatgpt.openai_chatgpt_client import ChatGPTClient
 
 from typing import Optional, Callable, Any, Dict, List
 from pydantic import ValidationError
@@ -29,7 +29,7 @@ def test_autocoder_initialization_prompt(azure_config, validator_factory):
         input_data="25, 17",
         process_prompt="Generate Python code to add numbers. You must figure out how to parse the input data and return the result.",
         max_retries=2,
-        client=ChatGPTClient(config=azure_config),
+        client=ChatGPTClient(config=azure_config, api_key="test_api_key"),
         validator=MockValidator,
         config=AutocoderConfig(
             code_directory="/tmp/autocoder/code_generator"

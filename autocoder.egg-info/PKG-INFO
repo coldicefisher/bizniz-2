@@ -1,0 +1,6 @@
+Metadata-Version: 2.1
+Name: autocoder
+Version: 0.1.0
+Summary: Autocoder system
+Author-email: Jamey Harris <jameycharris@yahoo.com>, Abba Tregobov <atregobo@gmail.com>
+Requires-Python: >=3.10
