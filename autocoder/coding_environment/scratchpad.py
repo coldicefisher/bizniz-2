@@ -61,8 +61,15 @@ class CalculatorValidator(BaseValidator):
         
         return ValidationResult(is_valid=False, errors=["Output data is not a number or None."])
     
+# nuke the code directory if it exists from previous runs
+import shutil
+code_directory = "/tmp/autocoder/code_generator"
+if os.path.exists(code_directory):
+    shutil.rmtree(code_directory)
+    
+    
 autocoder = Autocoder(
-    input_data="25, 17",
+    input_data="25 + 17",
     process_prompt="Generate Python code to add numbers. You must figure out how to parse the input data and return the result.",
     max_retries=2,
     client=ChatGPTClientFactory.create_client(config=config, api_key=api_key),
@@ -73,3 +80,4 @@ autocoder = Autocoder(
 )
     
 
+res = autocoder.process()
