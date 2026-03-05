@@ -12,8 +12,6 @@ from autocoder.clients.chatgpt.azure_chatgpt_client import AzureChatGPTClient
 from autocoder.clients.chatgpt.openai_chatgpt_client import OpenAIChatGPTClient
 from autocoder.clients.chatgpt.chatgpt_client_config import ChatGPTClientConfig
 
-class AutocoderClientError(Exception):
-    pass
 
 
 class ChatGPTClientFactory:

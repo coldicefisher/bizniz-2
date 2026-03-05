@@ -11,12 +11,16 @@ class Message:
     
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"role": self.role.value, "content": self.content}
+        _role = self.role.value if isinstance(self.role, Role) else str(self.role)
+        return {"role": _role, "content": self.content}
+        
 
 
 @dataclass
 class MessageList:
     messages: List[Message]
+    input_tokens: float = 0.0
+    output_tokens: float = 0.0
 
     def __iter__(self):
         return iter(self.messages)
@@ -38,6 +42,21 @@ class MessageList:
         return [{"error": "Unknown message type"}]
     
     
+    def __str__(self):
+        s = "Input Tokens: {}, Output Tokens: {}\n".format(self.input_tokens, self.output_tokens)
+        
+        for m in self.messages:
+            role = None
+            if isinstance(m.role, Role):
+                role = m.role.value
+            else:
+                role = str(m.role)
+                
+            s += f"{role}: {m.content}\n"
+        return s
+
+    def __repr__(self):
+        return self.__str__()
 
     def add(self, role: Role, content: str) -> None:
         self.messages.append(Message(role, content))

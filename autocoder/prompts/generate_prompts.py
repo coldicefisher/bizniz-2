@@ -21,16 +21,16 @@ The code you generate will be executed in a restricted Python environment:
 The following additional libraries will be available:
 {additional_libraries}
 
+"""
 
+extra = """
 VALIDATION CODE USED FOR THE OUTPUT CODE
 ──────────────────────────────────────────────────────────────
 The output code must validate against the following requirements, using the provided `validator.validate` function:
 
 {validation_requirements}
 
-
 """
-
 
 GENERATE_TAIL_PROMPT = """
 
@@ -39,16 +39,12 @@ RESPONSE FORMAT:
 Your response MUST be JSON with a keys: 
 
 "code" containing the Python code generated.
-"cannot_process": indicate True if you can process the input according to the specs, otherwise False.
 
-
-If the code cannot be produced to process the input data, you must return "cannot_process": true and an empty string for "code".
 
 You should return a json response like this:
 
 {{
-    "code": "",
-    "cannot_process": true    
+    "code": ""
 }}
 
 Do NOT hallucinate content. 
