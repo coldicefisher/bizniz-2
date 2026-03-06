@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 from lxml import etree
 
-from xml_ai_parser.utils.xml_normalizer import normalize_xml_input
+from typing import List, Dict, Any, Optional, Tuple, Union
 
 
 class ValidationResult:
@@ -29,11 +29,12 @@ class BaseValidator(ABC):
     
         
     @abstractmethod
-    def validate(self, original_data: str, *args, **kwargs) -> ValidationResult:
+    def validate(self, input_data: Any, output_data: Any, *args, **kwargs) -> ValidationResult:
         """Validate the data results.
         
         Args:
-            original_data (str): The original data string.
+            input_data (Any): The input data.
+            output_data (Any): The output data.
         
         Returns:
             ValidationResult: The result of the validation.
@@ -42,18 +43,18 @@ class BaseValidator(ABC):
     
         
     @property
-    def original_data(self) -> str:
-        if hasattr(self, '_original_data'):
-            return self._original_data
+    def input_data(self) -> Any:
+        if hasattr(self, '_input_data'):
+            return self._input_data
         else:
-            return ""
+            return None
     
     @property
-    def mutated_data(self) -> str:
-        if hasattr(self, '_mutated_data'):
-            return self._mutated_data
+    def output_data(self) -> Any:
+        if hasattr(self, '_output_data'):
+            return self._output_data
         else:
-            return ""
+            return None
     
     
     

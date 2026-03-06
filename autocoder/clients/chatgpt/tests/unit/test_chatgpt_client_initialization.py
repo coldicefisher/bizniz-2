@@ -5,7 +5,7 @@ import json
 import pytest
 from unittest.mock import MagicMock
 
-from autocoder.clients.chatgpt.chatgpt_client import ChatGPTClient, ChatGPTClientConfig, AutocoderClientError
+from autocoder.clients.chatgpt.openai_chatgpt_client import ChatGPTClient, ChatGPTClientConfig, AutocoderClientError
 from autocoder.clients.chatgpt.messages import Message, MessageList
 from autocoder.clients.chatgpt.types.roles import Role
 from autocoder.clients.chatgpt.errors import OpenAIAuthError

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 from copy import deepcopy
 
-from autocoder.clients.chatgpt.chatgpt_client import ChatGPTClient, ChatGPTClientConfig, AutocoderClientError
+from autocoder.clients.chatgpt.openai_chatgpt_client import ChatGPTClient, ChatGPTClientConfig, AutocoderClientError
 from autocoder.clients.chatgpt.messages import Message, MessageList
 from autocoder.clients.chatgpt.types.roles import Role
 from autocoder.clients.chatgpt.errors import OpenAIAuthError
@@ -88,9 +88,9 @@ def input_data():
 def validator_factory():
     def _factory(is_valid=True):
         class MockValidator(BaseValidator):
-            def validate(self, original_data: str, *args, **kwargs):
-                self._original_data = original_data
-                self._mutated_data = original_data
+            def validate(self, input_data: str, output_data: str, *args, **kwargs):
+                self._input_data = input_data
+                self._output_data = output_data
                 return ValidationResult(is_valid=is_valid)
         return MockValidator
     return _factory

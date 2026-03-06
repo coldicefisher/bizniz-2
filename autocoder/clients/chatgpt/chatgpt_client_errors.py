@@ -1,0 +1,2 @@
+class AutocoderClientError(Exception):
+    pass
