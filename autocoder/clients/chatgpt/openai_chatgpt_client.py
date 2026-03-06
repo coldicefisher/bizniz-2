@@ -172,10 +172,19 @@ class OpenAIChat4GPTClient(BaseChatGPTClient):
                     if schema is None:
                         raise ValueError("Schema must be provided for JSON_SCHEMA response format.")
                     
-                    messages.append({
-                        "role": "system",
-                        "content": f"You must respond in the following format according to the provided JSON schema: {schema}"
-                    })
+                    # messages.append({
+                    #     "role": "system",
+                    #     "content": f"You must respond in the following format according to the provided JSON schema: {schema}"
+                    # })
+                    
+                    kwargs['text'] = {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "generate_code",
+                        "schema": schema,
+                        "strict": True
+                    }
+                }
                 else:
                     raise NotImplementedError(f"Response format {response_format} is not supported in OpenAIChat4GPTClient.")
                 

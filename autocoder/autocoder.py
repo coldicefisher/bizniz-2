@@ -206,8 +206,8 @@ class Autocoder:
         
         # We need to add the allowed modules and exposed globals and builtins to the prompt as well
         additional_libraries = ""
-        for k, v in self._environment_settings.allowed_modules.items():
-            additional_libraries += f"- {k}\n"
+        # for k, v in self._environment_settings.allowed_modules.items():
+        #     additional_libraries += f"- {k}\n"
             
         for k, v in self._environment_settings.exposed_globals.items():
             additional_libraries += f"- {k}\n"
@@ -362,10 +362,13 @@ class Autocoder:
                 raise AutocoderProcessError(f"No cached {self._config.module_name} available, and AI agent engagement is disabled.")
             
             log("Requesting initial code from AI...")
-            code = self._generate_code(
-                system_prompt=code_prompt,
-            )
-
+            try:
+                code = self._generate_code(
+                    system_prompt=code_prompt,
+                )
+            
+            except Exception as e:
+                code = "ERROR: Failed to generate initial code from AI. " + str(e)
         # Instantiate the validator IF the class is passed. Double redundancy..
         _validator: BaseValidator = self._validator() if inspect.isclass(self._validator) else self._validator
         
@@ -518,6 +521,7 @@ class Autocoder:
                 
                 text = clean_llm_json(text)
                 json_response = json.loads(text)
+                    
                 
                 
                 out = self._strip_code_block(json_response.get("code", ""))
@@ -587,6 +591,8 @@ class Autocoder:
 
         for attempt in range(1, self.max_retries + 1):
             new_code = None
+            text = None
+            job_id = None
             try:
                 text, job_id = self._client.get_text(
                     instruction_messages=[{
@@ -679,7 +685,7 @@ class Autocoder:
     def _ai_verify_code(self, code: str, input_data: str, output: str) -> AutocoderAIVerificationResult:
         kwargs = {
             "code": code,
-            "input_data": input_data,
+            "input": input_data,
             "output": output,
         }
         if "{instructions}" in VERIFICATION_PROMPT:

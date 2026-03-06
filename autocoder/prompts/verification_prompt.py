@@ -26,11 +26,11 @@ Determine whether the output correctly follows the instructions and the output i
 
 Return JSON:
 
-{
+{{
     "is_valid": true/false,
     "errors": ["list of problems"],
     "code": "corrected code if needed"
-}
+}}
 """
 
 

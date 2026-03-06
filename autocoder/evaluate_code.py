@@ -144,11 +144,11 @@ def evaluate_generated_code(
     # --------------------------------------------
 
     forbidden_patterns = [
-        "import ",
+        # "import ",
         "exec(",
         "eval(",
-        "__import__",
-        "open(",
+        # "__import__",
+        # "open(",
         "compile("
     ]
 

@@ -1,8 +1,11 @@
 import os
 
 from dotenv import load_dotenv
+import requests
 
 load_dotenv()  # automatically finds .env in current directory or parents
+
+import bs4
 
 
 from autocoder.autocoder import (
@@ -49,7 +52,14 @@ config = ChatGPTClientConfig(
 
 class CalculatorValidator(BaseValidator):
     def validate(self, input_data: str, output_data: str = "", *args, **kwargs) -> ValidationResult:
-        
+        # List cities from the webpage, so we expect a list of cities as output
+        if not isinstance(output_data, list):
+            return ValidationResult(
+                is_valid=False,
+                errors=["Output data is not a list."]
+            )
+        return ValidationResult(is_valid=True)
+    
         # Calculate the sum of two numbers, so we expect a number as output
         try:
             float(output_data)
@@ -73,17 +83,22 @@ if os.path.exists(code_directory):
     
     
 autocoder = Autocoder(
-    input_data="24, 6, 8",
-    # input_data="https://en.wikipedia.org/wiki/List_of_municipalities_in_Tennessee",
-    process_prompt="Generate a function that can give me the cities off of a given webpage. It should return a list of cities.",
+    # input_data="24, 6, 8",
+    input_data="https://en.wikipedia.org/wiki/List_of_municipalities_in_Tennessee",
+    process_prompt="Generate a function that can give me the cities off of a given webpage. It should return a list of cities. The function should be able to handle any webpage, so it should not be hardcoded to the structure of the wikipedia page. You will be given a URL and you can use `bs4` and `requests` modules to accomplish this.",
     max_retries=20,
     client=ChatGPTClientFactory.create_client(config=config, api_key=api_key),
     validator=CalculatorValidator,
     config=AutocoderConfig(
         code_directory="/tmp/autocoder/code_generator",
-        
+        environment_settings=AutocoderEnvironment(
+            exposed_globals={
+                "requests": requests, 
+                "bs4": bs4
+            },
+        )
     ),
 )
     
 
-res = autocoder.process(on_event=lambda event: print(f"Event: {event}"))
+res = autocoder.process(on_event=lambda event: print(f"Event: {event}"), ai_verification_prompt="Please verify that the code correctly implements the functionality as described in the process prompt, and that it adheres to the constraints of the coding environment. If there are any issues with the code, please provide specific feedback on what is wrong and how to fix it.")

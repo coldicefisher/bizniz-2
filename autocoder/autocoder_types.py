@@ -27,7 +27,7 @@ class AutocoderAIVerificationResult(BaseModel):
 class AutocoderEnvironment(BaseModel):
     exposed_globals: dict = Field(default_factory=dict)
     exposed_builtins: dict = Field(default_factory=dict)
-    allowed_modules: dict = Field(default_factory=dict)
+    # allowed_modules: dict = Field(default_factory=dict)
 
 
     
