@@ -32,7 +32,7 @@ from autocoder.clients.chatgpt.types.response_format import ResponseFormat
 from autocoder.evaluate_code import evaluate_generated_code
 from autocoder.clients.base_ai_client import BaseAIClient
 
-from autocoder.autocoder_types import (
+from autocoder.types import (
     AutocoderProcessError,
     AutocoderBadAIResponseError,
     AutocoderProcessResult,

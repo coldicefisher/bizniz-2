@@ -3,6 +3,7 @@ autocoder/__init__.py
 autocoder/autocoder.py
 autocoder/base_validator.py
 autocoder/evaluate_code.py
+autocoder/types.py
 autocoder.egg-info/PKG-INFO
 autocoder.egg-info/SOURCES.txt
 autocoder.egg-info/dependency_links.txt

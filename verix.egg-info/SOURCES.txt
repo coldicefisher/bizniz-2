@@ -1,0 +1,7 @@
+pyproject.toml
+requirements.txt
+verix.egg-info/PKG-INFO
+verix.egg-info/SOURCES.txt
+verix.egg-info/dependency_links.txt
+verix.egg-info/requires.txt
+verix.egg-info/top_level.txt

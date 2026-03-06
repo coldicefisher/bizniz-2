@@ -1,3 +1,6 @@
+# autocoder/types.py
+
+
 import datetime
 
 from typing import Optional, Callable, Union, Any, Dict, List, Tuple, Literal
@@ -23,24 +26,7 @@ class AutocoderAIVerificationResult(BaseModel):
     code: Optional[str] = None
     errors: Optional[List[str]] = None  
 
-
-class AutocoderEnvironment(BaseModel):
-    exposed_globals: dict = Field(default_factory=dict)
-    exposed_builtins: dict = Field(default_factory=dict)
-    # allowed_modules: dict = Field(default_factory=dict)
-
-
-    
         
-
-class AutocoderConfig(BaseModel):
-    code_directory: str
-    filename: str = "generated_code.py"
-    module_name: Optional[str] = "code"
-    
-    configuration_directory: Optional[str] = "/tmp/autocoder/autocoder_config"
-    environment_settings: Optional[AutocoderEnvironment] = None
-    build_on_current_code: bool = True
     
 
 class AutocoderFailedError(BaseModel):
@@ -67,16 +53,6 @@ class AutocoderFailedError(BaseModel):
             
         return s
 
-
-class AutocoderEnvironmentErrorDetails(BaseModel):
-    stage: Optional[str] = None
-    type: str
-    message: str
-    line: Optional[int] = None
-    code_line: Optional[str] = None
-    traceback: Optional[str] = None
-    stdout: Optional[str] = None
-    stderr: Optional[str] = None   
     
 
 

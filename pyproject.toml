@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 
 [project]
-name = "autocoder"
+name = "verix"
 version = "0.1.0"
-description = "Autocoder system"
+description = "AI Coding system"
 requires-python = ">=3.10"
 authors = [
     {name = "Jamey Harris", email = "jameycharris@yahoo.com"},
@@ -18,7 +18,7 @@ dynamic = ["dependencies"]
 
 
 [tool.setuptools]
-packages = ["autocoder"]
+packages = ["verix"]
 
 
 [tool.setuptools.dynamic]
