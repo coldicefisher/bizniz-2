@@ -8,7 +8,7 @@ import uuid
 import inspect
 import sys
 import hashlib
-from datetime import datetime
+import datetime
 from pathlib import Path
 import re
 
@@ -22,102 +22,32 @@ from openai import AzureOpenAI, OpenAI
 
 from autocoder.base_validator import BaseValidator, ValidationResult
 
-from autocoder.prompts.repair_prompt import REPAIR_PROMPT
-from autocoder.prompts.verification_prompt import VERIFICATION_PROMPT
+from autocoder.prompts.repair_prompt import REPAIR_PROMPT, REPAIR_PROMPT_INSTRUCTIONS
+from autocoder.prompts.verification_prompt import VERIFICATION_PROMPT, VERIFICATION_PROMPT_INSTRUCTIONS
 from autocoder.prompts.generate_prompts import GENERATE_HEADER_PROMPT, GENERATE_TAIL_PROMPT
 
 from autocoder.clients.chatgpt.types.response_format import ResponseFormat
 from autocoder.evaluate_code import evaluate_generated_code
 from autocoder.clients.base_ai_client import BaseAIClient
 
+from autocoder.autocoder_types import (
+    AutocoderProcessError,
+    AutocoderBadAIResponseError,
+    AutocoderProcessResult,
+    AutocoderAIVerificationResult,
+    AutocoderEnvironment,
+    AutocoderConfig,
+    AutocoderFailedError,
+    AutocoderFailedErrorList,
+    AutocoderOnEventCallback,
+    AutocoderEnvironmentErrorDetails,
+)
 
-class AutocoderProcessError(Exception):
-    pass
-
-
-class AutocoderBadAIResponseError(AutocoderProcessError):
-    pass
-
-
-class AutocoderProcessResult(BaseModel):
-    code: Optional[str] = None
-    output: Optional[Any] = None
-
-
-class AutocoderAIVerificationResult(BaseModel):
-    is_valid: bool
-    code: Optional[str] = None
-    errors: Optional[List[str]] = None  
-
-
-class AutocoderEnvironment(BaseModel):
-    exposed_globals: dict = Field(default_factory=dict)
-    exposed_builtins: dict = Field(default_factory=dict)
-    allowed_modules: dict = Field(default_factory=dict)
-
-    
-
-class AutocoderConfig(BaseModel):
-    code_directory: str
-    filename: str = "generated_code.py"
-    module_name: Optional[str] = "code"
-    
-    configuration_directory: Optional[str] = "/tmp/autocoder/autocoder_config"
-    environment_settings: Optional[AutocoderEnvironment] = None
-    build_on_current_code: bool = True
-    
-
-class AutocoderFailedError(BaseModel):
-    error: str
-    code: str
-    failed_at: Literal["evaluation", "validation", "ai_verification"]
-    recommended_code_changes: Optional[str] = None
-    def __str__(self):
-        s = ""
-        
-        match self.failed_at:
-            case "evaluation":
-                s += f"Code evaluation failed with error: {self.error}"
-                
-            case "validation":
-                s += f"Code validation failed with error: {self.error}"
-                
-            case "ai_verification":
-                s += f"AI verification of results and code failed with error: {self.error}"
-        
-        s += f"\n\nCode:\n\n{self.code}"
-        if self.recommended_code_changes is not None:
-            s += f"\n\nRecommended code changes {'from AI' if self.failed_at == 'ai_verification' else ''}:\n\n{self.recommended_code_changes}"
-            
-        return s
-    
-    
-class AutocoderFailedErrorList(BaseModel):
-    errors: List[AutocoderFailedError]
-    
-    def __str__(self):
-        s = (
-            "The following errors have occured during the autocoding process in one of the three stages (`code evaluation`, `code validation using custom function`, `AI verification`).\n"
-            "Code evaluation is the first stage where the AI generated code is executed with a given input data. Validation is a custom function that tests the output of the code\n"
-            "against expected results. AI verification is where the AI reviews the code and its output for correctness.\n\n"
-        )
-        
-        for i, error in enumerate(self.errors):
-            s += f"Attempt {i+1}:\n{str(error)}\n\n"
-        return s
-    
-    def __iter__(self):
-        return super().__iter__()
-    
-    def __len__(self):
-        return super().__len__()
-    
-    def __getitem__(self, index):
-        return super().__getitem__(index)
-    
-    def append(self, error: AutocoderFailedError):
-        self.errors.append(error)
-    
+from autocoder.prompts.prompt_schemas import (
+    RepairPromptSchema,
+    VerificationPromptSchema,
+    GeneratePromptSchema,
+)
 
 class Autocoder:
     '''
@@ -146,18 +76,17 @@ class Autocoder:
                     validator: BaseValidator,
                     client: BaseAIClient,
                     
-                    
-                    
-                    on_status_message: Optional[Callable[[str], None]] = None,
-                    on_save_history: Optional[Callable[[str], None]] = None,
                     process_filter_function: Optional[Callable[[str], bool]] = None,
                     
                     max_retries: Optional[int] = 5,
                     config: Optional[AutocoderConfig] = None,
                     input_data: Optional[str] = None,
+                    
+                    on_event: Optional[Callable[[AutocoderOnEventCallback], None]] = None,
+                    on_status_message: Optional[Callable[[str], None]] = None,
                 ):
         
-        
+        self._input_data = None
         if isinstance(input_data, str):
             self.input_data = input_data.strip()
         elif input_data is None:
@@ -257,8 +186,8 @@ class Autocoder:
         
         # END CONFIG AND ENVIRONMENT SETTINGS /////////////////////////////////////////////////////////
         
+        self._on_event = on_event
         self._on_status_message = on_status_message
-        self._on_save_history = on_save_history
         self._process_filter_function = process_filter_function
         
         
@@ -334,17 +263,23 @@ class Autocoder:
     def process(self,
                 engage_ai_agent: bool = True,
                 ai_verification_prompt: str = None,
-                input_data: Optional[str] = None,
-                on_status_message: Optional[Callable[[str], None]] = None,
-                on_save_history: Optional[Callable[[str, str], None]] = None,
-                process_filter_function: Optional[Callable[[str], bool]] = None,
-                ) -> AutocoderProcessResult:
+                input_data: Optional[str] = None, # OPTIONAL - override the input data provided.
+                on_event: Optional[Callable[[AutocoderOnEventCallback], None]] = None, # Fired at key events of the process function, such as start and end of each stage, and on each retry attempt.
+                on_status_message: Optional[Callable[[str], None]] = None, # Fired at key points in the lifecycle of the process function. Useful for websockets.
+                on_save_code: Optional[Callable[[str], None]] = None, # Fired when new code is generated and ready to be saved. Provides the new code as a string. Useful for saving to disk or database, or for triggering other actions such as testing or deployment.
+                process_filter_function: Optional[Callable[[str], bool]] = None, # Used to filter out inputs to be processed - a short circuit if you will.
+    ) -> AutocoderProcessResult:
+        
         '''
         Uses the ChatGPTClient history every time. We must handle our own messages and history management. We leverage the ChatGPTClient interface
         '''
         if input_data is not None:
             self.input_data = input_data
             
+        if self._input_data is None:
+            raise AutocoderProcessError("No input data provided. Please provide input data to process.")
+        
+        
         all_errors: AutocoderFailedErrorList = AutocoderFailedErrorList(errors=[])
         
         # Helper INNER functions /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -355,12 +290,12 @@ class Autocoder:
             new_code_hash = hashlib.sha256(code.encode()).hexdigest() if code else None
             if not original_code or original_code_hash != new_code_hash:
                 
-                if on_save_history is None:
+                if on_save_code is None:
                     log("Saving new code to disk...")
                     self._save_code_to_file(code)
                 else:
-                    log("Saving new code via on_save_history callback...")
-                    on_save_history(code)    
+                    log("Saving new code via on_save_code callback...")
+                    on_save_code(code)    
             else:
                 log("Code unchanged, not saving.")
                 
@@ -371,19 +306,25 @@ class Autocoder:
                 output=output
             )
         
-        # Method primary data structures ///////////////////////////////////////////////////////////////////////////////////////////////////////////
         original_input_data = self._input_data
         
+        # Setup events
+        if on_event is not None:
+            self._on_event = on_event
+            
+        if on_status_message is not None:
+            self._on_status_message = on_status_message
         
-        if self._on_status_message is not None:
-            on_status_message = self._on_status_message
-            
-        if self._on_save_history is not None:
-            on_save_history = self._on_save_history
-            
+        # Filter out process filter function. This is a function that
+        # takes the original input data and returns a boolean indicating 
+        # whether the AI agent should be engaged or not. This allows 
+        # for short circuiting the process if certain conditions are met, 
+        # such as if the input data indicates that no processing is needed.
         if self._process_filter_function is not None:
             process_filter_function = self._process_filter_function
-            
+        
+        
+        # HELPER function to log status messages. For updates like to a websocket.
         def log(message: str):
             if on_status_message is not None:
                 on_status_message(message)
@@ -400,7 +341,7 @@ class Autocoder:
                     code=None,
                 )
 
-        # Setup
+        # Setup code and code prompt.
         original_code = None
         code_prompt = ""
         if "{input}" not in self._process_system_prompt:
@@ -440,8 +381,12 @@ class Autocoder:
             )
 
             if not evaluation.get("success", False):
-                error = evaluation.get("result", "Unknown execution error")
-                log(f"Code execution failed: {error}")
+                error = AutocoderEnvironmentErrorDetails.from_dict(evaluation.get("error", {}), stage=evaluation.get("stage"))
+                
+                if error is None:
+                    raise AutocoderProcessError("Code evaluation failed without providing an error message.")
+                
+                log(f"Code execution failed: {str(error)}")
 
                 if not engage_ai_agent:
                     return return_result(original_code=original_code, output=None, code=code)
@@ -562,7 +507,10 @@ class Autocoder:
                         "role": "system",
                         "content": system_prompt
                     }],
-                    messages=messages or []
+                    messages=messages or [],
+                    response_format=ResponseFormat.JSON_SCHEMA,
+                    schema=GeneratePromptSchema
+                    
                 )
                 
                 if not text or not text.strip():
@@ -572,20 +520,38 @@ class Autocoder:
                 json_response = json.loads(text)
                 
                 
-                return self._strip_code_block(json_response.get("code", ""))
+                out = self._strip_code_block(json_response.get("code", ""))
+                self.emit(AutocoderOnEventCallback(
+                    stage="generate",
+                    status="success",
+                    code=out,
+                    prompt=system_prompt,
+                    response=text,
+                    input_data=self._input_data,
+                    attempt=attempt
+                ))
+                return out
             
             except Exception as e:
                 last_error = e
                 continue
             
+        
+        self.emit(AutocoderOnEventCallback(
+            stage="generate",
+            status="failure",
+            code=None,
+            prompt=system_prompt,
+            response=text,
+            input_data=self._input_data,
+            attempt=attempts
+        ))
+        
         raise AutocoderBadAIResponseError(
             "Assistant failed after multiple attempts.\n"
             f"Last error: {last_error}"
         )
     
-    
-    
-
 
 
 
@@ -601,26 +567,38 @@ class Autocoder:
         if self._on_status_message is not None:
             self._on_status_message("Repairing code with error message: " + error_message)
 
-        repair_prompt = REPAIR_PROMPT.format(
-            instructions=self._process_system_prompt,
-            error_message=error_message,
-            previous_code=previous_code,
-            input_data=self._input_data
-        ) + GENERATE_TAIL_PROMPT
+
+        format_args = {
+            "error_message": error_message,
+            "previous_code": previous_code,
+            "input_data": self._input_data,
+        }
+        if "{instructions}" in REPAIR_PROMPT:
+            format_args["instructions"] = self._process_system_prompt
+
+        safe_args = {
+            k: v for k, v in format_args.items()
+            if f"{{{k}}}" in REPAIR_PROMPT
+        }
+
+        repair_prompt = REPAIR_PROMPT.format(**safe_args)
 
         last_error = None
 
         for attempt in range(1, self.max_retries + 1):
+            new_code = None
             try:
                 text, job_id = self._client.get_text(
                     instruction_messages=[{
                         "role": "system",
-                        "content": "You are an expert Python programmer tasked with fixing bugs in code. The user will provide you with the original instructions, the code you previously generated, the error message from executing that code, and the input data. You must fix the code to address the error message and produce valid code that meets the original instructions. If the error message indicates that the input data cannot be processed, you should determine that as well and respond accordingly."
+                        "content": REPAIR_PROMPT_INSTRUCTIONS
                     }],
                     messages=[{
                         "role": "user",
                         "content": repair_prompt
-                    }]
+                    }],
+                    response_format=ResponseFormat.JSON_SCHEMA,
+                    schema=RepairPromptSchema,
                 )
 
                 if not text or not text.strip():
@@ -629,8 +607,6 @@ class Autocoder:
 
                 if self._on_status_message is not None:
                     self._on_status_message(f"Repair attempt {attempt}: response received.")
-
-                print(f"Raw response from AI agent during repair: {text}")
 
                 try:
                     text = clean_llm_json(text)
@@ -646,15 +622,54 @@ class Autocoder:
                     last_error = "AI returned empty code during repair."
                     continue
 
+
+                self.emit(AutocoderOnEventCallback(
+                    stage="repair",
+                    status="success",
+                    code=new_code,
+                    prompt=repair_prompt,
+                    response=text,
+                    input_data=self._input_data,
+                    attempt=attempt
+                ))
                 return new_code
 
+
             except AutocoderProcessError:
+                self.emit(AutocoderOnEventCallback(
+                    stage="repair",
+                    status="failure",                     
+                    code=new_code,
+                    prompt=repair_prompt,
+                    response=text,
+                    input_data=self._input_data,
+                    attempt=attempt
+                ))
                 raise
 
             except Exception as e:
                 last_error = e
+                self.emit(AutocoderOnEventCallback(
+                    stage="repair",
+                    status="failure",
+                    code=new_code,
+                    prompt=repair_prompt,
+                    response=text,
+                    input_data=self._input_data,
+                    attempt=attempt
+                ))
                 continue
 
+
+        self.emit(AutocoderOnEventCallback(
+            stage="repair",
+            status="failure",
+            code=None,
+            prompt=repair_prompt,
+            response=text if 'text' in locals() else None,
+            input_data=self._input_data,
+            attempt=self.max_retries
+        ))
         raise AutocoderBadAIResponseError(
             "Assistant failed to provide valid repaired code after multiple attempts.\n"
             f"Last error: {last_error}"
@@ -662,24 +677,29 @@ class Autocoder:
 
     
     def _ai_verify_code(self, code: str, input_data: str, output: str) -> AutocoderAIVerificationResult:
-        verification_prompt = VERIFICATION_PROMPT.format(
-            instructions=self._process_system_prompt,
-            input=input_data,
-            output=output,
-            code=code
-        ) 
-        
+        kwargs = {
+            "code": code,
+            "input_data": input_data,
+            "output": output,
+        }
+        if "{instructions}" in VERIFICATION_PROMPT:
+            kwargs["instructions"] = self._process_system_prompt
+            
+        verification_prompt = VERIFICATION_PROMPT.format(**kwargs)
+        verification_prompt_instructions = VERIFICATION_PROMPT_INSTRUCTIONS
         for attempt in range(1, self.max_retries + 1):
             try:
                 text, job_id = self._client.get_text(
                     instruction_messages=[{
                         "role": "system",
-                        "content": verification_prompt
+                        "content": verification_prompt_instructions
                     }],
                     messages=[{
                         "role": "user",
                         "content": verification_prompt
-                    }]
+                    }],
+                    response_format=ResponseFormat.JSON_SCHEMA,
+                    schema=VerificationPromptSchema,
                 )
                 
                 if not text or not text.strip():
@@ -687,6 +707,16 @@ class Autocoder:
                 
                 text = clean_llm_json(text)
                 json_response = json.loads(text)
+                
+                self.emit(AutocoderOnEventCallback(
+                    stage="ai_verification",
+                    status="success",
+                    code=code,
+                    prompt=verification_prompt,
+                    response=text,
+                    input_data=self._input_data,
+                    attempt=attempt
+                ))
                 return AutocoderAIVerificationResult(
                     is_valid=json_response.get("is_valid", False),
                     code=json_response.get("code"),
@@ -696,6 +726,16 @@ class Autocoder:
             except Exception as e:
                 continue
             
+        
+        self.emit(AutocoderOnEventCallback(
+            stage="ai_verification",
+            status="failure",
+            code=code,
+            prompt=verification_prompt,
+            response=text if 'text' in locals() else None,
+            input_data=self._input_data,
+            attempt=self.max_retries
+        ))
         raise AutocoderBadAIResponseError(
             "Assistant failed to provide valid verification response after multiple attempts."
         )
@@ -773,7 +813,7 @@ class Autocoder:
                 existing_content = f.read()
 
             if existing_content.strip():
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
                 backup_name = f"{timestamp}_{filename}"
                 backup_path = os.path.join(cache_dir, backup_name)
                 shutil.move(file_path, backup_path)
@@ -798,6 +838,10 @@ class Autocoder:
         
         return inside.replace("python", "").strip()
 
+
+    def emit(self, event: AutocoderOnEventCallback):
+        if self._on_event:
+            self._on_event(event)
 
 
 def clean_llm_json(text: str) -> str:

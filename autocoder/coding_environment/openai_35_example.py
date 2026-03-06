@@ -1,5 +1,4 @@
 import os
-import shutil
 
 from dotenv import load_dotenv
 
@@ -63,9 +62,9 @@ class CalculatorValidator(BaseValidator):
             is_valid=False,
             errors=["Output data is not a number or None."]
         )
-
-
+    
 # nuke the code directory if it exists from previous runs
+import shutil
 code_directory = "/tmp/autocoder/code_generator"
 if os.path.exists(code_directory):
     shutil.rmtree(code_directory)

@@ -1,5 +1,4 @@
 import os
-import shutil
 
 from dotenv import load_dotenv
 
@@ -44,7 +43,7 @@ config = ChatGPTClientConfig(
     is_azure=False,
     api_base=None,
     available_models=None,
-    default_model='gpt-3.5-turbo',
+    default_model='gpt-4o-mini',
     config_file_path=None,
 )
 
@@ -63,9 +62,9 @@ class CalculatorValidator(BaseValidator):
             is_valid=False,
             errors=["Output data is not a number or None."]
         )
-
-
+    
 # nuke the code directory if it exists from previous runs
+import shutil
 code_directory = "/tmp/autocoder/code_generator"
 if os.path.exists(code_directory):
     shutil.rmtree(code_directory)
@@ -74,7 +73,7 @@ if os.path.exists(code_directory):
 autocoder = Autocoder(
     input_data="25 + 17",
     process_prompt="Generate Python code to add numbers. You must figure out how to parse the input data and return the result.",
-    max_retries=10,
+    max_retries=5,
     client=ChatGPTClientFactory.create_client(config=config, api_key=api_key),
     validator=CalculatorValidator,
     config=AutocoderConfig(

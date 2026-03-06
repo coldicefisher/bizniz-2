@@ -47,6 +47,16 @@ You should return a json response like this:
     "code": ""
 }}
 
+Return ONLY valid JSON.
+
+Do not include:
+- explanations
+- markdown
+- code fences
+- commentary
+
+The response must start with '{' and end with '}'.
+
 Do NOT hallucinate content. 
 
 """

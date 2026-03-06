@@ -274,7 +274,9 @@ class BaseChatGPTClient(BaseAIClient):
         message_history: Optional[MessageList] = None,
         message_history_filepath: Optional[str] = None,
         use_message_history: Optional[bool] = False,
-        message_history_limit: Optional[int] = 10
+        message_history_limit: Optional[int] = 10,
+        temperature: Optional[float] = 0.0,
+        schema: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, str]:
 
 
@@ -316,16 +318,13 @@ class BaseChatGPTClient(BaseAIClient):
             if hasattr(_response_format, "value"):
                 _response_format = _response_format.value
             
-            
-            print("Sending messages to AI agent: ")
-            print(str(message_with_history))
             output_messages: MessageList = self._create_completion(
                 messages=message_with_history,
                 max_tokens=max_tokens or self.max_tokens or 10_000,
-                response_format=_response_format
+                response_format=_response_format,
+                schema=schema,
+                temperature=temperature if temperature is not None else 0.0,
             )
-            print("Message List in get_text: ")
-            print(str(output_messages))
             
             job_id = None
             
@@ -368,7 +367,6 @@ class BaseChatGPTClient(BaseAIClient):
             
             # Get the content from the messages. If there are multiple messages, concatenate them together.
             content = "".join([m.content for m in output_messages if m.role == "assistant"])
-            print(f"Final content extracted from messages: {content}")
             return content, job_id
         
 

@@ -32,3 +32,6 @@ Return JSON:
     "code": "corrected code if needed"
 }
 """
+
+
+VERIFICATION_PROMPT_INSTRUCTIONS = "You are an expert code reviewer. You will be given a piece of code, the input data it was run with, and the output it produced. You will check the code, input, and output to ensure it matches the instructions and expectations of quality code. You will check the output against the input and verify it looks correct."
