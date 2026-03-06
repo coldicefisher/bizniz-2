@@ -442,6 +442,7 @@ class Autocoder:
 
                 
                 verification_response: AutocoderAIVerificationResult = self._ai_verify_code(
+                    verification_prompt=ai_verification_prompt,
                     code=code,
                     input_data=original_input_data,
                     output=output
@@ -682,16 +683,24 @@ class Autocoder:
         )
 
     
-    def _ai_verify_code(self, code: str, input_data: str, output: str) -> AutocoderAIVerificationResult:
-        kwargs = {
-            "code": code,
-            "input": input_data,
-            "output": output,
-        }
-        if "{instructions}" in VERIFICATION_PROMPT:
-            kwargs["instructions"] = self._process_system_prompt
+    def _ai_verify_code(self, verification_prompt: str, code: str, input_data: str, output: str) -> AutocoderAIVerificationResult:
+        # kwargs = {
+        #     "code": code,
+        #     "input": input_data,
+        #     "output": output,
+        # }
+        # if "{instructions}" in VERIFICATION_PROMPT:
+        #     kwargs["instructions"] = self._process_system_prompt
             
-        verification_prompt = VERIFICATION_PROMPT.format(**kwargs)
+        verification_prompt = f"""
+        {verification_prompt}
+        Input:
+        {input_data}
+        Output:
+        {output}
+        Code to verify:
+        {code}
+        """
         verification_prompt_instructions = VERIFICATION_PROMPT_INSTRUCTIONS
         for attempt in range(1, self.max_retries + 1):
             try:

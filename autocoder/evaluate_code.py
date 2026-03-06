@@ -77,6 +77,12 @@ def evaluate_generated_code(
     # Safe builtins
     # --------------------------------------------
 
+    # Also allow for importing of exposed modules
+    if exposed_globals:
+        for name, module in exposed_globals.items():
+            if isinstance(module, type(re)):
+                default_allowed_modules[name] = module
+                
     safe_builtins = {
 
         "__import__": make_safe_import(default_allowed_modules),

@@ -18,7 +18,7 @@ The code you generate will be executed in a restricted Python environment:
 {evaluation_environment}
 
 
-The following additional libraries will be available:
+The following additional libraries will be available WITHOUT IMPORTING:
 {additional_libraries}
 
 """

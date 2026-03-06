@@ -53,6 +53,9 @@ config = ChatGPTClientConfig(
 class CalculatorValidator(BaseValidator):
     def validate(self, input_data: str, output_data: str = "", *args, **kwargs) -> ValidationResult:
         # List cities from the webpage, so we expect a list of cities as output
+        print(f"Validating output: ")
+        print(f"{output_data}")
+        
         if not isinstance(output_data, list):
             return ValidationResult(
                 is_valid=False,
@@ -81,12 +84,14 @@ code_directory = "/tmp/autocoder/code_generator"
 if os.path.exists(code_directory):
     shutil.rmtree(code_directory)
     
-    
+
+url = "https://en.wikipedia.org/wiki/List_of_municipalities_in_Tennessee"
 autocoder = Autocoder(
     # input_data="24, 6, 8",
-    input_data="https://en.wikipedia.org/wiki/List_of_municipalities_in_Tennessee",
-    process_prompt="Generate a function that can give me the cities off of a given webpage. It should return a list of cities. The function should be able to handle any webpage, so it should not be hardcoded to the structure of the wikipedia page. You will be given a URL and you can use `bs4` and `requests` modules to accomplish this.",
-    max_retries=20,
+    input_data=url,
+    # process_prompt="Generate a function that can give me the cities off of a given webpage. It should return a list of cities. The function should be able to handle any webpage, so it should not be hardcoded to the structure of the wikipedia page. You will be given a URL and you can use `bs4` and `requests` modules to accomplish this.",
+    process_prompt="Generate a function that can give me the URLs off of a given webpage. It should return a list of URLs.",
+    max_retries=50,
     client=ChatGPTClientFactory.create_client(config=config, api_key=api_key),
     validator=CalculatorValidator,
     config=AutocoderConfig(
@@ -99,6 +104,16 @@ autocoder = Autocoder(
         )
     ),
 )
-    
 
-res = autocoder.process(on_event=lambda event: print(f"Event: {event}"), ai_verification_prompt="Please verify that the code correctly implements the functionality as described in the process prompt, and that it adheres to the constraints of the coding environment. If there are any issues with the code, please provide specific feedback on what is wrong and how to fix it.")
+response = requests.get(url)
+    
+webpage_snippet = "\n".join(response.text.splitlines()[:500])
+verify_prompt = f"""
+Please verify that the code is deisgned to extract URLs from a webpage and return them as a list. You will not know the structure of the webpage.
+Please use the following snippet of the webpage as a reference:
+
+{webpage_snippet}
+"""
+
+
+res = autocoder.process(on_event=lambda event: print(f"Event: {event}"), ai_verification_prompt=verify_prompt)
