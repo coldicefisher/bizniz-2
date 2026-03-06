@@ -16,7 +16,7 @@ from typing import Optional, Any, Union, List, Dict, Tuple, Callable
 
 from openai import BadRequestError, AuthenticationError, RateLimitError
 
-from autocoder.clients.chatgpt.messages import Message, MessageList
+from autocoder.clients.chatgpt.messages import Message, MessageList, normalize_messages
 from autocoder.clients.base_ai_client import BaseAIClient
 from autocoder.clients.chatgpt.types.response_format import ResponseFormat
 
@@ -263,71 +263,57 @@ class BaseChatGPTClient(BaseAIClient):
     # ------------------------------------------------------------------
     # PUBLIC API
     # ------------------------------------------------------------------
-
     def get_text(
         self,
-        instruction_messages: Union[MessageList, List[dict]],
         messages: Union[MessageList, List[dict]],
         max_tokens: Optional[int] = None,
         response_format: ResponseFormat = ResponseFormat.TEXT,
-        job_description=None,
+        job_description: Optional[str] = None,
         message_history: Optional[MessageList] = None,
         message_history_filepath: Optional[str] = None,
-        use_message_history: Optional[bool] = False,
+        use_message_history: bool = False,
         message_history_limit: Optional[int] = 10,
-        temperature: Optional[float] = 0.0,
+        temperature: float = 0.0,
         schema: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[str, str]:
+    ) -> Tuple[str, str, MessageList]:
 
-
+        # Initialize history if provided
         if message_history is not None or message_history_filepath is not None:
             self._set_message_history(message_history, message_history_filepath)
-        
-        try:
-            instruction_messages = self._normalize_messages(instruction_messages)
-            # Filter out any messages that are not system messages
-            instruction_messages = [m for m in instruction_messages if m["role"] == "system"]
-        except AttributeError:
-            pass  # Assume it's already a list of dicts
-        except Exception as e:
-            raise AutocoderClientError(f"Failed to process instruction messages: {e}")
-        
+
+        # Normalize input messages
         try:
             messages = self._normalize_messages(messages)
-        except AttributeError:
-            pass  # Assume it's already a list of dicts
         except Exception as e:
             raise AutocoderClientError(f"Failed to process messages: {e}")
-        
-        message_with_history = None
-        # If we are using message history, we want to limit the number of messages we include in the prompt to avoid hitting context length limits. We will include the most recent messages up to the limit.
-        if use_message_history:
-            _message_history = self._message_history[-message_history_limit:] if message_history_limit else self._message_history
-            message_with_history = instruction_messages + _message_history + messages
+
+        # Build message list with optional history
+        if use_message_history and self._message_history:
+
+            history = (
+                self._message_history[-message_history_limit:]
+                if message_history_limit
+                else list(self._message_history)
+            )
+
+            message_with_history = history + list(messages)
+
         else:
-            message_with_history = instruction_messages + messages
-        
-        message_with_history = self._normalize_messages(message_with_history)
-            
-        
-        # if model_name == 'o4-mini':
+            message_with_history = list(messages)
+
         try:
-        
-            _response_format = response_format
-            # If the response format is an enum, get the value
-            if hasattr(_response_format, "value"):
-                _response_format = _response_format.value
-            
+
+            _response_format = response_format.value if hasattr(response_format, "value") else response_format
+
             output_messages: MessageList = self._create_completion(
                 messages=message_with_history,
                 max_tokens=max_tokens or self.max_tokens or 10_000,
                 response_format=_response_format,
                 schema=schema,
-                temperature=temperature if temperature is not None else 0.0,
+                temperature=temperature,
             )
-            
-            job_id = None
-            
+
+            # Log request
             if self._db_client:
                 job_id = self._log_request(
                     model_name=self._model_name,
@@ -338,68 +324,63 @@ class BaseChatGPTClient(BaseAIClient):
                 )
             else:
                 job_id = str(uuid.uuid4())
-                
-            
-            # Add the messages to history. Filter out any system messages since those are not relevant to the history and can cause issues with context length.
-            
-            for m in output_messages:
-                # Skip system messages in the message history since those are instructions and not part of the conversation history.
-                if m.role != "system":
-                    self._message_history.append({
-                        "role": m.role,
-                        "content": m.content
-                    })
-                    
-            # If we have a callback, call it for each message in the response.
+
+            # ---------------------------------------
+            # Update message history
+            # ---------------------------------------
+
+            if use_message_history:
+
+                # Store assistant responses
+                for m in output_messages:
+                    if m.role != "system":
+                        self._message_history.append({
+                            "role": m.role,
+                            "content": m.content
+                        })
+
+                # Trim history if needed
+                if message_history_limit and len(self._message_history) > message_history_limit * 2:
+                    self._message_history = self._message_history[-message_history_limit * 2:]
+
+            # ---------------------------------------
+            # Callbacks
+            # ---------------------------------------
+
             if self.on_message_callback:
                 for message in output_messages:
-                    self.on_message_callback(Message(
-                        role=message.role, 
-                        content=message.content
-                    ))
-                    
-            # If we have a message history update callback, call it with the updated message history.
+                    self.on_message_callback(
+                        Message(role=message.role, content=message.content)
+                    )
+
             if self.on_message_history_update_callback:
                 self.on_message_history_update_callback(self._message_history)
-                    
-            # Save the message history to file if applicable.
+
+            # Persist history
             self._save_message_history_to_file()
-            
-            # Get the content from the messages. If there are multiple messages, concatenate them together.
-            content = "".join([m.content for m in output_messages if m.role == "assistant"])
-            return content, job_id
-        
+
+            # Combine assistant messages
+            content = "".join(
+                m.content for m in output_messages if m.role == "assistant"
+            )
+
+            return content, job_id, output_messages
 
         except AuthenticationError as e:
             raise OpenAIAuthError(str(e))
+
         except RateLimitError as e:
             raise OpenAIRateLimit(str(e))
+
         except BadRequestError as e:
             raise OpenAIInvalidRequest(str(e))
+
         except Exception as e:
             raise OpenAIClientError(f"Unknown error: {e}")
-        
 
 
-
-        
-        
+            
+            
         
     def _normalize_messages(self, messages):
-
-        if messages is None:
-            return None
-
-        if isinstance(messages, MessageList):
-            return messages.to_dict()
-
-        if isinstance(messages, list):
-            normalized = []
-            for m in messages:
-                if isinstance(m, Message):
-                    normalized.append(m.to_dict())
-                else:
-                    normalized.append(m)
-            return normalized
-
-        return messages
+        return normalize_messages(messages)

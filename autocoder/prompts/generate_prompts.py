@@ -7,9 +7,6 @@ must include that function; at the very least, it will call the function that yo
 from process should be inferred by the architecture described. IF the return should be JSON, infer that. Is string, infer that. 
 From there, follow the architecture requirements below.
 
-IMPORTANT RULES:
-- Do NOT use import statements.
-- Do NOT call globals(), locals(), or vars().
 
 EVALUATION ENVIRONMENT
 ──────────────────────────────────────────────────────────────
@@ -26,7 +23,7 @@ The following additional libraries will be available WITHOUT IMPORTING:
 extra = """
 VALIDATION CODE USED FOR THE OUTPUT CODE
 ──────────────────────────────────────────────────────────────
-The output code must validate against the following requirements, using the provided `validator.validate` function:
+The output code will be tested against the following:
 
 {validation_requirements}
 
@@ -37,9 +34,6 @@ GENERATE_TAIL_PROMPT = """
 RESPONSE FORMAT:
 ──────────────────────────────────────────────────────────────
 Your response MUST be JSON with a keys: 
-
-"code" containing the Python code generated.
-
 
 You should return a json response like this:
 

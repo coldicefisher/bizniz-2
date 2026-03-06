@@ -19,7 +19,6 @@ class BaseAIClient(ABC):
     @abstractmethod
     def get_text(
         self,
-        instruction_messages,
         messages,
         message_history: MessageList = None,
         message_history_filepath: str = None,

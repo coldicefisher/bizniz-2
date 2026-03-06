@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 from autocoder.clients.chatgpt.types.roles import Role
 from autocoder.clients.chatgpt.types.response_format import ResponseFormat
 
@@ -62,3 +62,22 @@ class MessageList:
         self.messages.append(Message(role, content))
 
     
+    
+def normalize_messages(messages: Union[List[Dict[str, Any]], List[Message], MessageList]) -> List[Dict[str, Any]]:
+    
+        if messages is None:
+            return None
+
+        if isinstance(messages, MessageList):
+            return messages.to_dict()
+
+        if isinstance(messages, list):
+            normalized = []
+            for m in messages:
+                if isinstance(m, Message):
+                    normalized.append(m.to_dict())
+                else:
+                    normalized.append(m)
+            return normalized
+
+        return messages

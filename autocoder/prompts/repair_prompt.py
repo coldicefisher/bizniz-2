@@ -1,7 +1,6 @@
 
 REPAIR_PROMPT_INSTRUCTIONS = """
-You are an expert Python programmer tasked with fixing bugs in code. The user will provide you with the original instructions, the code you 
-previously generated, the error message from executing that code, and the input data. You must fix the code to address the error message and 
+You are an expert Python programmer tasked with fixing bugs in code.  You must fix the code to address the error message and 
 produce valid code that meets the original instructions. If the error message indicates that the input data cannot be processed, you should 
 determine that as well and respond accordingly.
 
