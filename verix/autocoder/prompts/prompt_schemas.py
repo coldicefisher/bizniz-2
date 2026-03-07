@@ -3,9 +3,19 @@ GeneratePromptSchema = {
     "properties": {
         "code": {
             "type": "string"
+        },
+        "call_spec": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "args": {"type": "array", "items": {}},
+                "kwargs": {"type": "object"}
+            },
+            "required": ["symbol"],
+            "additionalProperties": False
         }
     },
-    "required": ["code"],
+    "required": ["code", "call_spec"],
     "additionalProperties": False
 }
 
@@ -14,11 +24,22 @@ RepairPromptSchema = {
     "properties": {
         "code": {"type": "string"},
         "analysis": {"type": "string"},
-        "fix_plan": {"type": "string"}
+        "fix_plan": {"type": "string"},
+        "call_spec": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "args": {"type": "array", "items": {}},
+                "kwargs": {"type": "object"}
+            },
+            "required": ["symbol"],
+            "additionalProperties": False
+        }
     },
-    "required": ["code", "analysis", "fix_plan"],
+    "required": ["code", "analysis", "fix_plan", "call_spec"],
     "additionalProperties": False
 }
+
 
 VerificationPromptSchema = {
     "type": "object",
@@ -28,8 +49,18 @@ VerificationPromptSchema = {
             "type": "array",
             "items": {"type": "string"}
         },
-        "code": {"type": "string"}
+        "code": {"type": "string"},
+        "call_spec": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "args": {"type": "array", "items": {}},
+                "kwargs": {"type": "object"}
+            },
+            "required": ["symbol"],
+            "additionalProperties": False
+        }
     },
-    "required": ["is_valid", "errors", "code"],
+    "required": ["is_valid", "errors", "code", "call_spec"],
     "additionalProperties": False
 }

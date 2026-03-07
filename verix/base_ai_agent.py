@@ -1,0 +1,268 @@
+from abc import ABC, abstractmethod
+import os
+
+import shutil
+import textwrap
+from enum import Enum
+from os import environ as env
+import json
+import uuid
+import inspect
+import sys
+import hashlib
+import datetime
+from pathlib import Path
+import re
+
+from typing import Optional, Callable, Union, Any, Dict, List, Tuple, Literal
+
+from pydantic import BaseModel, Field
+from pydantic import ValidationError
+
+
+from openai import AzureOpenAI, OpenAI
+
+
+from verix.autocoder.clients.chatgpt.messages import Message, MessageList, normalize_messages
+
+from verix.autocoder.clients.chatgpt.types.response_format import ResponseFormat
+from verix.autocoder.clients.base_ai_client import BaseAIClient
+
+from verix.autocoder.types import (
+    AutocoderProcessError,
+    AutocoderBadAIResponseError,
+    AutocoderProcessResult,
+    AutocoderAIVerificationResult,
+    AutocoderFailedError,
+    AutocoderFailedErrorList,
+    AutocoderOnEventCallback,
+    
+)
+
+from verix.environment.base_environment import BaseExecutionEnvironment
+from verix.environment.types import (
+    ExecutionCallSpec,
+    ExecutionEnvironmentResult,
+    ExecutionEnvironmentErrorDetails,
+    ExecutionTrace
+)
+from verix.workspace.base_workspace import BaseWorkspace
+
+
+class Autocoder:
+    '''
+    '''
+
+    def __init__(self, 
+                    
+                    client: BaseAIClient,
+                    environment: BaseExecutionEnvironment,
+                    workspace: BaseWorkspace, # REQUIRED: We need to be able to save and load files. This is key to our workflow.
+                    
+                    max_message_history_length: Optional[int] = 20, # The maximum number of messages to keep in the message history. 
+                    max_retries: Optional[int] = 5,
+                    
+                    # EVENTS AND CALLBACKS
+                    on_event: Optional[Callable[[AutocoderOnEventCallback], None]] = None,
+                    on_status_message: Optional[Callable[[str], None]] = None,
+                    
+                ):
+        
+        
+        # Instantiation Guards ////////////////////////////////////////////////////////////////////////////
+        if not isinstance(environment, BaseExecutionEnvironment) or issubclass(type(environment), BaseExecutionEnvironment):
+            raise ValueError("environment must be an instance of a class that inherits from BaseExecutionEnvironment.")
+        
+        if not isinstance(client, BaseAIClient) or issubclass(type(client), BaseAIClient):
+            raise ValueError("client must be an instance of a class that inherits from BaseAIClient.")
+        
+        if not isinstance(max_message_history_length, int) or max_message_history_length <= 0:
+            raise ValueError("max_message_history_length must be a positive integer.")
+        
+        if not isinstance(max_retries, int) or max_retries <= 0:
+            raise ValueError("max_retries must be a positive integer.")
+        # End Instantiation Guards ////////////////////////////////////////////////////////////////////////////
+        
+        # Encapsulation of protected attributes.
+        self._client = client
+        self._environment = environment
+        self._workspace = workspace
+        
+        
+        self.max_retries = max_retries
+        self._max_message_history_length = max_message_history_length
+        
+        
+        
+        # SETUP EVENTS AND CALLBACKS ////////////////////////////////////////////////////////////////////////
+        # General event callback for all stages of the process. Provides a unified interface for handling events.
+        self._on_event = on_event 
+         # Callback specifically for status messages, which can be used for real-time updates in a UI or websocket.
+        self._on_status_message = on_status_message
+        
+        
+        
+        # ///////////////////////////////////////////////////////////////////////////
+        # Setup messages history.
+        self._message_history: List[dict] = []
+        # Append the system prompt to the front of the messages history for context. This is important for the AI to understand the instructions and requirements.
+        self.add_messages_to_history([{
+            "role": "system",
+            "content": self._process_system_prompt  
+        }])
+        
+        
+    # END CONSTURUCTOR ////////////////////////////////////////////////////////////////////////////
+    
+    
+        
+    # ATTRIBUTES AND PROPERTIES ////////////////////////////////////////////////////////////////////////////    
+    @property
+    def message_history(self) -> List[dict]:
+        '''
+        Returns history with truncation. The system prompt is always included at the front.
+        '''
+        MAX_HISTORY = self._max_message_history_length
+        _history = self._message_history
+        
+        if len(_history) > MAX_HISTORY:
+            # Include the first message
+            truncated_history = _history[:1] + _history[-(MAX_HISTORY-1):]
+            return truncated_history
+        
+        return _history
+    
+    
+    
+    # Caching Code //////////////////////////////////////////////////////////////////
+    
+    
+    # Do all the backups in one place and saving here.
+    def _save_code_to_file(self, code: str, filename: str, prompt: Optional[str] = None):
+        """
+        Save code to the filename provided in the workspace. If a file with the same name already exists, back it up to a cached/ directory with a timestamp before saving the new code.
+        
+        """
+
+        full_path = self._workspace.path(filename)
+        file_dir = os.path.dirname(full_path)   
+
+        cache_dir = os.path.join(file_dir, "cached")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        if not filename.endswith(".py"):
+            filename += ".py"
+
+        # Sanitize filename once (safe-guard)
+        filename = (
+            filename
+                .replace(" ", "_")
+                .replace("/", "_")
+                .replace("\\", "_")
+                .replace("..", "_")
+                .replace("~", "_")
+                .replace(":", "_")
+                .replace("*", "_")
+                .replace("?", "_")
+                .replace("\"", "_")
+                .replace("<", "_")
+                .replace(">", "_")
+                .replace("|", "_")
+                .replace("-", "_")
+                .replace("--", "_")
+        )
+
+        cached_file_path = os.path.join(cache_dir, filename)
+
+        # Backup existing file if it exists and is non-empty
+        if os.path.exists(cached_file_path):
+            with open(cached_file_path, "r") as f:
+                existing_content = f.read()
+
+            if existing_content.strip():
+                timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+                backup_name = f"{timestamp}_{filename}"
+                backup_path = os.path.join(cache_dir, backup_name)
+                shutil.move(cached_file_path, backup_path)
+                
+        
+        # Get the autocoder metadata.
+        # Split the problem statement by 100 character chunks for easier reading.
+        problem_statement_lines = []
+        if prompt is not None:
+            problem_statement_lines = textwrap.wrap(prompt, width=100)
+            
+        with open(full_path, "w") as f:
+            # Write the problem statement as a comment at the top of the file for context. This is 
+            # helpful for understanding the code later, especially if the filename is not descriptive.    
+            if prompt is not None:  
+                f.write(f'"""\n')
+                f.write(f"Problem Statement:\n")
+                f.write(f'{"=" * int(len("Problem Statement:") * 1.5)}\n')
+                for line in problem_statement_lines:
+                    f.write(f"# {line}\n")
+                
+                f.write(f"=" * 100 + "\n")
+                f.write(f'"""\n\n')
+            
+            # Write the code
+            f.write(code)
+
+        os.chmod(full_path, 0o666)
+
+    
+    
+    def _strip_code_block(self, text: str) -> str:
+        if "```" not in text:
+            return text.strip()
+        inside = None
+        parts = text.split("```")
+        if len(parts) >= 3:
+            inside = parts[1]
+
+        if inside is None:
+            return text.strip()
+        
+        return inside.replace("python", "").strip()
+
+
+
+
+    def emit(self, event: AutocoderOnEventCallback):
+        if self._on_event:
+            self._on_event(event)
+
+
+
+    def add_messages_to_history(self, messages: Union[List[Union[Message, dict]], MessageList], throw_error_on_invalid: bool = False):
+        normalized_messages = normalize_messages(messages)
+        # Only allow one system message at the beginning of the history. 
+        
+        current_system_messages = [m for m in self._message_history if m.get("role") == "system"]   
+        
+        for message in normalized_messages:
+            is_valid: bool = True
+            if not isinstance(message, dict):
+                is_valid = False
+              
+            if is_valid:
+                # Check that if the message is a system message, it is only added if there are no other system messages in the history.
+                if message.get("role") == "system":
+                    if len(current_system_messages) > 0:
+                        is_valid = False
+                    
+            
+            if is_valid:
+                if message.get("role") == "system":
+                    self._message_history.insert(0, message)
+                else:
+                    self._message_history.append(message)
+
+
+
+    @property
+    def get_metadata(self, prompt: str) -> Dict[str, Any]:
+        return {
+            "problem_statement": prompt,
+        }
+        
