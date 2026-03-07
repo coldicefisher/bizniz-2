@@ -23,6 +23,17 @@ class ExecutionEnvironmentErrorDetails(BaseModel):
     line: Optional[int] = None
     code_line: Optional[str] = None
     traceback: Optional[str] = None
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any], stage: Optional[str] = None) -> 'ExecutionEnvironmentErrorDetails':
+        return ExecutionEnvironmentErrorDetails(
+            stage=stage,
+            type=data.get("type", "UnknownError"),
+            message=data.get("message", "No error message provided."),
+            line=data.get("line"),
+            code_line=data.get("code_line"),
+            traceback=data.get("traceback")
+        )
 
     
 

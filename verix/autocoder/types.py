@@ -34,28 +34,8 @@ class AutocoderFailedError(BaseModel):
     code: str
     failed_at: Literal["evaluation", "validation", "ai_verification"]
     recommended_code_changes: Optional[str] = None
-    def __str__(self):
-        s = ""
-        
-        match self.failed_at:
-            case "evaluation":
-                s += f"Code evaluation failed with error: {self.error}"
-                
-            case "validation":
-                s += f"Code validation failed with error: {self.error}"
-                
-            case "ai_verification":
-                s += f"AI verification of results and code failed with error: {self.error}"
-        
-        s += f"\n\nCode:\n\n{self.code}"
-        if self.recommended_code_changes is not None:
-            s += f"\n\nRecommended code changes {'from AI' if self.failed_at == 'ai_verification' else ''}:\n\n{self.recommended_code_changes}"
-            
-        return s
-
     
-
-
+    
     @classmethod
     def from_dict(cls, d: dict, stage: Optional[str] = None):
         _stage = d.get("stage", stage)
@@ -93,14 +73,6 @@ class AutocoderFailedError(BaseModel):
     
     
 class AutocoderOnEventCallback(BaseModel):
-    # event: Literal[
-    #     'generate_start', 'generate_success', 'generate_failure',
-    #     'evaluation_start', 'evaluation_success', 'evaluation_failure',
-    #     'validation_start', 'validation_success', 'validation_failure',
-    #     'ai_verification_start', 'ai_verification_success', 'ai_verification_failure',
-    #     'repair_start', 'repair_success', 'repair_failure',
-    #     'success' 
-    # ]
     stage: Literal["generate", "evaluation", "validation", "ai_verification", "repair", "process"]
     status: Literal["start", "success", "failure"]
     attempt: Optional[int] = None

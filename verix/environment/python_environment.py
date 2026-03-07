@@ -127,6 +127,9 @@ class PythonSandboxExecutionEnvironment(BaseExecutionEnvironment):
         call_spec: ExecutionCallSpec
     ) -> ExecutionEnvironmentResult:
 
+        # Convert call_spec args to class if dict (for backward compatibility)
+        if isinstance(call_spec, dict):
+            call_spec = ExecutionCallSpec(**call_spec)
 
         traces = []    
         self.trace_event(traces, "sandbox_started", "Starting sandbox execution")

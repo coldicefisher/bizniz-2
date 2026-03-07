@@ -49,6 +49,11 @@ class DockerExecutionEnvironment(BaseExecutionEnvironment):
         workspace: Optional[BaseWorkspace] = None,
     ) -> ExecutionEnvironmentResult:
 
+        # Convert call_spec args to class if dict (for backward compatibility)
+        if isinstance(call_spec, dict):
+            call_spec = ExecutionCallSpec(**call_spec)
+
+        
         try:
 
             tmpdir = tempfile.mkdtemp(prefix="run_", dir=self.EXEC_ROOT)

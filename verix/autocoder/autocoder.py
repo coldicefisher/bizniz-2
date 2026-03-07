@@ -21,35 +21,42 @@ from pydantic import ValidationError
 
 from openai import AzureOpenAI, OpenAI
 
-from autocoder.base_validator import BaseValidator, ValidationResult
+from verix.autocoder.base_validator import BaseValidator, ValidationResult
 
-from autocoder.clients.chatgpt.messages import Message, MessageList, normalize_messages
-from autocoder.prompts.repair_prompt import REPAIR_PROMPT, REPAIR_PROMPT_INSTRUCTIONS
-from autocoder.prompts.verification_prompt import VERIFICATION_PROMPT, VERIFICATION_PROMPT_INSTRUCTIONS
-from autocoder.prompts.generate_prompts import GENERATE_HEADER_PROMPT, GENERATE_TAIL_PROMPT
+from verix.autocoder.clients.chatgpt.messages import Message, MessageList, normalize_messages
+from verix.autocoder.prompts.repair_prompt import REPAIR_PROMPT, REPAIR_PROMPT_INSTRUCTIONS
+from verix.autocoder.prompts.verification_prompt import VERIFICATION_PROMPT, VERIFICATION_PROMPT_INSTRUCTIONS
+from verix.autocoder.prompts.generate_prompts import GENERATE_HEADER_PROMPT, GENERATE_TAIL_PROMPT
 
-from autocoder.clients.chatgpt.types.response_format import ResponseFormat
-from autocoder.evaluate_code import evaluate_generated_code
-from autocoder.clients.base_ai_client import BaseAIClient
+from verix.autocoder.clients.chatgpt.types.response_format import ResponseFormat
+# from verix.autocoder.evaluate_code import evaluate_generated_code
+from verix.autocoder.clients.base_ai_client import BaseAIClient
 
-from autocoder.types import (
+from verix.autocoder.types import (
     AutocoderProcessError,
     AutocoderBadAIResponseError,
     AutocoderProcessResult,
     AutocoderAIVerificationResult,
-    AutocoderEnvironment,
-    AutocoderConfig,
     AutocoderFailedError,
     AutocoderFailedErrorList,
     AutocoderOnEventCallback,
-    AutocoderEnvironmentErrorDetails,
+    
 )
 
-from autocoder.prompts.prompt_schemas import (
+from verix.autocoder.prompts.prompt_schemas import (
     RepairPromptSchema,
     VerificationPromptSchema,
     GeneratePromptSchema,
 )
+from verix.environment.base_environment import BaseExecutionEnvironment
+from verix.environment.types import (
+    ExecutionCallSpec,
+    ExecutionEnvironmentResult,
+    ExecutionEnvironmentErrorDetails,
+    ExecutionTrace
+)
+from verix.workspace.base_workspace import BaseWorkspace
+
 
 class Autocoder:
     '''
@@ -73,147 +80,69 @@ class Autocoder:
 
     def __init__(self, 
                     
-                    validator: BaseValidator,
                     client: BaseAIClient,
-                    
-                    process_filter_function: Optional[Callable[[str], bool]] = None,
-                    
+                    environment: BaseExecutionEnvironment,
+                    workspace: BaseWorkspace, # REQUIRED: We need to be able to save and load files. This is key to our workflow.
                     max_retries: Optional[int] = 5,
-                    config: Optional[AutocoderConfig] = None,
-                    input_data: Optional[str] = None,
+                    
+                    configuration_directory: Optional[str] = None,
+                    
                     
                     on_event: Optional[Callable[[AutocoderOnEventCallback], None]] = None,
                     on_status_message: Optional[Callable[[str], None]] = None,
                 ):
         
-        self._input_data = None
-        if isinstance(input_data, str):
-            self.input_data = input_data.strip()
-        elif input_data is None:
-            pass
-        else:
-            raise ValueError("input_data must be a string.")
         
-        self._client = client
+        # Instantiation Guards ////////////////////////////////////////////////////////////////////////////
+        if not isinstance(environment, BaseExecutionEnvironment) or issubclass(type(environment), BaseExecutionEnvironment):
+            raise ValueError("environment must be an instance of a class that inherits from BaseExecutionEnvironment.")
         
         if not inspect.isclass(validator):
             raise AutocoderProcessError("Validator must be a class that inherits from BaseValidator, not an instance.")
         if not issubclass(validator, BaseValidator):
             raise AutocoderProcessError("Validator must be a class that inherits from BaseValidator.")
         
-        self._validator = validator
+        if not isinstance(client, BaseAIClient) or issubclass(type(client), BaseAIClient):
+            raise ValueError("client must be an instance of a class that inherits from BaseAIClient.")
         
-        # SETUP CONFIG AND ENVIRONMENT SETTINGS /////////////////////////////////////////////////////////
-        # Normalize config ONCE
-        if config is None:
-            config = AutocoderConfig()
-        elif isinstance(config, dict):
-            config = AutocoderConfig.model_validate(config)
-
-        self._config = config
-
-        # Extract environment settings WITHOUT recreating
-        if self._config.environment_settings is None:
-            self._environment_settings = AutocoderEnvironment()
-        else:
-            self._environment_settings = self._config.environment_settings
-
-                
+        
+        # End Instantiation Guards ////////////////////////////////////////////////////////////////////////////
+        
+        # Encapsulation of protected attributes.
+        self._client = client
+        self._environment = environment
+        self._workspace = workspace
+        
         
         self.max_retries = max_retries
         
-        # Ensure filename is not None
-        if self._config.filename is None:
-            self._config.filename = f"generated_code.py"
-        # Set the filename.
-        if not self._config.filename.endswith(".py"):
-            self._config.filename += ".py"
-        # Replace stupid characters in filename
-        self._config.filename = (
-            self._config.filename
-                .replace(" ", "_")
-                .replace("/", "_")
-                .replace("\\", "_")
-                .replace("..", "_")
-                .replace("~", "_")
-                .replace(":", "_")
-                .replace("*", "_")
-                .replace("?", "_")
-                .replace("\"", "_")
-                .replace("<", "_")
-                .replace(">", "_")
-                .replace("|", "_")
-                .replace("-", "_")
-                .replace("--", "_")
-        )
         
-        # Resolve code directory
-        config_path = Path(config.code_directory)
-        if not config_path.is_absolute():
-            config_path = Path.cwd() / config_path
-                
-        self._config.code_directory = os.path.abspath(config_path)
-            
-        
-        # Ensure code_directory directory exists
-        os.makedirs(self._config.code_directory, exist_ok=True)
-        # Ensure module_name directory exists
-        if config.module_name is None:
-            raise AutocoderProcessError("module_name must be provided in the config. Cannot be None.")
-        
-        module_path = os.path.join(self._config.code_directory, self._config.module_name)
-        os.makedirs(module_path, exist_ok=True)
-
-        # Create the code file if it does not exist
-        code_file_path = os.path.join(module_path, self._config.filename)
-        if not os.path.exists(code_file_path):
-            with open(code_file_path, "w") as f:
-                f.write("")
-            os.chmod(code_file_path, 0o666)
-            
-            
+        # SETUP CONFIG AND ENVIRONMENT SETTINGS /////////////////////////////////////////////////////////
         
         # Resolve configuration directory
-        config_dir_path = Path(self._config.configuration_directory)
+        self._configuration_directory = configuration_directory
+        config_dir_path = Path(self._configuration_directory)
         if not config_dir_path.is_absolute():
             config_dir_path = Path.cwd() / config_dir_path
                 
-        self._config.configuration_directory = os.path.abspath(config_dir_path)
-            
+        self._configuration_directory = os.path.abspath(config_dir_path)
         
         # Ensure configuration_directory exists
-        os.makedirs(self._config.configuration_directory, exist_ok=True)
+        os.makedirs(self._configuration_directory, exist_ok=True)
         
         # END CONFIG AND ENVIRONMENT SETTINGS /////////////////////////////////////////////////////////
         
-        self._on_event = on_event
+        # SETUP EVENTS AND CALLBACKS ////////////////////////////////////////////////////////////////////////
+        # General event callback for all stages of the process. Provides a unified interface for handling events.
+        self._on_event = on_event 
+         # Callback specifically for status messages, which can be used for real-time updates in a UI or websocket.
         self._on_status_message = on_status_message
-        self._process_filter_function = process_filter_function
         
         
-        
-        
-        # We also need to get the code environment and add that to the prompt
-        evaluate_code_module = sys.modules[evaluate_generated_code.__module__]
-        evaluate_code_source = inspect.getsource(evaluate_code_module)
-        evaluate_code_source = evaluate_code_source.replace("{", "{{").replace("}", "}}")  # Escape braces for format string
-        
-        # The code should be added during the `process` method. We have to repair the code.
-        
-        # We need to add the allowed modules and exposed globals and builtins to the prompt as well
-        additional_libraries = ""
-        # for k, v in self._environment_settings.allowed_modules.items():
-        #     additional_libraries += f"- {k}\n"
-            
-        for k, v in self._environment_settings.exposed_globals.items():
-            additional_libraries += f"- {k}\n"
-
-
         
         formatted_header_prompt = GENERATE_HEADER_PROMPT.format(
             # evaluation_environment=evaluate_code_source,
-            # evaluation_environment=evaluation_environment,
-            additional_libraries=additional_libraries,
+            evaluation_environment=environment.describe(),
             validation_requirements=self._get_validator_description(),
         )
         
@@ -230,6 +159,9 @@ class Autocoder:
         }])
         
         
+    # END CONSTURUCTOR ////////////////////////////////////////////////////////////////////////////
+    
+    
         
     def _get_validator_description(self) -> str:
         '''
@@ -301,26 +233,26 @@ class Autocoder:
     
     def process(self,
                 process_prompt: str,
-                engage_ai_agent: bool = True,
-                ai_verification_prompt: str = None,
-                input_data: Optional[str] = None, # OPTIONAL - override the input data provided.
+                filename: str,        
+                
+                
+                # EVENTS AND CALLBACKS
                 on_event: Optional[Callable[[AutocoderOnEventCallback], None]] = None, # Fired at key events of the process function, such as start and end of each stage, and on each retry attempt.
                 on_status_message: Optional[Callable[[str], None]] = None, # Fired at key points in the lifecycle of the process function. Useful for websockets.
                 on_save_code: Optional[Callable[[str], None]] = None, # Fired when new code is generated and ready to be saved. Provides the new code as a string. Useful for saving to disk or database, or for triggering other actions such as testing or deployment.
-                process_filter_function: Optional[Callable[[str], bool]] = None, # Used to filter out inputs to be processed - a short circuit if you will.
+                
     ) -> AutocoderProcessResult:
         
         '''
         Uses the ChatGPTClient history every time. We must handle our own messages and history management. We leverage the ChatGPTClient interface
         '''
-        if input_data is not None:
-            self.input_data = input_data
+        
+        # Setup events ////////////////////////////////////////////////////////////////////
+        if on_event is not None:
+            self._on_event = on_event
             
-        if self._input_data is None:
-            raise AutocoderProcessError("No input data provided. Please provide input data to process.")
-        
-        
-        all_errors: AutocoderFailedErrorList = AutocoderFailedErrorList(errors=[])
+        if on_status_message is not None:
+            self._on_status_message = on_status_message
         
         # Helper INNER functions /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         def return_result(original_code: str, output: Optional[str], code: Optional[str]) -> AutocoderProcessResult:
@@ -330,10 +262,11 @@ class Autocoder:
             new_code_hash = hashlib.sha256(code.encode()).hexdigest() if code else None
             if not original_code or original_code_hash != new_code_hash:
                 
-                if on_save_code is None:
-                    log("Saving new code to disk...")
-                    self._save_code_to_file(code)
-                else:
+                
+                log("Saving new code to disk...")
+                self._save_code_to_file(code, filename)
+                
+                if on_save_code is not None:
                     log("Saving new code via on_save_code callback...")
                     on_save_code(code)    
             else:
@@ -346,185 +279,75 @@ class Autocoder:
                 output=output
             )
         
-        _input_data = self._input_data
-        
-        # Setup events
-        if on_event is not None:
-            self._on_event = on_event
-            
-        if on_status_message is not None:
-            self._on_status_message = on_status_message
-        
-        # Filter out process filter function. This is a function that
-        # takes the original input data and returns a boolean indicating 
-        # whether the AI agent should be engaged or not. This allows 
-        # for short circuiting the process if certain conditions are met, 
-        # such as if the input data indicates that no processing is needed.
-        if self._process_filter_function is not None:
-            process_filter_function = self._process_filter_function
-        
-        
         # HELPER function to log status messages. For updates like to a websocket.
         def log(message: str):
             if on_status_message is not None:
                 on_status_message(message)
                 
-            
-
+        # END Helper INNER functions /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         
-        # Step 1: Native support short circuit
-        if process_filter_function is not None:
-            if process_filter_function(_input_data):
-                log("Process filter function indicates native support. Bypassing AI processing.")
-                return AutocoderProcessResult(
-                    output=_input_data,
-                    code=None,
-                )
-
+        
+            
         # Setup code and code prompt.
-        original_code = None
+        cached_code = None
+        working_code = None
+        call_spec = None
         formatted_process_prompt = ""
-        if "{input}" not in process_prompt:
-            formatted_process_prompt = process_prompt.format(
-                input=_input_data
-            )
+        formatted_process_prompt = process_prompt
+        
+        
+        # Step 2: Load filename from workspace. If it doesn't exist, generate code with AI agent if enabled. If AI agent is not enabled, return error.
+        if self._workspace.exists(filename=filename):
+            log(f"Loading existing code for {filename} from workspace...")
+            cached_code = self._workspace.read_file(path=filename)
             
-        else:
-            formatted_process_prompt = process_prompt
-        
-        
-        # Step 2: Load cached processor OR request initial generation
-        code, code_filename = self.retrieve_saved_code()
-        original_code = code or ""
 
-        if not code or not code.strip():
-            # If NOT engageing AI agent, cannot proceed
-            if not engage_ai_agent:
-                raise AutocoderProcessError(f"No cached {self._config.module_name} available, and AI agent engagement is disabled.")
             
-            log("Requesting initial code from AI...")
-            try:
-                code = self._generate_code(
-                    messages=[Message(role="user", content=formatted_process_prompt)]
-                )
-            
-            except Exception as e:
-                code = "ERROR: Failed to generate initial code from AI. " + str(e)
-        # Instantiate the validator IF the class is passed. Double redundancy..
-        _validator: BaseValidator = self._validator() if inspect.isclass(self._validator) else self._validator
+        log("Requesting initial code from AI...")
+        try:
+            working_code, call_spec = self._generate_code(
+                messages=[Message(role="user", content=formatted_process_prompt)]
+            )
         
+        except Exception as e:
+            working_code = "ERROR: Failed to generate initial code from AI. " + str(e)
+            
+            
         
         # Step 3: Evaluation and repair loop
         for attempt in range(1, self.max_retries + 1):
             log(f"Evaluation attempt {attempt}/{self.max_retries}")
 
-            evaluation = evaluate_generated_code(
-                code=code, input_data=_input_data,
-                exposed_builtins=self._environment_settings.exposed_builtins if self._environment_settings else None,
-                exposed_globals=self._environment_settings.exposed_globals if self._environment_settings else None
+            evaluation = self._environment.execute(
+                code=working_code,
+                call_spec=call_spec
             )
-
             if not evaluation.get("success", False):
-                error = AutocoderEnvironmentErrorDetails.from_dict(evaluation.get("error", {}), stage=evaluation.get("stage"))
+                error = ExecutionEnvironmentErrorDetails.from_dict(evaluation.get("error", {}), stage=evaluation.get("stage"))
                 
                 if error is None:
                     raise AutocoderProcessError("Code evaluation failed without providing an error message.")
                 
                 log(f"Code execution failed: {str(error)}")
 
-                if not engage_ai_agent:
-                    return return_result(original_code=original_code, output=None, code=code)
-
-                all_errors.append(AutocoderFailedError(
-                    error=str(error),
-                    code=code,
-                    failed_at="evaluation"
-                ))
+                
                 code = self._repair_code(
                     previous_code=code,
-                    error_message=str(all_errors),
+                    error_message=str(error),
                 )
                 
                 continue
 
             output = evaluation.get("result")
 
-            
-            # Manual validation
-            
-            validation = _validator.validate(
-                input_data=_input_data,
-                output_data=output,
-            )
-
-            if not validation.is_valid:
-                log(f"Manual validation failed: {validation.errors}")
-
-                if not engage_ai_agent:
-                    return return_result(original_code=original_code, output=None, code=code)
-
-                log(f"Repairing {self._config.module_name} based on validation errors using AI agent...")
-                all_errors.append(AutocoderFailedError(
-                    error=str(validation.errors),
-                    code=code,
-                    failed_at="validation"
-                ))
-                code = self._repair_code(
-                    previous_code=code,
-                    error_message=str(all_errors)
-                )
-                
-                continue
-
-            
-            # AI verification IF enabled
-            if ai_verification_prompt is not None and isinstance(ai_verification_prompt, str) and ai_verification_prompt.strip():
-                log("Running AI verification...")
-
-                
-                verification_response: AutocoderAIVerificationResult = self._ai_verify_code(
-                    verification_prompt=ai_verification_prompt,
-                    code=code,
-                    input_data=_input_data,
-                    output=output
-                    
-                )                
-                if not verification_response.is_valid:
-                    log("AI verification failed.")
-                    errors = (
-                        "\n".join(verification_response.errors)
-                        if verification_response.errors
-                        else "No error details provided."
-                    )
-
-                    recommended = (
-                        verification_response.code
-                        if verification_response.code
-                        else "No recommended code provided."
-                    )
-
-                    all_errors.append(AutocoderFailedError(
-                        error=f"AI verification failed with errors:\n{errors}\n\nRecommended code changes: {recommended}",
-                        code=code,
-                        failed_at="ai_verification",
-                        recommended_code_changes=recommended
-                    ))
-                    code = self._repair_code(
-                        previous_code=code,
-                        error_message=str(all_errors)
-                    )
-                    
-                    continue
-
-
             # Success
-            log(f"Processing {self._config.module_name} successful.")
-            return return_result(original_code=original_code, output=output, code=code)
+            log(f"Processing {filename} successful.")
+            return return_result(original_code=cached_code, output=output, code=code)
 
 
         # Step 4: Exhausted retries
         raise AutocoderProcessError(
-            f"Unable to produce valid {self._config.module_name} after {self.max_retries} attempts."
+            f"Unable to produce valid code for {filename} after {self.max_retries} attempts."
         )
 
      
@@ -601,7 +424,7 @@ class Autocoder:
 
 
 
-# Repair Loop ////////////////////////////////////////////////////////////////////////
+    # Repair Loop ////////////////////////////////////////////////////////////////////////
     def _repair_code(self, previous_code: str, error_message: str) -> str:
         '''
         Gets a JSON response from the assistant and extracts the "code" field.
@@ -729,130 +552,102 @@ class Autocoder:
         )
 
     
-    def _ai_verify_code(self, verification_prompt: str, code: str, input_data: str, output: str) -> AutocoderAIVerificationResult:
-        kwargs = {
-            "instructions": self._process_system_prompt,
-            "verification_prompt": verification_prompt,
-            "input": input_data,
-            "output": output,
-            "code": code,
+    # def _ai_verify_code(self, verification_prompt: str, code: str, input_data: str, output: str) -> AutocoderAIVerificationResult:
+    #     kwargs = {
+    #         "instructions": self._process_system_prompt,
+    #         "verification_prompt": verification_prompt,
+    #         "input": input_data,
+    #         "output": output,
+    #         "code": code,
             
-        }
+    #     }
         
-        formatted_verification_prompt = VERIFICATION_PROMPT.format(**kwargs)
-        new_messages = [
-            {
-                "role": "system",
-                "content": VERIFICATION_PROMPT_INSTRUCTIONS
-            },
-            {
-                "role": "user",
-                "content": formatted_verification_prompt
-            }
-        ]
+    #     formatted_verification_prompt = VERIFICATION_PROMPT.format(**kwargs)
+    #     new_messages = [
+    #         {
+    #             "role": "system",
+    #             "content": VERIFICATION_PROMPT_INSTRUCTIONS
+    #         },
+    #         {
+    #             "role": "user",
+    #             "content": formatted_verification_prompt
+    #         }
+    #     ]
         
-        # We WANT the repair loop to see the verification. BUT, don't send it to the AI agent verifier.
+    #     # We WANT the repair loop to see the verification. BUT, don't send it to the AI agent verifier.
         
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                text, job_id, output_messages = self._client.get_text(
-                    messages=new_messages,
-                    response_format=ResponseFormat.JSON_SCHEMA,
-                    schema=VerificationPromptSchema,
-                )
+    #     for attempt in range(1, self.max_retries + 1):
+    #         try:
+    #             text, job_id, output_messages = self._client.get_text(
+    #                 messages=new_messages,
+    #                 response_format=ResponseFormat.JSON_SCHEMA,
+    #                 schema=VerificationPromptSchema,
+    #             )
                 
-                if not text or not text.strip():
-                    continue
+    #             if not text or not text.strip():
+    #                 continue
                 
                 
                 
-                text = clean_llm_json(text)
-                json_response = json.loads(text)
+    #             text = clean_llm_json(text)
+    #             json_response = json.loads(text)
                 
-                # ADD ONLY if json can load. Otherwise just iterate until valid response.
-                # We JUST store the verification response so the repair agent can see it.
-                self.add_messages_to_history([{
-                    "role": "user",
-                    "content": f"AI Verification Response:\n{text}"
-                }])
+    #             # ADD ONLY if json can load. Otherwise just iterate until valid response.
+    #             # We JUST store the verification response so the repair agent can see it.
+    #             self.add_messages_to_history([{
+    #                 "role": "user",
+    #                 "content": f"AI Verification Response:\n{text}"
+    #             }])
                 
-                self.emit(AutocoderOnEventCallback(
-                    stage="ai_verification",
-                    status="success",
-                    code=code,
-                    prompt=verification_prompt,
-                    response=text,
-                    input_data=self._input_data,
-                    attempt=attempt
-                ))
-                return AutocoderAIVerificationResult(
-                    is_valid=json_response.get("is_valid", False),
-                    code=json_response.get("code"),
-                    errors=json_response.get("errors")
-                )
+    #             self.emit(AutocoderOnEventCallback(
+    #                 stage="ai_verification",
+    #                 status="success",
+    #                 code=code,
+    #                 prompt=verification_prompt,
+    #                 response=text,
+    #                 input_data=self._input_data,
+    #                 attempt=attempt
+    #             ))
+    #             return AutocoderAIVerificationResult(
+    #                 is_valid=json_response.get("is_valid", False),
+    #                 code=json_response.get("code"),
+    #                 errors=json_response.get("errors")
+    #             )
             
-            except Exception as e:
-                continue
+    #         except Exception as e:
+    #             continue
             
         
-        self.emit(AutocoderOnEventCallback(
-            stage="ai_verification",
-            status="failure",
-            code=code,
-            prompt=verification_prompt,
-            response=text if 'text' in locals() else None,
-            input_data=self._input_data,
-            attempt=self.max_retries
-        ))
-        raise AutocoderBadAIResponseError(
-            "Assistant failed to provide valid verification response after multiple attempts."
-        )
+    #     self.emit(AutocoderOnEventCallback(
+    #         stage="ai_verification",
+    #         status="failure",
+    #         code=code,
+    #         prompt=verification_prompt,
+    #         response=text if 'text' in locals() else None,
+    #         input_data=self._input_data,
+    #         attempt=self.max_retries
+    #     ))
+    #     raise AutocoderBadAIResponseError(
+    #         "Assistant failed to provide valid verification response after multiple attempts."
+    #     )
     
     
     # Caching Code //////////////////////////////////////////////////////////////////
     
-    # DONT create files. Just return latest.
-    def retrieve_saved_code(self):
-        module_path = os.path.join(self._config.code_directory, self._config.module_name)
-
-        if not os.path.exists(module_path):
-            return None, None
-
-        for filename in os.listdir(module_path):
-            _check_filename = self._config.filename
-            if not _check_filename.endswith(".py"):
-                _check_filename += ".py"
-
-            if filename == _check_filename:
-                path = os.path.join(module_path, filename)
-                with open(path, "r") as f:
-                    content = f.read()
-                    
-                if not content.strip():
-                    return None, None
-                return content, filename
-
-        return None, None
-
-
     
     # Do all the backups in one place and saving here.
-    def _save_code_to_file(self, code: str):
+    def _save_code_to_file(self, code: str, filename: str):
         """
-        Save new code into the module directory.
-        Existing file is moved into a cached/ folder with timestamp.
+        Save code to the filename provided in the workspace. If a file with the same name already exists, back it up to a cached/ directory with a timestamp before saving the new code.
+        
         """
 
-        module_path = os.path.join(
-            self._config.code_directory,
-            self._config.module_name
-        )
-        os.makedirs(module_path, exist_ok=True)
+        full_path = self._workspace.path(filename)
+        file_dir = os.path.dirname(full_path)   
 
-        cache_dir = os.path.join(module_path, "cached")
+        cache_dir = os.path.join(file_dir, "cached")
         os.makedirs(cache_dir, exist_ok=True)
 
-        filename = self._config.filename
         if not filename.endswith(".py"):
             filename += ".py"
 
@@ -875,24 +670,24 @@ class Autocoder:
                 .replace("--", "_")
         )
 
-        file_path = os.path.join(module_path, filename)
+        cached_file_path = os.path.join(cache_dir, filename)
 
         # Backup existing file if it exists and is non-empty
-        if os.path.exists(file_path):
-            with open(file_path, "r") as f:
+        if os.path.exists(cached_file_path):
+            with open(cached_file_path, "r") as f:
                 existing_content = f.read()
 
             if existing_content.strip():
                 timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
                 backup_name = f"{timestamp}_{filename}"
                 backup_path = os.path.join(cache_dir, backup_name)
-                shutil.move(file_path, backup_path)
-
+                shutil.move(cached_file_path, backup_path)
+                
         # Write new code
-        with open(file_path, "w") as f:
+        with open(full_path, "w") as f:
             f.write(code)
 
-        os.chmod(file_path, 0o666)
+        os.chmod(full_path, 0o666)
 
     
     def _strip_code_block(self, text: str) -> str:
