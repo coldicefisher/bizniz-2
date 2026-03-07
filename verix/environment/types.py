@@ -1,4 +1,4 @@
-# environment/types.py
+# verix/environment/types.py
 
 from pydantic import BaseModel, Field
 from typing import Optional, Any, Dict, List
