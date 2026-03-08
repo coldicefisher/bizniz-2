@@ -28,6 +28,7 @@ def test_autotester_process_from_prompt_called(orchestrator, mock_autotester):
     mock_autotester.process_from_prompt.assert_called_once_with(
         prompt=PROMPT,
         output_path="test_add.py",
+        code_filename="add.py",
     )
 
 

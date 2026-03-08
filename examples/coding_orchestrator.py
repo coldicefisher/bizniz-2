@@ -30,10 +30,10 @@ from bizniz.workspace.temp_workspace import TempWorkspace
 if __name__ == "__main__":
 
     # Shared dependencies
-    client = ChatGPTClient(config=ChatGPTClientConfig(), api_key=None)
+    client = ChatGPTClient(config=ChatGPTClientConfig(default_model="gpt-4o-mini"), api_key=None)
     sandbox = PythonSandboxExecutionEnvironment()
     workspace = TempWorkspace()
-    pytest_env = PytestEnvironment(workspace=workspace)
+    pytest_env = PytestEnvironment(workspace_root=workspace.root)
 
     # Create the agents
     autocoder = Autocoder(
@@ -54,7 +54,7 @@ if __name__ == "__main__":
         autotester=autotester,
         test_environment=pytest_env,
         workspace=workspace,
-        max_iterations=5,
+        max_iterations=10,
         on_status_message=lambda msg: print(f"  [orchestrator] {msg}"),
     )
 

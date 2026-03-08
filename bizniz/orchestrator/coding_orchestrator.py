@@ -105,6 +105,7 @@ class CodingOrchestrator:
 
         previous_code_hash: Optional[str] = None
         current_code: Optional[str] = None
+        stale_count: int = 0
 
         # ── Iteration 1: fresh generate ────────────────────────────────────────
         log("Orchestrator: generating initial code...")
@@ -118,6 +119,7 @@ class CodingOrchestrator:
         test_result = self._autotester.process_from_prompt(
             prompt=prompt,
             output_path=test_filename,
+            code_filename=code_filename,
         )
         current_tests = test_result.tests
 
@@ -139,16 +141,20 @@ class CodingOrchestrator:
                 )
 
             # Tests failed — extract failure output for repair
-            failure_output = _build_failure_message(eval_result)
+            failure_output = _build_failure_message(eval_result, test_code=current_tests)
             log(f"Orchestrator: tests failed — repairing code...\n{failure_output[:400]}")
 
-            # Stale detection before repair
+            # Stale detection before repair — require 2+ consecutive identical hashes
             current_hash = _hash(current_code)
             if current_hash == previous_code_hash:
-                raise OrchestratorStalledError(
-                    f"Stale loop detected after {iteration} iterations: "
-                    "the same code is being produced repeatedly."
-                )
+                stale_count += 1
+                if stale_count >= 2:
+                    raise OrchestratorStalledError(
+                        f"Stale loop detected after {iteration} iterations: "
+                        "the same code is being produced repeatedly."
+                    )
+            else:
+                stale_count = 0
             previous_code_hash = current_hash
 
             # Repair
@@ -189,7 +195,7 @@ def _hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _build_failure_message(eval_result) -> str:
+def _build_failure_message(eval_result, test_code: str = None) -> str:
     parts = []
     if eval_result.error:
         parts.append(f"Error: {eval_result.error.type}: {eval_result.error.message}")
@@ -199,4 +205,6 @@ def _build_failure_message(eval_result) -> str:
         parts.append(f"stdout:\n{eval_result.stdout}")
     if eval_result.stderr:
         parts.append(f"stderr:\n{eval_result.stderr}")
+    if test_code:
+        parts.append(f"\n\nTEST CODE (the tests your code must pass):\n──────────────────────────────────────────────────────────────\n{test_code}")
     return "\n".join(parts) or "Tests failed with no additional output."

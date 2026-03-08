@@ -10,6 +10,6 @@ AutotesterSchema = {
             "description": "Brief description of what the tests cover."
         }
     },
-    "required": ["tests"],
+    "required": ["tests", "notes"],
     "additionalProperties": False
 }

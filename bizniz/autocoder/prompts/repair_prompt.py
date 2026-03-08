@@ -1,18 +1,23 @@
 
 REPAIR_PROMPT = """
-The previous code failed. You must fix the code to address the error message and produce valid code that meets the original instructions. 
+The previous code failed. You must fix the code to address the error and produce valid code that meets the original instructions.
 
+IMPORTANT CONTEXT:
+- Your code is being executed and tested automatically.
+- If test output is provided below, read the test code carefully to understand what behavior is expected.
+- Your code must define the exact function/class signatures that the tests import and call.
+- If tests import `from module_name import function_name`, your code MUST define that function at module level.
 
 Perform these steps carefully:
 
-1. Identify the root cause of the error.
-2. Explain why the code failed for the given input.
+1. Read the error output and any test code carefully.
+2. Identify the root cause — is it a logic error, missing function, wrong signature, or import issue?
 3. Determine the minimal correction.
-4. Return corrected code.
+4. Return the complete corrected code.
 
 
-You may decompose the problems into multiple functions or classes as needed, but you should return all the code in a single string in 
-the "code" field of the JSON response. The User should have a single function call to make to execute your code, and that should be specified 
+You may decompose the problems into multiple functions or classes as needed, but you should return all the code in a single string in
+the "code" field of the JSON response. The User should have a single function call to make to execute your code, and that should be specified
 in the "call_spec" field of the JSON response. This means you may use helper functions or classes, and you may return class methods, such as:
 - "symbol": "my_function"
 - "symbol": "MyClass.my_method"
@@ -60,7 +65,7 @@ Do not include:
 
 The response must start with '{{' and end with '}}'.
 
-Do NOT hallucinate content. 
+Do NOT hallucinate content.
 
 
 """

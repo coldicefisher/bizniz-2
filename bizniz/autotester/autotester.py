@@ -119,6 +119,7 @@ class Autotester(BaseAIAgent):
         self,
         prompt: str,
         output_path: str,
+        code_filename: Optional[str] = None,
         on_event: Optional[Callable[[AutotesterOnEventCallback], None]] = None,
         on_status_message: Optional[Callable[[str], None]] = None,
         on_save_tests: Optional[Callable[[str], None]] = None,
@@ -133,6 +134,9 @@ class Autotester(BaseAIAgent):
             The problem statement / feature description.
         output_path:
             Workspace-relative path where the test file will be saved.
+        code_filename:
+            Optional workspace-relative filename of the code module (e.g. "roman_to_int.py").
+            Used to generate the correct import statement in tests.
         """
         self._update_callbacks(on_event, on_status_message)
 
@@ -140,7 +144,13 @@ class Autotester(BaseAIAgent):
             if self._on_status_message:
                 self._on_status_message(msg)
 
-        user_prompt = FROM_PROMPT_PROMPT_TEMPLATE.format(problem_statement=prompt)
+        # Derive module name from code_filename (strip .py extension)
+        module_name = code_filename.replace(".py", "") if code_filename else "solution"
+
+        user_prompt = FROM_PROMPT_PROMPT_TEMPLATE.format(
+            problem_statement=prompt,
+            module_name=module_name,
+        )
 
         log("Requesting tests from AI (from_prompt mode)...")
         tests = self._generate_tests(user_prompt, mode="from_prompt")

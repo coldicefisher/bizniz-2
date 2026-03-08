@@ -24,14 +24,17 @@ from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.engineer.auto_engineer import AutoEngineer
 from bizniz.clients.chatgpt.chatgpt_client import ChatGPTClient, ChatGPTClientConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
+from bizniz.environment.docker_environment import DockerExecutionEnvironment
 from bizniz.environment.pytest_environment import PytestEnvironment
 from bizniz.workspace.temp_workspace import TempWorkspace
+from bizniz.workspace.local_workspace import LocalWorkspace
 
 
 def make_orchestrator(client, workspace):
     """Factory: returns a fresh CodingOrchestrator per issue."""
-    sandbox = PythonSandboxExecutionEnvironment()
-    pytest_env = PytestEnvironment(workspace=workspace)
+    # sandbox = PythonSandboxExecutionEnvironment()
+    sandbox = DockerExecutionEnvironment(image="python:3.12-slim")
+    pytest_env = PytestEnvironment(workspace_root=workspace.root)
 
     return CodingOrchestrator(
         autocoder=Autocoder(
@@ -53,8 +56,9 @@ def make_orchestrator(client, workspace):
 
 if __name__ == "__main__":
 
-    client = ChatGPTClient(config=ChatGPTClientConfig(), api_key=None)
-    workspace = TempWorkspace()
+    client = ChatGPTClient(config=ChatGPTClientConfig(default_model="gpt-4o-mini"), api_key=None)
+    # workspace = TempWorkspace()
+    workspace = LocalWorkspace(root="~/auto_engineer_workspace")
 
     # ── Step 1: Analyze only (without dispatching) ──────────────────────
     print("=== Analyzing problem statement ===\n")
@@ -100,16 +104,16 @@ if __name__ == "__main__":
 
         # ── Step 2: Dispatch a single issue ─────────────────────────────
         # Uncomment to run the full pipeline for the first issue:
-        #
+        
         # print(f"\n=== Dispatching issue #{analysis.issues[0].db_id} ===\n")
         # result = engineer.dispatch(analysis.issues[0].db_id)
         # print(f"Success: {result.success}, Iterations: {result.iterations}")
 
         # ── Step 3: Full pipeline (analyze + dispatch all) ──────────────
         # Uncomment to run everything end to end:
-        #
-        # results = engineer.run("Build a URL shortener service.")
-        # for r in results:
-        #     print(f"  Success: {r.success}, Iterations: {r.iterations}")
+        
+        results = engineer.run("Build a URL shortener service.")
+        for r in results:
+            print(f"  Success: {r.success}, Iterations: {r.iterations}")
 
     print(f"\nWorkspace files: {workspace.tree()}")

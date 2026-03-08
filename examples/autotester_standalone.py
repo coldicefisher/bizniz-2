@@ -28,7 +28,7 @@ from bizniz.utils.code_metadata import build_metadata_block
 if __name__ == "__main__":
 
     client = ChatGPTClient(
-        config=ChatGPTClientConfig(),
+        config=ChatGPTClientConfig(default_model="gpt-4o-mini"),
         api_key=None,
     )
     environment = PythonSandboxExecutionEnvironment()
@@ -46,6 +46,7 @@ if __name__ == "__main__":
     result = autotester.process_from_prompt(
         prompt="A function called is_palindrome(s) that returns True if the string is a palindrome.",
         output_path="test_palindrome.py",
+        code_filename="palindrome.py",
     )
     print(result.tests)
 
