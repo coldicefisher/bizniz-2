@@ -4,6 +4,14 @@ Example: WorkspaceDB standalone usage
 Shows how to use the SQLite database that lives inside each workspace
 for persisting engineering artifacts (problems, requirements, use cases, issues).
 """
+import os
+import shutil
+
+from dotenv import load_dotenv
+
+load_dotenv()  # automatically finds .env in current directory or parents
+
+
 
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.workspace.workspace_db import WorkspaceDB

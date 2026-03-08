@@ -4,6 +4,14 @@ Example: Code metadata utilities
 Shows how to embed and read structured metadata in Python source files.
 Used by the Autocoder and Autotester to track problem statements.
 """
+import os
+import shutil
+
+from dotenv import load_dotenv
+
+load_dotenv()  # automatically finds .env in current directory or parents
+
+
 
 from bizniz.utils.code_metadata import build_metadata_block, read_code_metadata
 

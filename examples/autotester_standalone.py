@@ -9,6 +9,14 @@ Three modes for generating pytest test suites:
 Requirements:
     - OPENAI_API_KEY environment variable set
 """
+import os
+import shutil
+
+from dotenv import load_dotenv
+
+load_dotenv()  # automatically finds .env in current directory or parents
+
+
 
 from bizniz.autotester.autotester import Autotester
 from bizniz.clients.chatgpt.chatgpt_client import ChatGPTClient, ChatGPTClientConfig

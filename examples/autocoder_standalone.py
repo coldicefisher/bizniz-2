@@ -8,6 +8,15 @@ Requirements:
     - OPENAI_API_KEY environment variable set
 """
 
+import os
+import shutil
+
+from dotenv import load_dotenv
+
+load_dotenv()  # automatically finds .env in current directory or parents
+
+
+
 from bizniz.autocoder.autocoder import Autocoder
 from bizniz.clients.chatgpt.chatgpt_client import ChatGPTClient, ChatGPTClientConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
