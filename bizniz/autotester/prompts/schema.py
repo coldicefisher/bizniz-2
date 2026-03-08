@@ -1,15 +1,34 @@
 AutotesterSchema = {
-    "type": "object",
-    "properties": {
-        "tests": {
-            "type": "string",
-            "description": "Complete pytest test file as a Python source string."
+    "name": "generate_tests",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "test_files": {
+                "type": "array",
+                "description": "List of test files to create",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "filepath": {
+                            "type": "string",
+                            "description": "Test file path relative to workspace root, e.g. 'tests/test_expense.py'"
+                        },
+                        "tests": {
+                            "type": "string",
+                            "description": "Complete pytest test file content as Python source"
+                        }
+                    },
+                    "required": ["filepath", "tests"],
+                    "additionalProperties": False
+                }
+            },
+            "notes": {
+                "type": "string",
+                "description": "Brief description of what the tests cover"
+            }
         },
-        "notes": {
-            "type": "string",
-            "description": "Brief description of what the tests cover."
-        }
-    },
-    "required": ["tests", "notes"],
-    "additionalProperties": False
+        "required": ["test_files", "notes"],
+        "additionalProperties": False
+    }
 }

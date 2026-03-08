@@ -14,9 +14,8 @@ def test_from_prompt_returns_result(autotester, mock_workspace):
     assert isinstance(result, AutotesterResult)
     assert result.success is True
     assert result.mode == "from_prompt"
-    assert result.output_path == "test_palindrome.py"
-    assert result.tests is not None
-    assert len(result.tests) > 0
+    assert result.test_files is not None
+    assert len(result.test_files) > 0
 
 
 def test_from_prompt_saves_to_workspace(autotester, mock_workspace):

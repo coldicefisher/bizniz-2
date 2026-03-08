@@ -18,7 +18,7 @@ def test_process_success_returns_result(autocoder, mock_environment):
 
     assert isinstance(result, AutocoderProcessResult)
     assert result.output == 42
-    assert result.code is not None
+    assert result.changes is not None
 
 
 def test_process_saves_code_to_workspace(autocoder, mock_environment, mock_workspace):

@@ -249,6 +249,14 @@ class BaseChatGPTClient(BaseAIClient):
         return job_id
 
     # ------------------------------------------------------------------
+    # MODEL SWITCHING
+    # ------------------------------------------------------------------
+
+    def set_model(self, model_name: str):
+        """Switch the model used for subsequent API calls."""
+        self._model_name = model_name
+
+    # ------------------------------------------------------------------
     # ABSTRACT PROVIDER CALL
     # ------------------------------------------------------------------
 

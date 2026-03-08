@@ -1,8 +1,15 @@
 import json
 import pytest
 from unittest.mock import MagicMock
+from bizniz.autocoder.types import FileChange
+from bizniz.autotester.types import GeneratedTestFile
 from bizniz.orchestrator.types import OrchestratorResult
 from bizniz.workspace.base_workspace import BaseWorkspace
+from bizniz.engineer.tests.conftest import (
+    VALID_ANALYSIS_RESPONSE,
+    VALID_PLAN_RESPONSE,
+    make_ai_response,
+)
 
 PROBLEM = "Build a task management system."
 
@@ -15,32 +22,40 @@ MULTI_ISSUE_RESPONSE = {
         {
             "title": "Issue one",
             "description": "Do one.",
-            "code_file": "one.py",
-            "test_file": "test_one.py",
+            "target_files": [{"filepath": "task_manager/one.py", "action": "create"}],
+            "test_files": ["tests/test_one.py"],
+            "depends_on": [],
         },
         {
             "title": "Issue two",
             "description": "Do two.",
-            "code_file": "two.py",
-            "test_file": "test_two.py",
+            "target_files": [{"filepath": "task_manager/two.py", "action": "create"}],
+            "test_files": ["tests/test_two.py"],
+            "depends_on": ["Issue one"],
         },
     ],
 }
 
 
-def test_run_returns_list_of_results(mock_client, mock_environment, tmp_path):
+def test_run_returns_list_of_results(mock_environment, tmp_path):
+    from bizniz.clients.base_ai_client import BaseAIClient
     from bizniz.engineer.auto_engineer import AutoEngineer
     from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 
     ws = BaseWorkspace(root=tmp_path)
-    text = json.dumps(MULTI_ISSUE_RESPONSE)
-    mock_client.get_text.return_value = (text, "jid", [{"role": "assistant", "content": text}])
+
+    client = MagicMock(spec=BaseAIClient)
+    client.get_text.side_effect = [
+        make_ai_response(MULTI_ISSUE_RESPONSE),  # analysis
+        make_ai_response(VALID_PLAN_RESPONSE),     # plan
+        make_ai_response(MULTI_ISSUE_RESPONSE),   # refined analysis
+    ]
 
     orc = MagicMock(spec=CodingOrchestrator)
-    orc.run.return_value = OrchestratorResult(success=True, code="x", tests="y", iterations=1)
+    orc.run_multi.return_value = OrchestratorResult(success=True, changes=[FileChange(filepath="out.py", code="x", action="create")], test_files=[GeneratedTestFile(filepath="test_out.py", tests="y")], iterations=1)
 
     eng = AutoEngineer(
-        client=mock_client,
+        client=client,
         environment=mock_environment,
         workspace=ws,
         orchestrator_factory=lambda: orc,
@@ -53,24 +68,30 @@ def test_run_returns_list_of_results(mock_client, mock_environment, tmp_path):
     assert all(isinstance(r, OrchestratorResult) for r in results)
 
 
-def test_run_dispatches_each_issue(mock_client, mock_environment, tmp_path):
+def test_run_dispatches_each_issue(mock_environment, tmp_path):
+    from bizniz.clients.base_ai_client import BaseAIClient
     from bizniz.engineer.auto_engineer import AutoEngineer
     from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 
     ws = BaseWorkspace(root=tmp_path)
-    text = json.dumps(MULTI_ISSUE_RESPONSE)
-    mock_client.get_text.return_value = (text, "jid", [{"role": "assistant", "content": text}])
+
+    client = MagicMock(spec=BaseAIClient)
+    client.get_text.side_effect = [
+        make_ai_response(MULTI_ISSUE_RESPONSE),
+        make_ai_response(VALID_PLAN_RESPONSE),
+        make_ai_response(MULTI_ISSUE_RESPONSE),
+    ]
 
     orchestrators = []
 
     def factory():
         orc = MagicMock(spec=CodingOrchestrator)
-        orc.run.return_value = OrchestratorResult(success=True, code="x", tests="y", iterations=1)
+        orc.run_multi.return_value = OrchestratorResult(success=True, changes=[FileChange(filepath="out.py", code="x", action="create")], test_files=[GeneratedTestFile(filepath="test_out.py", tests="y")], iterations=1)
         orchestrators.append(orc)
         return orc
 
     eng = AutoEngineer(
-        client=mock_client,
+        client=client,
         environment=mock_environment,
         workspace=ws,
         orchestrator_factory=factory,
@@ -78,7 +99,6 @@ def test_run_dispatches_each_issue(mock_client, mock_environment, tmp_path):
     )
 
     eng.run(PROBLEM)
-    # Each issue gets its own orchestrator
     assert len(orchestrators) == 2
     for orc in orchestrators:
-        orc.run.assert_called_once()
+        orc.run_multi.assert_called_once()

@@ -166,6 +166,69 @@ class BaseWorkspace:
         return self.path(path)
 
     # ------------------------------------------------------------------
+    # Package initialization
+    # ------------------------------------------------------------------
+
+    def init_as_package(self, package_name: str, description: str = ""):
+        """
+        Initialize the workspace as a pip-installable Python package.
+        Creates pyproject.toml, package directory, and __init__.py files.
+        """
+        # Create package directory
+        pkg_dir = self._root / package_name
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create __init__.py
+        init_path = pkg_dir / "__init__.py"
+        if not init_path.exists():
+            init_path.write_text("")
+
+        # Create tests directory
+        tests_dir = self._root / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        tests_init = tests_dir / "__init__.py"
+        if not tests_init.exists():
+            tests_init.write_text("")
+
+        # Create pyproject.toml
+        toml_path = self._root / "pyproject.toml"
+        if not toml_path.exists():
+            toml_content = (
+                '[build-system]\n'
+                'requires = ["setuptools >= 77.0.3"]\n'
+                'build-backend = "setuptools.build_meta"\n'
+                '\n'
+                '[project]\n'
+                f'name = "{package_name}"\n'
+                'version = "0.1.0"\n'
+                f'description = "{description}"\n'
+                'requires-python = ">=3.10"\n'
+                '\n'
+                '[tool.setuptools]\n'
+                f'packages = ["{package_name}"]\n'
+                '\n'
+                '[tool.pytest.ini_options]\n'
+                'testpaths = ["tests"]\n'
+            )
+            toml_path.write_text(toml_content)
+
+    def create_namespace(self, namespace_path: str):
+        """
+        Create a namespace directory with __init__.py files for each level.
+        E.g. "expense_tracker/models" creates:
+          - expense_tracker/__init__.py
+          - expense_tracker/models/__init__.py
+        """
+        parts = Path(namespace_path).parts
+        current = self._root
+        for part in parts:
+            current = current / part
+            current.mkdir(parents=True, exist_ok=True)
+            init_file = current / "__init__.py"
+            if not init_file.exists():
+                init_file.write_text("")
+
+    # ------------------------------------------------------------------
     # Debug helpers
     # ------------------------------------------------------------------
 

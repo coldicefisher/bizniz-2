@@ -22,3 +22,10 @@ packages = ["bizniz"]
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
+
+
+[tool.pytest.ini_options]
+addopts = "-m 'not functional'"
+markers = [
+    "functional: tests that call real external APIs (OpenAI). Run with: pytest -m functional",
+]

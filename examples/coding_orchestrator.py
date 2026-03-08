@@ -5,6 +5,8 @@ Iteratively generates code + tests, runs pytest, and repairs until tests pass.
 Combines Autocoder (code generation) and Autotester (test generation) with a
 PytestEnvironment for test execution.
 
+Features model escalation (gpt-4o-mini → gpt-4o → o3-mini) on stalls.
+
 Requirements:
     - OPENAI_API_KEY environment variable set
 """
@@ -18,11 +20,14 @@ load_dotenv()  # automatically finds .env in current directory or parents
 
 
 from bizniz.autocoder.autocoder import Autocoder
+from bizniz.autodebugger.autodebugger import Autodebugger
 from bizniz.autotester.autotester import Autotester
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
+from bizniz.orchestrator.model_progression import ModelProgression
 from bizniz.orchestrator.types import OrchestratorStalledError, OrchestratorMaxIterationsError
 from bizniz.clients.chatgpt.chatgpt_client import ChatGPTClient, ChatGPTClientConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
+from bizniz.environment.docker_environment import DockerExecutionEnvironment
 from bizniz.environment.pytest_environment import PytestEnvironment
 from bizniz.workspace.temp_workspace import TempWorkspace
 
@@ -31,7 +36,7 @@ if __name__ == "__main__":
 
     # Shared dependencies
     client = ChatGPTClient(config=ChatGPTClientConfig(default_model="gpt-4o-mini"), api_key=None)
-    sandbox = PythonSandboxExecutionEnvironment()
+    sandbox = DockerExecutionEnvironment()
     workspace = TempWorkspace()
     pytest_env = PytestEnvironment(workspace_root=workspace.root)
 
@@ -48,12 +53,21 @@ if __name__ == "__main__":
         workspace=workspace,
     )
 
-    # Create the orchestrator
+    autodebugger = Autodebugger(
+        client=client,
+        environment=sandbox,
+        workspace=workspace,
+    )
+
+    # Create the orchestrator with model escalation
     orchestrator = CodingOrchestrator(
         autocoder=autocoder,
         autotester=autotester,
+        autodebugger=autodebugger,
         test_environment=pytest_env,
         workspace=workspace,
+        client=client,
+        model_progression=ModelProgression(),
         max_iterations=10,
         on_status_message=lambda msg: print(f"  [orchestrator] {msg}"),
     )

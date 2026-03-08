@@ -39,5 +39,5 @@ def test_test_environment_execute_called(orchestrator, mock_test_env):
 
 def test_result_carries_code_and_tests(orchestrator):
     result = orchestrator.run(prompt=PROMPT, code_filename="add.py", test_filename="test_add.py")
-    assert result.code is not None
-    assert result.tests is not None
+    assert result.changes is not None
+    assert result.test_files is not None

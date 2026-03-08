@@ -42,13 +42,13 @@ class ChatGPTClientFactory:
                     api_key=api_key,
                     **kwargs
                 )
-            
-            case 'gpt-4o-mini':
+
+            case 'gpt-4o-mini' | 'gpt-4o' | 'o3-mini' | 'gpt-5':
                 return OpenAIChat4GPTClient(
                     config=config,
                     api_key=api_key,
                     **kwargs
                 )
-            
+
             case _:
                 raise NotImplementedError(f"Model {config.default_model} is not supported in ChatGPTClientFactory.")

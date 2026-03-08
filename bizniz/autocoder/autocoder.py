@@ -7,12 +7,15 @@ from bizniz.clients.chatgpt.types.response_format import ResponseFormat
 from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.autocoder.prompts.generate_prompts import GENERATE_SYSTEM_INSTRUCTIONS_PROMPT, GENERATE_RETURN_FORMAT_PROMPT
 from bizniz.autocoder.prompts.repair_prompt import REPAIR_PROMPT
+from bizniz.autocoder.prompts.generate_multi_prompt import GENERATE_MULTI_SYSTEM_PROMPT, GENERATE_MULTI_USER_PROMPT_TEMPLATE
+from bizniz.autocoder.prompts.repair_multi_prompt import REPAIR_MULTI_PROMPT_TEMPLATE
 from bizniz.autocoder.prompts.prompt_schemas import GeneratePromptSchema, RepairPromptSchema
 from bizniz.autocoder.types import (
     AutocoderProcessError,
     AutocoderBadAIResponseError,
     AutocoderProcessResult,
     AutocoderOnEventCallback,
+    FileChange,
 )
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.environment.types import ExecutionCallSpec
@@ -107,7 +110,9 @@ class Autocoder(BaseAIAgent):
 
         log(f"Saving {filename} to workspace...")
         self._save_code_to_file(code=code, filename=filename, prompt=prompt)
-        return AutocoderProcessResult(code=code, output=None)
+        return AutocoderProcessResult(
+            changes=[FileChange(filepath=filename, code=code, action="create")]
+        )
 
     def generate(
         self,
@@ -146,7 +151,10 @@ class Autocoder(BaseAIAgent):
             else:
                 log("Code unchanged, not saving.")
 
-            return AutocoderProcessResult(code=new_code, output=output)
+            return AutocoderProcessResult(
+                changes=[FileChange(filepath=filename, code=new_code, action="create")],
+                output=output,
+            )
 
         # Load cached code if it exists
         cached_code = None
@@ -206,7 +214,9 @@ class Autocoder(BaseAIAgent):
             error_message=error_message,
         )
         self._save_code_to_file(code=new_code, filename=filename)
-        return AutocoderProcessResult(code=new_code, output=None)
+        return AutocoderProcessResult(
+            changes=[FileChange(filepath=filename, code=new_code, action="modify")]
+        )
 
     # Helpers ///////////////////////////////////////////////////////////////////////////////////
 
@@ -237,7 +247,10 @@ class Autocoder(BaseAIAgent):
                 text = self.clean_llm_json(text)
                 json_response = json.loads(text)
 
-                code = self._strip_code_block(json_response.get("code", ""))
+                code_raw = self._extract_code_from_response(json_response)
+                if "\n" not in code_raw and "\\n" in code_raw:
+                    code_raw = code_raw.replace("\\n", "\n")
+                code = self._strip_code_block(code_raw)
                 call_spec = ExecutionCallSpec(**self._normalize_call_spec(json_response.get("call_spec", {})))
 
                 self.emit(AutocoderOnEventCallback(
@@ -306,7 +319,10 @@ class Autocoder(BaseAIAgent):
                 text = self.clean_llm_json(text)
                 json_response = json.loads(text)
 
-                new_code = self._strip_code_block(json_response.get("code", ""))
+                code_raw = self._extract_code_from_response(json_response)
+                if "\n" not in code_raw and "\\n" in code_raw:
+                    code_raw = code_raw.replace("\\n", "\n")
+                new_code = self._strip_code_block(code_raw)
                 if not new_code or not new_code.strip():
                     last_error = "AI returned empty code during repair."
                     continue
@@ -357,3 +373,230 @@ class Autocoder(BaseAIAgent):
         raise AutocoderBadAIResponseError(
             f"Assistant failed to provide valid repaired code after multiple attempts.\nLast error: {last_error}"
         )
+
+    @staticmethod
+    def _extract_code_from_response(json_response: dict) -> str:
+        """
+        Extract code from AI response, handling both old format ({"code": "..."})
+        and new multi-file format ({"changes": [{"code": "...", ...}]}).
+        Returns the code string from the first file change, or the "code" field.
+        """
+        # New format: changes array
+        changes = json_response.get("changes", [])
+        if changes and isinstance(changes, list) and len(changes) > 0:
+            return changes[0].get("code", "")
+        # Old format: direct code field
+        return json_response.get("code", "")
+
+    # ── Multi-file API ────────────────────────────────────────────────────────
+
+    def generate_multi(
+        self,
+        issue_description: str,
+        target_files: List[dict],
+        architecture_context: str = "",
+        existing_code: Optional[dict] = None,
+        on_status_message: Optional[Callable[[str], None]] = None,
+    ) -> AutocoderProcessResult:
+        """
+        Generate code across multiple files for a single issue.
+
+        Parameters
+        ----------
+        issue_description:
+            The issue/task description.
+        target_files:
+            List of {"filepath": "...", "action": "create"|"modify"} dicts.
+        architecture_context:
+            Formatted string describing the architecture plan.
+        existing_code:
+            Dict mapping filepath → current file content for files being modified.
+        """
+        if on_status_message is not None:
+            self._on_status_message = on_status_message
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        existing_code = existing_code or {}
+
+        # Build target files description
+        target_desc = "\n".join(
+            f"- {tf['filepath']} ({tf.get('action', 'create')})"
+            for tf in target_files
+        )
+
+        # Build existing code section
+        existing_parts = []
+        for fp, content in existing_code.items():
+            existing_parts.append(f"── {fp} ──\n{content}")
+        existing_str = "\n\n".join(existing_parts) if existing_parts else "(no existing code)"
+
+        user_prompt = GENERATE_MULTI_USER_PROMPT_TEMPLATE.format(
+            issue_description=issue_description,
+            architecture_context=architecture_context or "(none)",
+            target_files_description=target_desc,
+            existing_code=existing_str,
+        )
+
+        log(f"Requesting multi-file code generation ({len(target_files)} files)...")
+        changes = self._generate_multi_code(user_prompt)
+
+        # Save all files to workspace
+        for change in changes:
+            log(f"Saving {change.filepath} to workspace...")
+            self._workspace.write_file(path=change.filepath, content=change.code)
+
+        return AutocoderProcessResult(changes=changes)
+
+    def repair_multi(
+        self,
+        current_files: dict,
+        error_message: str,
+        architecture_context: str = "",
+        on_status_message: Optional[Callable[[str], None]] = None,
+    ) -> AutocoderProcessResult:
+        """
+        Repair code across multiple files given an error.
+
+        Parameters
+        ----------
+        current_files:
+            Dict mapping filepath → current file content.
+        error_message:
+            The error output from pytest or execution.
+        architecture_context:
+            Formatted string describing the architecture plan.
+        """
+        if on_status_message is not None:
+            self._on_status_message = on_status_message
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        # Build current files section
+        files_parts = []
+        for fp, content in current_files.items():
+            files_parts.append(f"── {fp} ──\n{content}")
+        files_str = "\n\n".join(files_parts)
+
+        repair_prompt = REPAIR_MULTI_PROMPT_TEMPLATE.format(
+            architecture_context=architecture_context or "(none)",
+            error_message=error_message,
+            current_files=files_str,
+        )
+
+        log("Requesting multi-file repair...")
+        changes = self._repair_multi_code(repair_prompt)
+
+        # Save all changed files to workspace
+        for change in changes:
+            log(f"Saving repaired {change.filepath} to workspace...")
+            self._workspace.write_file(path=change.filepath, content=change.code)
+
+        return AutocoderProcessResult(changes=changes)
+
+    # ── Multi-file private helpers ────────────────────────────────────────────
+
+    def _generate_multi_code(self, user_prompt: str) -> List[FileChange]:
+        """
+        Send a multi-file generation prompt and return a list of FileChange objects.
+        """
+        attempts = 3
+        last_error = None
+        text = None
+
+        self.add_messages_to_history([Message(role="user", content=user_prompt)])
+
+        for attempt in range(1, attempts + 1):
+            try:
+                text, job_id, output_messages = self._client.get_text(
+                    messages=self.message_history,
+                    response_format=ResponseFormat.JSON_SCHEMA,
+                    schema=GeneratePromptSchema,
+                )
+                self.add_messages_to_history(output_messages)
+
+                if not text or not text.strip():
+                    last_error = "Empty response from AI"
+                    continue
+
+                text = self.clean_llm_json(text)
+                json_response = json.loads(text)
+
+                changes = self._parse_changes(json_response)
+                if not changes:
+                    last_error = "AI returned no file changes"
+                    continue
+
+                return changes
+
+            except Exception as e:
+                last_error = e
+                continue
+
+        raise AutocoderBadAIResponseError(
+            f"AI failed to produce multi-file code after {attempts} attempts. "
+            f"Last error: {last_error}"
+        )
+
+    def _repair_multi_code(self, repair_prompt: str) -> List[FileChange]:
+        """
+        Send a multi-file repair prompt and return a list of FileChange objects.
+        """
+        attempts = 3
+        last_error = None
+        text = None
+
+        self.add_messages_to_history([Message(role="user", content=repair_prompt)])
+
+        for attempt in range(1, attempts + 1):
+            try:
+                text, job_id, output_messages = self._client.get_text(
+                    messages=self.message_history,
+                    response_format=ResponseFormat.JSON_SCHEMA,
+                    schema=RepairPromptSchema,
+                )
+                self.add_messages_to_history(output_messages)
+
+                if not text or not text.strip():
+                    last_error = "Empty response from AI"
+                    continue
+
+                text = self.clean_llm_json(text)
+                json_response = json.loads(text)
+
+                changes = self._parse_changes(json_response)
+                if not changes:
+                    last_error = "AI returned no file changes during repair"
+                    continue
+
+                return changes
+
+            except Exception as e:
+                last_error = e
+                continue
+
+        raise AutocoderBadAIResponseError(
+            f"AI failed to produce multi-file repair after {attempts} attempts. "
+            f"Last error: {last_error}"
+        )
+
+    def _parse_changes(self, json_response: dict) -> List[FileChange]:
+        """Parse a changes array from AI response into FileChange objects."""
+        raw_changes = json_response.get("changes", [])
+        changes = []
+        for ch in raw_changes:
+            code_raw = ch.get("code", "")
+            if "\n" not in code_raw and "\\n" in code_raw:
+                code_raw = code_raw.replace("\\n", "\n")
+            code = self._strip_code_block(code_raw)
+            if code and code.strip():
+                changes.append(FileChange(
+                    filepath=ch["filepath"],
+                    code=code,
+                    action=ch.get("action", "create"),
+                ))
+        return changes

@@ -82,20 +82,25 @@ class PytestEnvironment(BaseExecutionEnvironment):
                 ),
             )
 
-        test_path = Path(call_spec.args[0]).resolve()
-
-        if not test_path.exists():
-            return ExecutionEnvironmentResult(
-                success=False,
-                error=ExecutionEnvironmentErrorDetails(
-                    type="FileNotFoundError",
-                    message=f"Test file not found: {test_path}",
-                ),
-            )
+        # Support multiple test paths in call_spec.args
+        test_paths = []
+        for arg in call_spec.args:
+            if arg.startswith("-"):
+                break  # remaining args are pytest flags
+            p = Path(arg).resolve()
+            if not p.exists():
+                return ExecutionEnvironmentResult(
+                    success=False,
+                    error=ExecutionEnvironmentErrorDetails(
+                        type="FileNotFoundError",
+                        message=f"Test file not found: {p}",
+                    ),
+                )
+            test_paths.append(str(p))
 
         cmd = [
             "python3", "-m", "pytest",
-            str(test_path),
+            *test_paths,
             "-v",
             "--tb=long",
             "--no-header",

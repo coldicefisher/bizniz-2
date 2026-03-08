@@ -14,11 +14,13 @@ from bizniz.autotester.types import (
     AutotesterOnEventCallback,
     AutotesterError,
     AutotesterBadAIResponseError,
+    GeneratedTestFile,
 )
 from bizniz.autotester.prompts.system_prompt import AUTOTESTER_SYSTEM_PROMPT
 from bizniz.autotester.prompts.from_code_prompt import FROM_CODE_PROMPT_TEMPLATE
 from bizniz.autotester.prompts.from_prompt_prompt import FROM_PROMPT_PROMPT_TEMPLATE
 from bizniz.autotester.prompts.review_prompt import REVIEW_PROMPT_TEMPLATE
+from bizniz.autotester.prompts.generate_multi_prompt import GENERATE_MULTI_SYSTEM_PROMPT, GENERATE_MULTI_USER_PROMPT_TEMPLATE
 from bizniz.autotester.prompts.schema import AutotesterSchema
 
 
@@ -130,8 +132,7 @@ class Autotester(BaseAIAgent):
         log(f"Tests saved to {output_path}")
 
         return AutotesterResult(
-            tests=tests,
-            output_path=output_path,
+            test_files=[GeneratedTestFile(filepath=output_path, tests=tests)],
             mode="from_code",
             success=True,
         )
@@ -180,8 +181,7 @@ class Autotester(BaseAIAgent):
         log(f"Tests saved to {output_path}")
 
         return AutotesterResult(
-            tests=tests,
-            output_path=output_path,
+            test_files=[GeneratedTestFile(filepath=output_path, tests=tests)],
             mode="from_prompt",
             success=True,
         )
@@ -241,10 +241,130 @@ class Autotester(BaseAIAgent):
         log(f"Improved tests saved to {output_path}")
 
         return AutotesterResult(
-            tests=tests,
-            output_path=output_path,
+            test_files=[GeneratedTestFile(filepath=output_path, tests=tests)],
             mode="review",
             success=True,
+        )
+
+    # ── Multi-file API ─────────────────────────────────────────────────────────
+
+    def generate_multi(
+        self,
+        problem_statement: str,
+        test_files: List[str],
+        source_code: Optional[dict] = None,
+        architecture_context: str = "",
+        on_event: Optional[Callable[[AutotesterOnEventCallback], None]] = None,
+        on_status_message: Optional[Callable[[str], None]] = None,
+    ) -> AutotesterResult:
+        """
+        Generate test suites across multiple test files for a multi-file project.
+
+        Parameters
+        ----------
+        problem_statement:
+            The issue/task description.
+        test_files:
+            List of test file paths to generate (e.g. ["tests/test_models.py", "tests/test_cli.py"]).
+        source_code:
+            Dict mapping filepath → source code content for the modules under test.
+        architecture_context:
+            Formatted string describing the architecture plan.
+        """
+        self._update_callbacks(on_event, on_status_message)
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        source_code = source_code or {}
+
+        # Build source code section
+        source_parts = []
+        for fp, content in source_code.items():
+            source_parts.append(f"── {fp} ──\n{content}")
+        source_str = "\n\n".join(source_parts) if source_parts else "(no source code provided)"
+
+        # Build test files description
+        test_desc = "\n".join(f"- {tf}" for tf in test_files)
+
+        user_prompt = GENERATE_MULTI_USER_PROMPT_TEMPLATE.format(
+            problem_statement=problem_statement,
+            architecture_context=architecture_context or "(none)",
+            source_code=source_str,
+            test_files_description=test_desc,
+        )
+
+        log(f"Requesting multi-file test generation ({len(test_files)} test files)...")
+        result_files = self._generate_multi_tests(user_prompt)
+
+        # Save all test files
+        for tf in result_files:
+            log(f"Saving tests to {tf.filepath}...")
+            self._workspace.write_file(path=tf.filepath, content=tf.tests)
+
+        return AutotesterResult(
+            test_files=result_files,
+            mode="from_prompt",
+            success=True,
+        )
+
+    def _generate_multi_tests(self, user_prompt: str) -> List[GeneratedTestFile]:
+        """
+        Send a multi-file test generation prompt and return a list of GeneratedTestFile objects.
+        """
+        attempts = 3
+        last_error = None
+        text = None
+
+        self.add_messages_to_history([Message(role="user", content=user_prompt)])
+
+        for attempt in range(1, attempts + 1):
+            try:
+                text, job_id, output_messages = self._client.get_text(
+                    messages=self.message_history,
+                    response_format=ResponseFormat.JSON_SCHEMA,
+                    schema=AutotesterSchema,
+                )
+                self.add_messages_to_history(output_messages)
+
+                if not text or not text.strip():
+                    last_error = "Empty response from AI"
+                    continue
+
+                text = self.clean_llm_json(text)
+                json_response = json.loads(text)
+
+                test_files_raw = json_response.get("test_files", [])
+                if not test_files_raw:
+                    last_error = "AI returned no test files"
+                    continue
+
+                result = []
+                for tf_raw in test_files_raw:
+                    tests_raw = tf_raw.get("tests", "")
+                    if "\n" not in tests_raw and "\\n" in tests_raw:
+                        tests_raw = tests_raw.replace("\\n", "\n")
+                    tests = self._strip_code_block(tests_raw)
+                    if tests and tests.strip():
+                        result.append(GeneratedTestFile(
+                            filepath=tf_raw["filepath"],
+                            tests=tests,
+                        ))
+
+                if not result:
+                    last_error = "AI returned empty test files"
+                    continue
+
+                return result
+
+            except Exception as e:
+                last_error = e
+                continue
+
+        raise AutotesterBadAIResponseError(
+            f"AI failed to produce multi-file tests after {attempts} attempts. "
+            f"Last error: {last_error}"
         )
 
     # ── Private helpers ────────────────────────────────────────────────────────
@@ -276,7 +396,16 @@ class Autotester(BaseAIAgent):
                 text = self.clean_llm_json(text)
                 json_response = json.loads(text)
 
-                tests = self._strip_code_block(json_response.get("tests", ""))
+                # Handle both formats: new "test_files" array or old "tests" string
+                test_files_raw = json_response.get("test_files", [])
+                if test_files_raw and isinstance(test_files_raw, list) and len(test_files_raw) > 0:
+                    tests_raw = test_files_raw[0].get("tests", "")
+                else:
+                    tests_raw = json_response.get("tests", "")
+                # Fix double-escaped newlines
+                if "\n" not in tests_raw and "\\n" in tests_raw:
+                    tests_raw = tests_raw.replace("\\n", "\n")
+                tests = self._strip_code_block(tests_raw)
                 if not tests or not tests.strip():
                     last_error = "AI returned empty test code"
                     continue

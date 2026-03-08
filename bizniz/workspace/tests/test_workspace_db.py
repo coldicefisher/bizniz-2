@@ -85,22 +85,22 @@ def test_save_and_get_issue(db):
         problem_id=pid,
         title="Implement login",
         description="Create a login endpoint.",
-        code_file="login.py",
-        test_file="test_login.py",
+        target_files=[{"filepath": "login.py", "action": "create"}],
+        test_files=["test_login.py"],
     )
 
     row = db.get_issue(issue_id)
     assert row is not None
     assert row["title"] == "Implement login"
     assert row["status"] == "open"
-    assert row["code_file"] == "login.py"
-    assert row["test_file"] == "test_login.py"
+    assert row["target_files_json"] is not None
+    assert row["test_files_json"] is not None
 
 
 def test_get_open_issues(db):
     pid = db.save_problem("Problem")
-    id1 = db.save_issue(pid, "Task 1", "Desc 1", "a.py", "test_a.py")
-    id2 = db.save_issue(pid, "Task 2", "Desc 2", "b.py", "test_b.py")
+    id1 = db.save_issue(pid, "Task 1", "Desc 1", [{"filepath": "a.py", "action": "create"}], ["test_a.py"])
+    id2 = db.save_issue(pid, "Task 2", "Desc 2", [{"filepath": "b.py", "action": "create"}], ["test_b.py"])
 
     open_issues = db.get_open_issues(problem_id=pid)
     assert len(open_issues) == 2
@@ -113,7 +113,7 @@ def test_get_open_issues(db):
 
 def test_update_issue_status(db):
     pid = db.save_problem("Problem")
-    iid = db.save_issue(pid, "Task", "Desc", "c.py", "test_c.py")
+    iid = db.save_issue(pid, "Task", "Desc", [{"filepath": "c.py", "action": "create"}], ["test_c.py"])
 
     db.update_issue_status(iid, "in_progress")
     row = db.get_issue(iid)
@@ -122,7 +122,7 @@ def test_update_issue_status(db):
 
 def test_close_issue_sets_closed_at(db):
     pid = db.save_problem("Problem")
-    iid = db.save_issue(pid, "Task", "Desc", "d.py", "test_d.py")
+    iid = db.save_issue(pid, "Task", "Desc", [{"filepath": "d.py", "action": "create"}], ["test_d.py"])
 
     db.close_issue(iid)
     row = db.get_issue(iid)
@@ -133,11 +133,34 @@ def test_close_issue_sets_closed_at(db):
 def test_get_open_issues_all_problems(db):
     pid1 = db.save_problem("P1")
     pid2 = db.save_problem("P2")
-    db.save_issue(pid1, "T1", "D1", "e.py", "test_e.py")
-    db.save_issue(pid2, "T2", "D2", "f.py", "test_f.py")
+    db.save_issue(pid1, "T1", "D1", [{"filepath": "e.py", "action": "create"}], ["test_e.py"])
+    db.save_issue(pid2, "T2", "D2", [{"filepath": "f.py", "action": "create"}], ["test_f.py"])
 
     all_open = db.get_open_issues()
     assert len(all_open) == 2
+
+
+# ── Context queries ──────────────────────────────────────────────────────────────
+
+def test_get_context_for_code_file(db):
+    pid = db.save_problem("Build an expense tracker")
+    db.save_issue(
+        problem_id=pid,
+        title="Implement storage layer",
+        description="Create the SQLite storage backend.",
+        target_files=[{"filepath": "tracker/storage.py", "action": "create"}],
+        test_files=["tests/test_storage.py"],
+    )
+
+    ctx = db.get_context_for_code_file("tracker/storage.py")
+    assert ctx is not None
+    assert ctx["problem_statement"] == "Build an expense tracker"
+    assert ctx["issue_title"] == "Implement storage layer"
+    assert ctx["issue_description"] == "Create the SQLite storage backend."
+
+
+def test_get_context_for_code_file_returns_none(db):
+    assert db.get_context_for_code_file("nonexistent.py") is None
 
 
 # ── Context manager ─────────────────────────────────────────────────────────────

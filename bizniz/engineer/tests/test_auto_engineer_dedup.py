@@ -1,39 +1,18 @@
+"""
+Tests for multi-file issue creation in AutoEngineer.
+"""
 import json
 import pytest
 from unittest.mock import MagicMock
+from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.orchestrator.types import OrchestratorResult
-from bizniz.engineer.auto_engineer import AutoEngineer, _ensure_unique
+from bizniz.engineer.auto_engineer import AutoEngineer
+from bizniz.engineer.tests.conftest import VALID_PLAN_RESPONSE, make_ai_response
 
 
-# ── _ensure_unique unit tests ────────────────────────────────────────────────────
-
-def test_ensure_unique_no_collision():
-    seen = set()
-    result = _ensure_unique("add.py", seen, 1)
-    assert result == "add.py"
-
-
-def test_ensure_unique_collision_appends_idx():
-    seen = {"add.py"}
-    result = _ensure_unique("add.py", seen, 2)
-    assert result == "add_2.py"
-
-
-def test_ensure_unique_no_extension():
-    # rpartition(".") on a name with no dot gives stem="", ext="mymodule",
-    # so the function returns f"_{idx}.{name}" — files without extensions
-    # are an edge case not used in practice (all real files end in .py).
-    seen = {"mymodule"}
-    result = _ensure_unique("mymodule", seen, 3)
-    assert result != "mymodule"  # collision was resolved
-    assert "mymodule" in result  # original name preserved somewhere
-
-
-# ── Deduplication integration ────────────────────────────────────────────────────
-
-DUPLICATE_FILES_RESPONSE = {
+MULTI_FILE_RESPONSE = {
     "business_requirements": ["Req"],
     "use_cases": [{"title": "UC", "description": "Desc"}],
     "functional_requirements": ["FR"],
@@ -42,39 +21,55 @@ DUPLICATE_FILES_RESPONSE = {
         {
             "title": "Issue A",
             "description": "Do A.",
-            "code_file": "module.py",
-            "test_file": "test_module.py",
+            "target_files": [
+                {"filepath": "pkg/module_a.py", "action": "create"},
+                {"filepath": "pkg/__init__.py", "action": "modify"},
+            ],
+            "test_files": ["tests/test_module_a.py"],
+            "depends_on": [],
         },
         {
             "title": "Issue B",
             "description": "Do B.",
-            "code_file": "module.py",  # duplicate!
-            "test_file": "test_module.py",  # duplicate!
+            "target_files": [
+                {"filepath": "pkg/module_b.py", "action": "create"},
+            ],
+            "test_files": ["tests/test_module_b.py"],
+            "depends_on": ["Issue A"],
         },
     ],
 }
 
 
-def test_duplicate_filenames_are_deduplicated(mock_client, mock_environment, tmp_path):
+def test_multi_file_issues_persisted(mock_environment, tmp_path):
     ws = BaseWorkspace(root=tmp_path)
-    text = json.dumps(DUPLICATE_FILES_RESPONSE)
-    mock_client.get_text.return_value = (text, "jid", [{"role": "assistant", "content": text}])
 
-    orc = MagicMock(spec=CodingOrchestrator)
-    orc.run.return_value = OrchestratorResult(success=True, code="x", tests="y", iterations=1)
+    mock_client = MagicMock(spec=BaseAIClient)
+    mock_client.get_text.side_effect = [
+        make_ai_response(MULTI_FILE_RESPONSE),  # analysis
+        make_ai_response(VALID_PLAN_RESPONSE),   # plan
+        make_ai_response(MULTI_FILE_RESPONSE),  # refined analysis
+    ]
 
     eng = AutoEngineer(
         client=mock_client,
         environment=mock_environment,
         workspace=ws,
-        orchestrator_factory=lambda: orc,
+        orchestrator_factory=lambda: MagicMock(spec=CodingOrchestrator),
         max_retries=3,
     )
 
     analysis = eng.analyze("Do something.")
-    code_files = [i.code_file for i in analysis.issues]
-    test_files = [i.test_file for i in analysis.issues]
 
-    # After dedup, all filenames must be unique
-    assert len(set(code_files)) == len(code_files)
-    assert len(set(test_files)) == len(test_files)
+    assert len(analysis.issues) == 2
+
+    issue_a = analysis.issues[0]
+    assert issue_a.title == "Issue A"
+    assert len(issue_a.target_files) == 2
+    assert issue_a.target_files[0].filepath == "pkg/module_a.py"
+    assert issue_a.target_files[0].action == "create"
+    assert issue_a.test_files == ["tests/test_module_a.py"]
+
+    issue_b = analysis.issues[1]
+    assert len(issue_b.target_files) == 1
+    assert issue_b.test_files == ["tests/test_module_b.py"]

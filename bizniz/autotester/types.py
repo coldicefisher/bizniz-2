@@ -1,12 +1,17 @@
 import datetime
-from typing import Optional, Literal
+from typing import Optional, List, Literal
 
 from pydantic import BaseModel, Field
 
 
+class GeneratedTestFile(BaseModel):
+    """A single test file in a multi-file test suite."""
+    filepath: str
+    tests: str
+
+
 class AutotesterResult(BaseModel):
-    tests: Optional[str] = None
-    output_path: Optional[str] = None
+    test_files: List[GeneratedTestFile] = []
     mode: Literal["from_code", "from_prompt", "review"]
     success: bool
     error: Optional[str] = None

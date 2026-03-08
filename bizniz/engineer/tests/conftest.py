@@ -6,6 +6,8 @@ from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
+from bizniz.autocoder.types import FileChange
+from bizniz.autotester.types import GeneratedTestFile
 from bizniz.orchestrator.types import OrchestratorResult
 from bizniz.engineer.auto_engineer import AutoEngineer
 
@@ -21,10 +23,32 @@ VALID_ANALYSIS_RESPONSE = {
         {
             "title": "Implement task storage",
             "description": "Create a module to store and retrieve tasks.",
-            "code_file": "task_storage.py",
-            "test_file": "test_task_storage.py",
+            "target_files": [{"filepath": "task_manager/storage.py", "action": "create"}],
+            "test_files": ["tests/test_storage.py"],
+            "depends_on": [],
         }
     ],
+}
+
+VALID_PLAN_RESPONSE = {
+    "package_name": "task_manager",
+    "root_namespace": "task_manager",
+    "namespaces": [
+        {"namespace_path": "task_manager", "purpose": "Root package"},
+    ],
+    "domain_models": [],
+    "modules": [
+        {
+            "filepath": "task_manager/storage.py",
+            "class_name": "TaskStorage",
+            "namespace_path": "task_manager",
+            "methods": [
+                {"name": "save", "signature": "def save(self, task: dict) -> int", "description": "Save a task"},
+            ],
+            "docstring": "Stores and retrieves tasks.",
+        }
+    ],
+    "dependencies": [],
 }
 
 
@@ -33,11 +57,20 @@ def make_ai_response(data):
     return text, "job_id", [{"role": "assistant", "content": text}]
 
 
+def _make_multi_response_client():
+    """Create a mock client that returns analysis, then plan, then refined analysis."""
+    client = MagicMock(spec=BaseAIClient)
+    client.get_text.side_effect = [
+        make_ai_response(VALID_ANALYSIS_RESPONSE),  # initial analysis
+        make_ai_response(VALID_PLAN_RESPONSE),       # architecture plan
+        make_ai_response(VALID_ANALYSIS_RESPONSE),   # refined analysis
+    ]
+    return client
+
+
 @pytest.fixture
 def mock_client():
-    client = MagicMock(spec=BaseAIClient)
-    client.get_text.return_value = make_ai_response(VALID_ANALYSIS_RESPONSE)
-    return client
+    return _make_multi_response_client()
 
 
 @pytest.fixture
@@ -55,7 +88,7 @@ def mock_workspace(tmp_path):
 @pytest.fixture
 def mock_orchestrator():
     orc = MagicMock(spec=CodingOrchestrator)
-    orc.run.return_value = OrchestratorResult(success=True, code="pass", tests="pass", iterations=1)
+    orc.run_multi.return_value = OrchestratorResult(success=True, changes=[FileChange(filepath="task_manager/storage.py", code="pass", action="create")], test_files=[GeneratedTestFile(filepath="tests/test_storage.py", tests="pass")], iterations=1)
     return orc
 
 

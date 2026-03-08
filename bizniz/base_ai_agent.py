@@ -2,28 +2,19 @@ from abc import ABC, abstractmethod
 import os
 
 import shutil
-import textwrap
-
 import datetime
 
 from typing import Optional, Callable, Union, Any, Dict, List, Tuple, Literal
 
 
-from bizniz.clients.chatgpt.messages import Message, MessageList, normalize_messages
+from bizniz.clients.chatgpt.messages import Message, normalize_messages
 
 from bizniz.clients.base_ai_client import BaseAIClient
 
-from bizniz.autocoder.types import (
-    AutocoderFailedErrorList,
-    AutocoderOnEventCallback,
-    
-)
+from bizniz.autocoder.types import AutocoderOnEventCallback
 
 from bizniz.environment.base_environment import BaseExecutionEnvironment
-from bizniz.environment.types import (
-    ExecutionCallSpec,
-    ExecutionEnvironmentResult,
-)
+from bizniz.environment.types import ExecutionCallSpec
 from bizniz.workspace.base_workspace import BaseWorkspace
 
 from bizniz.utils.json import clean_llm_json
@@ -39,7 +30,7 @@ class BaseAIAgent(ABC):
                     environment: BaseExecutionEnvironment,
                     workspace: BaseWorkspace, # REQUIRED: We need to be able to save and load files. This is key to our workflow.
                     
-                    max_message_history_length: Optional[int] = 20, # The maximum number of messages to keep in the message history. 
+                    max_message_history_length: Optional[int] = 40, # The maximum number of messages to keep in the message history.
                     max_retries: Optional[int] = 5,
                     
                     # EVENTS AND CALLBACKS
@@ -93,10 +84,16 @@ class BaseAIAgent(ABC):
         
         
     # END CONSTURUCTOR ////////////////////////////////////////////////////////////////////////////
-    
-    
-        
-    # ATTRIBUTES AND PROPERTIES ////////////////////////////////////////////////////////////////////////////    
+
+    def clear_message_history(self):
+        """Reset message history to only the system prompt."""
+        self._message_history = []
+        self.add_messages_to_history([{
+            "role": "system",
+            "content": self._process_system_prompt
+        }])
+
+    # ATTRIBUTES AND PROPERTIES ////////////////////////////////////////////////////////////////////////////
     @property
     def message_history(self) -> List[dict]:
         '''
@@ -216,7 +213,7 @@ class BaseAIAgent(ABC):
 
 
 
-    def add_messages_to_history(self, messages: Union[List[Union[Message, dict]], MessageList], throw_error_on_invalid: bool = False):
+    def add_messages_to_history(self, messages: Union[List[Union[Message, dict]], list]):
         normalized_messages = normalize_messages(messages)
         # Only allow one system message at the beginning of the history. 
         

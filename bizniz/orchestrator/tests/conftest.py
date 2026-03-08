@@ -7,8 +7,8 @@ from bizniz.autotester.autotester import Autotester
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.environment.types import ExecutionEnvironmentResult
 from bizniz.workspace.base_workspace import BaseWorkspace
-from bizniz.autocoder.types import AutocoderProcessResult
-from bizniz.autotester.types import AutotesterResult
+from bizniz.autocoder.types import AutocoderProcessResult, FileChange
+from bizniz.autotester.types import AutotesterResult, GeneratedTestFile
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 
 
@@ -19,8 +19,8 @@ GENERATED_TESTS = "def test_add():\n    assert add(1, 2) == 3\n"
 @pytest.fixture
 def mock_autocoder():
     ac = MagicMock(spec=Autocoder)
-    ac.generate_only.return_value = AutocoderProcessResult(code=GENERATED_CODE)
-    ac.repair.return_value = AutocoderProcessResult(code=GENERATED_CODE + "# repaired\n")
+    ac.generate_only.return_value = AutocoderProcessResult(changes=[FileChange(filepath="add.py", code=GENERATED_CODE, action="create")])
+    ac.repair.return_value = AutocoderProcessResult(changes=[FileChange(filepath="add.py", code=GENERATED_CODE + "# repaired\n", action="modify")])
     return ac
 
 
@@ -28,8 +28,7 @@ def mock_autocoder():
 def mock_autotester():
     at = MagicMock(spec=Autotester)
     at.process_from_prompt.return_value = AutotesterResult(
-        tests=GENERATED_TESTS,
-        output_path="test_add.py",
+        test_files=[GeneratedTestFile(filepath="test_add.py", tests=GENERATED_TESTS)],
         mode="from_prompt",
         success=True,
     )

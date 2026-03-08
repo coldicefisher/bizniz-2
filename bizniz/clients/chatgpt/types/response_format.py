@@ -40,10 +40,21 @@ def parse_response_format(response_format: Optional[ResponseFormat] = None, sche
             case ResponseFormat.JSON_SCHEMA | "json_schema":
                 if schema is None or not isinstance(schema, dict):
                     raise ValueError("Schema must be provided for JSON_SCHEMA response format and must be a dict.")
+                # Unwrap schema wrappers: if the schema has a "schema" key,
+                # it's a wrapper like {name, strict, schema: {type: "object", ...}}
+                if "schema" in schema:
+                    schema_name = schema.get("name", "response")
+                    schema_body = schema["schema"]
+                    strict = schema.get("strict", True)
+                else:
+                    schema_name = "response"
+                    schema_body = schema
+                    strict = True
                 return {
                     "type": "json_schema",
-                    "name": "response",
-                    "schema": schema
+                    "name": schema_name,
+                    "schema": schema_body,
+                    "strict": strict,
                 }
     else:
         return {"type": "json_object"}
