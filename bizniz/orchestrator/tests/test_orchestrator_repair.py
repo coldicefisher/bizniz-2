@@ -41,7 +41,7 @@ def test_max_iterations_raises(mock_autocoder, mock_autotester, mock_test_env, m
 
     # Always fail; always return different code to avoid stale detection
     codes = [f"def add(a,b): return {i}\n" for i in range(20)]
-    mock_autocoder.process.return_value = AutocoderProcessResult(code=codes[0])
+    mock_autocoder.generate.return_value = AutocoderProcessResult(code=codes[0])
     mock_autocoder.repair.side_effect = [AutocoderProcessResult(code=c) for c in codes[1:]]
     mock_workspace.read_file.side_effect = codes
 

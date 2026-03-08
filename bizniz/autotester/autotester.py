@@ -2,9 +2,9 @@ import json
 from typing import Optional, Callable, List
 
 from bizniz.base_ai_agent import BaseAIAgent
-from bizniz.autocoder.clients.base_ai_client import BaseAIClient
-from bizniz.autocoder.clients.chatgpt.messages import Message
-from bizniz.autocoder.clients.chatgpt.types.response_format import ResponseFormat
+from bizniz.clients.base_ai_client import BaseAIClient
+from bizniz.clients.chatgpt.messages import Message
+from bizniz.clients.chatgpt.types.response_format import ResponseFormat
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.utils.code_metadata import read_code_metadata

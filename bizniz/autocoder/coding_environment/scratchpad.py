@@ -15,8 +15,8 @@ from autocoder.autocoder import (
     AutocoderEnvironment
 )
 
-from autocoder.clients.chatgpt.chatgpt_client_factory import ChatGPTClientFactory
-from autocoder.clients.chatgpt.chatgpt_client_config import ChatGPTClientConfig
+from bizniz.clients.chatgpt.chatgpt_client_factory import ChatGPTClientFactory
+from bizniz.clients.chatgpt.chatgpt_client_config import ChatGPTClientConfig
 
 from typing import Optional, Callable, Any, Dict, List
 from pydantic import ValidationError
@@ -84,4 +84,4 @@ autocoder = Autocoder(
 )
     
 
-res = autocoder.process()
+res = autocoder.generate()

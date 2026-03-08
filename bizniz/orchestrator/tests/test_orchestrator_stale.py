@@ -17,7 +17,7 @@ def test_stale_loop_raises(mock_autocoder, mock_autotester, mock_test_env, mock_
     from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 
     # Always return the exact same code
-    mock_autocoder.process.return_value = AutocoderProcessResult(code=SAME_CODE)
+    mock_autocoder.generate.return_value = AutocoderProcessResult(code=SAME_CODE)
     mock_autocoder.repair.return_value = AutocoderProcessResult(code=SAME_CODE)
     mock_workspace.read_file.return_value = SAME_CODE
     mock_test_env.execute.return_value = FAILURE_RESULT
@@ -38,7 +38,7 @@ def test_no_stale_when_code_changes(mock_autocoder, mock_autotester, mock_test_e
     from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 
     codes = [f"def add(a, b): return {i}\n" for i in range(10)]
-    mock_autocoder.process.return_value = AutocoderProcessResult(code=codes[0])
+    mock_autocoder.generate.return_value = AutocoderProcessResult(code=codes[0])
     mock_autocoder.repair.side_effect = [AutocoderProcessResult(code=c) for c in codes[1:]]
     mock_workspace.read_file.side_effect = codes
 

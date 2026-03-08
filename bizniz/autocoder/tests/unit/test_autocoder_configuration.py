@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import MagicMock
 
 from bizniz.autocoder.autocoder import Autocoder
-from bizniz.autocoder.clients.base_ai_client import BaseAIClient
+from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.workspace.base_workspace import BaseWorkspace
 

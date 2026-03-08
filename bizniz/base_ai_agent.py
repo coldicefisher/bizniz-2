@@ -9,9 +9,9 @@ import datetime
 from typing import Optional, Callable, Union, Any, Dict, List, Tuple, Literal
 
 
-from bizniz.autocoder.clients.chatgpt.messages import Message, MessageList, normalize_messages
+from bizniz.clients.chatgpt.messages import Message, MessageList, normalize_messages
 
-from bizniz.autocoder.clients.base_ai_client import BaseAIClient
+from bizniz.clients.base_ai_client import BaseAIClient
 
 from bizniz.autocoder.types import (
     AutocoderFailedErrorList,

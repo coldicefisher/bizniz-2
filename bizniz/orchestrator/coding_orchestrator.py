@@ -6,7 +6,7 @@ tests, and repairs the code on failure until the tests pass or safeguards trigge
 
 Iteration flow
 --------------
-1.  Autocoder.process(prompt, code_filename)   → generate initial code
+1.  Autocoder.generate(prompt, code_filename)   → generate initial code
 2.  Autotester.process_from_prompt(prompt, test_filename)  → contract tests
 3.  PytestEnvironment.execute(test_file) → run tests
 4.  If tests pass → done
@@ -108,8 +108,8 @@ class CodingOrchestrator:
 
         # ── Iteration 1: fresh generate ────────────────────────────────────────
         log("Orchestrator: generating initial code...")
-        code_result = self._autocoder.process(
-            process_prompt=prompt,
+        code_result = self._autocoder.generate(
+            prompt=prompt,
             filename=code_filename,
         )
         current_code = code_result.code or self._workspace.read_file(code_filename)

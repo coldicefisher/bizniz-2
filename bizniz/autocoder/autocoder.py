@@ -2,9 +2,9 @@ import hashlib
 import json
 from typing import Optional, Callable, List
 
-from bizniz.autocoder.clients.chatgpt.messages import Message
-from bizniz.autocoder.clients.chatgpt.types.response_format import ResponseFormat
-from bizniz.autocoder.clients.base_ai_client import BaseAIClient
+from bizniz.clients.chatgpt.messages import Message
+from bizniz.clients.chatgpt.types.response_format import ResponseFormat
+from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.autocoder.prompts.generate_prompts import GENERATE_SYSTEM_INSTRUCTIONS_PROMPT, GENERATE_RETURN_FORMAT_PROMPT
 from bizniz.autocoder.prompts.repair_prompt import REPAIR_PROMPT
 from bizniz.autocoder.prompts.prompt_schemas import GeneratePromptSchema, RepairPromptSchema
@@ -58,11 +58,11 @@ class Autocoder(BaseAIAgent):
             + GENERATE_RETURN_FORMAT_PROMPT
         )
 
-    # Process ///////////////////////////////////////////////////////////////////////////////////
+    # Generate ///////////////////////////////////////////////////////////////////////////////////
 
-    def process(
+    def generate(
         self,
-        process_prompt: str,
+        prompt: str,
         filename: str,
         on_event: Optional[Callable[[AutocoderOnEventCallback], None]] = None,
         on_status_message: Optional[Callable[[str], None]] = None,
@@ -90,7 +90,7 @@ class Autocoder(BaseAIAgent):
 
             if not original_code or original_hash != new_hash:
                 log("Saving new code to disk...")
-                self._save_code_to_file(code=new_code, filename=filename, prompt=process_prompt)
+                self._save_code_to_file(code=new_code, filename=filename, prompt=prompt)
                 if on_save_code is not None:
                     log("Saving new code via on_save_code callback...")
                     on_save_code(new_code)
@@ -109,7 +109,7 @@ class Autocoder(BaseAIAgent):
         log("Requesting initial code from AI...")
         try:
             working_code, call_spec = self._generate_code(
-                messages=[Message(role="user", content=process_prompt)]
+                messages=[Message(role="user", content=prompt)]
             )
         except Exception as e:
             raise AutocoderProcessError(f"Failed to generate initial code: {e}") from e
