@@ -49,10 +49,10 @@ class BaseAIAgent(ABC):
         
         
         # Instantiation Guards ////////////////////////////////////////////////////////////////////////////
-        if not isinstance(environment, BaseExecutionEnvironment) or issubclass(type(environment), BaseExecutionEnvironment):
+        if not isinstance(environment, BaseExecutionEnvironment):
             raise ValueError("environment must be an instance of a class that inherits from BaseExecutionEnvironment.")
-        
-        if not isinstance(client, BaseAIClient) or issubclass(type(client), BaseAIClient):
+
+        if not isinstance(client, BaseAIClient):
             raise ValueError("client must be an instance of a class that inherits from BaseAIClient.")
         
         if not isinstance(max_message_history_length, int) or max_message_history_length <= 0:
@@ -210,6 +210,7 @@ class BaseAIAgent(ABC):
     def emit(self, event: AutocoderOnEventCallback):
         if self._on_event:
             self._on_event(event)
+            
 
 
 
@@ -239,11 +240,19 @@ class BaseAIAgent(ABC):
 
 
 
-    @property
     def get_metadata(self, prompt: str) -> Dict[str, Any]:
         return {
             "problem_statement": prompt,
         }
+
+    @property
+    @abstractmethod
+    def _process_system_prompt(self) -> str:
+        '''
+        Returns the system prompt injected at the start of the message history.
+        Subclasses must implement this to define their AI persona and instructions.
+        '''
+        ...
         
         
     def clean_llm_json(self, text: str) -> str:

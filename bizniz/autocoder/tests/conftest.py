@@ -1,132 +1,74 @@
-from os import environ as env
-import yaml
-import os
-import json
 import pytest
+import json
 from unittest.mock import MagicMock
 
-from copy import deepcopy
-
-from autocoder.clients.chatgpt.openai_chatgpt_client import ChatGPTClient, ChatGPTClientConfig, AutocoderClientError
-from autocoder.clients.chatgpt.messages import Message, MessageList
-from autocoder.clients.chatgpt.types.roles import Role
-from autocoder.clients.chatgpt.errors import OpenAIAuthError
-from autocoder.base_validator import BaseValidator, ValidationResult
-
-from openai import OpenAI, AzureOpenAI
-
-from types import SimpleNamespace
+from bizniz.autocoder.clients.base_ai_client import BaseAIClient
+from bizniz.environment.base_environment import BaseExecutionEnvironment
+from bizniz.environment.types import (
+    ExecutionEnvironmentResult,
+    ExecutionEnvironmentErrorDetails,
+    ExecutionCallSpec,
+)
+from bizniz.workspace.base_workspace import BaseWorkspace
+from bizniz.autocoder.autocoder import Autocoder
 
 
+# ---------------------------------------------------------------------------
+# Shared response helpers
+# ---------------------------------------------------------------------------
+
+VALID_GENERATE_JSON = {
+    "code": "def add(a, b): return a + b",
+    "call_spec": {"symbol": "add", "args": [1, 2], "kwargs": {}},
+}
+
+VALID_REPAIR_JSON = {
+    "code": "def add(a, b): return a + b",
+    "analysis": "Function was missing",
+    "fix_plan": "Added the function",
+    "call_spec": {"symbol": "add", "args": [1, 2], "kwargs": {}},
+}
+
+
+def make_get_text_response(response_json):
+    """Return the 3-tuple that BaseChatGPTClient.get_text produces."""
+    text = json.dumps(response_json)
+    output_messages = [{"role": "assistant", "content": text}]
+    return text, "mock_job_id", output_messages
+
+
+# ---------------------------------------------------------------------------
+# Core mock fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def mock_client():
+    client = MagicMock(spec=BaseAIClient)
+    client.get_text.return_value = make_get_text_response(VALID_GENERATE_JSON)
+    return client
 
 
 @pytest.fixture
-def openai_config():
-    return ChatGPTClientConfig(
-        is_azure=False,
-        api_base=None,
-        available_models=None,
-        default_model=None,
-        config_file_path=None,
+def mock_environment():
+    env = MagicMock(spec=BaseExecutionEnvironment)
+    env.describe.return_value = "Test execution environment"
+    env.execute.return_value = ExecutionEnvironmentResult(success=True, result=42)
+    return env
+
+
+@pytest.fixture
+def mock_workspace(tmp_path):
+    ws = MagicMock(spec=BaseWorkspace)
+    ws.exists.return_value = False
+    ws.path.return_value = tmp_path / "generated_code.py"
+    return ws
+
+
+@pytest.fixture
+def autocoder(mock_client, mock_environment, mock_workspace):
+    return Autocoder(
+        client=mock_client,
+        environment=mock_environment,
+        workspace=mock_workspace,
+        max_retries=3,
     )
-
-
-@pytest.fixture
-def azure_config():
-    return ChatGPTClientConfig(
-        is_azure=True,
-        api_base="https://example.openai.azure.com/",
-        available_models={"gpt-4": "gpt-4"},
-        default_model="gpt-4",
-        api_version="2024-02-01",
-        config_file_path=None,
-    )
-
-
-@pytest.fixture(autouse=True)
-def mock_openai_clients(monkeypatch):
-    monkeypatch.setattr(
-        "autocoder.clients.chatgpt.chatgpt_client.OpenAI",
-        MagicMock()
-    )
-    monkeypatch.setattr(
-        "autocoder.clients.chatgpt.chatgpt_client.AzureOpenAI",
-        MagicMock()
-    )
-
-
-
-@pytest.fixture
-def mock_completion():
-    return SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(
-                    role="assistant",
-                    content="Mocked response"
-                )
-            )
-        ],
-        usage=SimpleNamespace(
-            prompt_tokens=10,
-            completion_tokens=5
-        )
-    )
-
-
-@pytest.fixture
-def process_prompt():
-    return "Generate Python code to add numbers. You must figure out how to parse the input data and return the result."
-
-
-@pytest.fixture
-def input_data():
-    return "25, 17"
-
-
-@pytest.fixture
-def validator_factory():
-    def _factory(is_valid=True):
-        class MockValidator(BaseValidator):
-            def validate(self, input_data: str, output_data: str, *args, **kwargs):
-                self._input_data = input_data
-                self._output_data = output_data
-                return ValidationResult(is_valid=is_valid)
-        return MockValidator
-    return _factory
-
-
-
-@pytest.fixture
-def mock_chatgpt_client_factory():
-    def _factory(response_json=None):
-        mock_client = MagicMock(spec=ChatGPTClient)
-
-        if response_json is None:
-            response_json = {
-                "cannot_process": False,
-                "code": "```python\nprint(25 + 17)\n```"
-            }
-
-        mock_client.get_text.return_value = (
-            json.dumps(response_json),
-            "mock_job_id"
-        )
-
-        return mock_client
-    return _factory
-
-
-
-@pytest.fixture
-def mock_verify_client_factory():
-    def _factory(responses):
-        """
-        responses = list of values get_text should return in sequence
-        Each value must be (text, job_id)
-        """
-        mock_client = MagicMock(spec=ChatGPTClient)
-        mock_client.get_text.side_effect = responses
-        return mock_client
-    return _factory
-

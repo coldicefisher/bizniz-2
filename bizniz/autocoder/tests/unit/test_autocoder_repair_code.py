@@ -1,163 +1,101 @@
-from pathlib import Path
-import os
-import shutil
-import pytest
 import json
-
-from autocoder.autocoder import AutocoderProcessError, AutocoderBadAIResponseError, AutocoderProcessResult, Autocoder, AutocoderConfig, AutocoderEnvironment
-
-from autocoder.clients.chatgpt.openai_chatgpt_client import ChatGPTClient
-
-from typing import Optional, Callable, Any, Dict, List
-from pydantic import ValidationError
-from autocoder.tests.mock_validator import MockValidator
+import pytest
 from unittest.mock import MagicMock
 
+from bizniz.autocoder.autocoder import Autocoder
+from bizniz.autocoder.types import AutocoderBadAIResponseError
+from bizniz.environment.types import ExecutionCallSpec
+
+from bizniz.autocoder.tests.conftest import make_get_text_response, VALID_REPAIR_JSON
 
 
+def test_repair_code_returns_code_and_call_spec(autocoder, mock_client):
+    mock_client.get_text.return_value = make_get_text_response(VALID_REPAIR_JSON)
 
-def test_repair_code_success(tmp_path, validator_factory):
-    Validator = validator_factory(True)
-
-    mock_client = MagicMock()
-    mock_client.get_text.return_value = (
-        json.dumps({
-            "cannot_process": False,
-            "code": "```python\nprint(42)\n```"
-        }),
-        "job123"
+    code, call_spec = autocoder._repair_code(
+        previous_code="broken_code()",
+        error_message="NameError: broken_code is not defined",
     )
 
-    autocoder = Autocoder(
-        input_data="25, 17",
-        process_prompt="Add numbers",
-        validator=Validator(),
-        client=mock_client,
-        max_retries=3,
-        config=AutocoderConfig(code_directory=str(tmp_path))
+    assert "def add" in code
+    assert isinstance(call_spec, ExecutionCallSpec)
+    assert call_spec.symbol == "add"
+
+
+def test_repair_code_adds_repair_prompt_to_history(autocoder, mock_client):
+    mock_client.get_text.return_value = make_get_text_response(VALID_REPAIR_JSON)
+    history_before = len(autocoder._message_history)
+
+    autocoder._repair_code(
+        previous_code="broken()",
+        error_message="SyntaxError",
     )
 
-    repaired = autocoder._repair_code(
-        previous_code="print('broken')",
-        error_message="SyntaxError"
+    # Repair user message + assistant response added
+    assert len(autocoder._message_history) > history_before
+
+
+def test_repair_code_prompt_contains_error_and_code(autocoder, mock_client):
+    mock_client.get_text.return_value = make_get_text_response(VALID_REPAIR_JSON)
+
+    autocoder._repair_code(
+        previous_code="print('old broken code')",
+        error_message="TypeError: boom",
     )
 
-    assert repaired == "print(42)"
-    assert mock_client.get_text.call_count == 1
+    # Inspect the messages passed to the client
+    call_kwargs = mock_client.get_text.call_args
+    messages_passed = call_kwargs.kwargs.get("messages") or call_kwargs.args[0]
+
+    all_content = " ".join(
+        m.get("content", "") if isinstance(m, dict) else ""
+        for m in messages_passed
+    )
+    assert "TypeError: boom" in all_content
+    assert "print('old broken code')" in all_content
 
 
-def test_repair_code_retry_on_invalid_json(tmp_path, validator_factory):
-    Validator = validator_factory(True)
+def test_repair_code_retries_on_invalid_json(autocoder, mock_client):
+    good = make_get_text_response(VALID_REPAIR_JSON)
 
-    mock_client = MagicMock()
     mock_client.get_text.side_effect = [
-        ("NOT JSON", "job1"),
-        (json.dumps({
-            "cannot_process": False,
-            "code": "print(99)"
-        }), "job2")
+        ("NOT JSON", "j1", []),
+        good,
     ]
 
-    autocoder = Autocoder(
-        input_data="25, 17",
-        process_prompt="Add numbers",
-        validator=Validator(),
-        client=mock_client,
-        max_retries=3,
-        config=AutocoderConfig(code_directory=str(tmp_path))
-    )
-
-    repaired = autocoder._repair_code(
+    code, _ = autocoder._repair_code(
         previous_code="broken",
-        error_message="Error"
+        error_message="Error",
     )
 
-    assert repaired == "print(99)"
+    assert "def add" in code
     assert mock_client.get_text.call_count == 2
 
 
-def test_repair_code_cannot_process(tmp_path, validator_factory):
-    Validator = validator_factory(True)
-
-    mock_client = MagicMock()
-    mock_client.get_text.return_value = (
-        json.dumps({
-            "cannot_process": True
-        }),
-        "job1"
-    )
-
-    autocoder = Autocoder(
-        input_data="25, 17",
-        process_prompt="Add numbers",
-        validator=Validator(),
-        client=mock_client,
-        max_retries=2,
-        config=AutocoderConfig(code_directory=str(tmp_path))
-    )
-
-    with pytest.raises(AutocoderProcessError):
-        autocoder._repair_code(
-            previous_code="broken",
-            error_message="Error"
-        )
-
-
-def test_repair_code_exhausts_retries(tmp_path, validator_factory):
-    Validator = validator_factory(True)
-
-    mock_client = MagicMock()
-    mock_client.get_text.return_value = ("INVALID JSON", "job1")
-
-    autocoder = Autocoder(
-        input_data="25, 17",
-        process_prompt="Add numbers",
-        validator=Validator(),
-        client=mock_client,
-        max_retries=2,
-        config=AutocoderConfig(code_directory=str(tmp_path))
-    )
+def test_repair_code_raises_after_exhausted_retries(autocoder, mock_client):
+    mock_client.get_text.return_value = ("INVALID JSON", "j1", [])
 
     with pytest.raises(AutocoderBadAIResponseError):
         autocoder._repair_code(
             previous_code="broken",
-            error_message="Error"
+            error_message="Error",
         )
 
-    assert mock_client.get_text.call_count == 2
+    # Internal repair loop retries 3 times
+    assert mock_client.get_text.call_count == 3
 
 
-def test_repair_prompt_contents(tmp_path, validator_factory):
-    Validator = validator_factory(True)
+def test_repair_code_raises_on_empty_code(autocoder, mock_client):
+    empty_code_response = {
+        "code": "",
+        "analysis": "nothing",
+        "fix_plan": "nothing",
+        "call_spec": {"symbol": "add", "args": [], "kwargs": {}},
+    }
+    mock_client.get_text.return_value = make_get_text_response(empty_code_response)
 
-    mock_client = MagicMock()
-    mock_client.get_text.return_value = (
-        json.dumps({
-            "cannot_process": False,
-            "code": "print(1)"
-        }),
-        "job1"
-    )
-
-    autocoder = Autocoder(
-        input_data="25, 17",
-        process_prompt="Add numbers",
-        validator=Validator(),
-        client=mock_client,
-        max_retries=1,
-        config=AutocoderConfig(code_directory=str(tmp_path))
-    )
-
-    autocoder._repair_code(
-        previous_code="print('broken')",
-        error_message="SyntaxError"
-    )
-
-    args, kwargs = mock_client.get_text.call_args
-
-    instruction_messages = kwargs["instruction_messages"]
-    repair_prompt = instruction_messages[0]["content"]
-
-    assert "SyntaxError" in repair_prompt
-    assert "print('broken')" in repair_prompt
-    assert "previously generated python code failed" in repair_prompt.lower()
+    with pytest.raises(AutocoderBadAIResponseError):
+        autocoder._repair_code(
+            previous_code="broken",
+            error_message="Error",
+        )

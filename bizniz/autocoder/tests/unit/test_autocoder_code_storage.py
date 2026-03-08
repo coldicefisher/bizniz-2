@@ -1,196 +1,106 @@
-from pathlib import Path
-import os
-import shutil
 import pytest
-import json
-
-from autocoder.autocoder import AutocoderProcessError, AutocoderBadAIResponseError, AutocoderProcessResult, Autocoder, AutocoderConfig, AutocoderEnvironment
-
-from autocoder.clients.chatgpt.openai_chatgpt_client import ChatGPTClient
-
-from typing import Optional, Callable, Any, Dict, List
-from pydantic import ValidationError
-from autocoder.tests.mock_validator import MockValidator
-from unittest.mock import MagicMock
+from bizniz.workspace.base_workspace import BaseWorkspace
+from bizniz.autocoder.autocoder import Autocoder
 
 
-
-def test_retrieve_saved_code_with_explicit_filename(tmp_path, validator_factory, mock_chatgpt_client_factory):
-    Validator = validator_factory(True)
-    mock_client = mock_chatgpt_client_factory()
-
-    config = AutocoderConfig(
-        code_directory=str(tmp_path),
-        module_name="code",
-        filename="generated_code.py"
-    )
-
-    autocoder = Autocoder(
-        input_data="x",
-        process_prompt="test",
-        validator=Validator(),
+@pytest.fixture
+def real_workspace_autocoder(mock_client, mock_environment, tmp_path):
+    ws = BaseWorkspace(root=tmp_path)
+    return Autocoder(
         client=mock_client,
-        config=config,
-    )
-
-    # Correct module path
-    module_dir = tmp_path / "code"
-    file_path = module_dir / "generated_code.py"
-    file_path.write_text("print('hello')")
-
-    content, filename = autocoder.retrieve_saved_code()
-
-    assert content == "print('hello')"
-    assert filename == "generated_code.py"
+        environment=mock_environment,
+        workspace=ws,
+    ), ws, tmp_path
 
 
-def test_save_code_creates_file(tmp_path, validator_factory, mock_chatgpt_client_factory):
-    Validator = validator_factory(True)
-    mock_client = mock_chatgpt_client_factory()
+# ---------------------------------------------------------------------------
+# _strip_code_block
+# ---------------------------------------------------------------------------
 
-    config = AutocoderConfig(
-        code_directory=str(tmp_path),
-        module_name="code",
-        filename="generated_code.py"
-    )
-
-    autocoder = Autocoder(
-        input_data="x",
-        process_prompt="test",
-        validator=Validator(),
-        client=mock_client,
-        config=config,
-    )
-
-    autocoder._save_code_to_file("print('new')")
-
-    module_dir = tmp_path / "code"
-    file_path = module_dir / "generated_code.py"
+def test_strip_code_block_plain_text(autocoder):
+    assert autocoder._strip_code_block("print('hello')") == "print('hello')"
 
 
-    assert file_path.exists()
-    assert file_path.read_text() == "print('new')"
-
-
-def test_save_code_moves_existing_to_cache(tmp_path, validator_factory, mock_chatgpt_client_factory):
-    Validator = validator_factory(True)
-    mock_client = mock_chatgpt_client_factory()
-
-    config = AutocoderConfig(
-        code_directory=str(tmp_path),
-        module_name="code",
-        filename="generated_code.py"
-    )
-
-    autocoder = Autocoder(
-        input_data="x",
-        process_prompt="test",
-        validator=Validator(),
-        client=mock_client,
-        config=config,
-    )
-
-    # Correct module directory
-    module_dir = tmp_path / "code"
-
-    # Create existing file
-    original_file = module_dir / "generated_code.py"
-    original_file.write_text("old code")
-
-    # Save new code
-    autocoder._save_code_to_file("new code")
-
-    # New file overwritten
-    assert original_file.exists()
-    assert original_file.read_text() == "new code"
-
-    # Cached file exists inside module_dir/cached
-    cache_dir = module_dir / "cached"
-    assert cache_dir.exists()
-
-    cached_files = list(cache_dir.glob("*generated_code.py"))
-    assert len(cached_files) == 1
-    assert cached_files[0].read_text() == "old code"
-
-def test_save_code_sanitizes_filename(tmp_path, validator_factory, mock_chatgpt_client_factory):
-    Validator = validator_factory(True)
-    mock_client = mock_chatgpt_client_factory()
-
-    config = AutocoderConfig(
-        code_directory=str(tmp_path),
-        module_name="code",
-        filename="bad:name?.py"
-    )
-
-    autocoder = Autocoder(
-        input_data="x",
-        process_prompt="test",
-        validator=Validator(),
-        client=mock_client,
-        config=config,
-    )
-
-    autocoder._save_code_to_file("content")
-
-    sanitized = "bad_name_.py"
-
-    module_dir = tmp_path / "code"
-    assert (module_dir / sanitized).exists()
-
-
-
-
-def test_strip_code_block_plain_text(tmp_path, validator_factory, mock_chatgpt_client_factory):
-    Validator = validator_factory(True)
-    mock_client = mock_chatgpt_client_factory()
-
-    autocoder = Autocoder(
-        input_data="x",
-        process_prompt="test",
-        validator=Validator(),
-        client=mock_client,
-        config=AutocoderConfig(code_directory=str(tmp_path)),
-    )
-
-    text = "print('hello')"
+def test_strip_code_block_python_fence(autocoder):
+    text = "```python\nprint('hello')\n```"
     assert autocoder._strip_code_block(text) == "print('hello')"
 
 
-def test_strip_code_block_python(tmp_path, validator_factory, mock_chatgpt_client_factory):
-    Validator = validator_factory(True)
-    mock_client = mock_chatgpt_client_factory()
-
-    autocoder = Autocoder(
-        input_data="x",
-        process_prompt="test",
-        validator=Validator(),
-        client=mock_client,
-        config=AutocoderConfig(code_directory=str(tmp_path)),
-    )
-
-    text = "```python\nprint('hello')\n```"
-
-    result = autocoder._strip_code_block(text)
-
-    assert result == "print('hello')"
-
-
-def test_strip_code_block_generic(tmp_path, validator_factory, mock_chatgpt_client_factory):
-    Validator = validator_factory(True)
-    mock_client = mock_chatgpt_client_factory()
-
-    autocoder = Autocoder(
-        input_data="x",
-        process_prompt="test",
-        validator=Validator(),
-        client=mock_client,
-        config=AutocoderConfig(code_directory=str(tmp_path)),
-    )
-
+def test_strip_code_block_generic_fence(autocoder):
     text = "```\nprint('hello')\n```"
-
-    result = autocoder._strip_code_block(text)
-
-    assert result == "print('hello')"
+    assert autocoder._strip_code_block(text) == "print('hello')"
 
 
+# ---------------------------------------------------------------------------
+# _save_code_to_file
+# ---------------------------------------------------------------------------
+
+def test_save_code_creates_file(real_workspace_autocoder):
+    autocoder, ws, tmp_path = real_workspace_autocoder
+
+    autocoder._save_code_to_file(code="print('hello')", filename="output.py")
+
+    saved = (tmp_path / "output.py").read_text()
+    assert "print('hello')" in saved
+
+
+def test_save_code_includes_problem_statement_comment(real_workspace_autocoder):
+    autocoder, ws, tmp_path = real_workspace_autocoder
+
+    autocoder._save_code_to_file(
+        code="x = 1",
+        filename="out.py",
+        prompt="Add two numbers together",
+    )
+
+    content = (tmp_path / "out.py").read_text()
+    assert "Add two numbers together" in content
+
+
+def test_save_code_backs_up_existing_file(real_workspace_autocoder):
+    autocoder, ws, tmp_path = real_workspace_autocoder
+
+    # Pre-populate a cached file so backup logic triggers
+    import os
+    cache_dir = tmp_path / "cached"
+    cache_dir.mkdir()
+    cached_file = cache_dir / "out.py"
+    cached_file.write_text("old code")
+
+    autocoder._save_code_to_file(code="new code", filename="out.py")
+
+    # Original saved at workspace root
+    assert (tmp_path / "out.py").exists()
+
+    # Old cached file should have been renamed with a timestamp prefix
+    backups = list(cache_dir.glob("*out.py"))
+    assert len(backups) == 1
+    assert "old code" in backups[0].read_text()
+
+
+def test_save_code_sanitizes_cached_filename(real_workspace_autocoder):
+    """
+    _save_code_to_file sanitizes the filename used for the *cached* backup copy.
+    The main file is written to workspace.path(filename) as-is.
+    On a second save, the old cached copy gets a sanitized timestamped name.
+    """
+    autocoder, ws, tmp_path = real_workspace_autocoder
+
+    # Create a pre-existing cached file so the backup rename logic runs
+    import os
+    cache_dir = tmp_path / "cached"
+    cache_dir.mkdir()
+    # The cached file is stored using the sanitized name
+    cached = cache_dir / "bad_name_.py"
+    cached.write_text("original")
+
+    autocoder._save_code_to_file(code="x = 1", filename="bad:name?.py")
+
+    # Main file is written (filesystem allows these chars on Linux)
+    saved_files = list(tmp_path.iterdir())
+    assert any("bad" in f.name for f in saved_files)
+
+    # The cached backup was renamed with a timestamp prefix (sanitized name)
+    backups = list(cache_dir.glob("*bad_name_.py"))
+    assert len(backups) == 1
+    assert "original" in backups[0].read_text()
