@@ -3,7 +3,10 @@
 import os
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bizniz.workspace.workspace_db import WorkspaceDB
 
 
 class BaseWorkspace:
@@ -14,11 +17,15 @@ class BaseWorkspace:
     It provides file operations and optional git operations.
     Execution environments operate *against* the workspace but
     the workspace itself never executes code.
+
+    The workspace database is lazily created on first access via
+    the ``db`` property and lives at ``{root}/.bizniz/bizniz.db``.
     """
 
     def __init__(self, root: str | Path):
         self._root = Path(root).resolve()
         self._root.mkdir(parents=True, exist_ok=True)
+        self._db: Optional["WorkspaceDB"] = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -28,6 +35,20 @@ class BaseWorkspace:
     def root(self) -> Path:
         """Root directory of the workspace."""
         return self._root
+
+    @property
+    def db(self) -> "WorkspaceDB":
+        """
+        Lazily create and return the workspace SQLite database.
+
+        The DB is the source of truth for problem statements, requirements,
+        use cases, and issues.  It lives at ``{root}/.bizniz/bizniz.db``
+        and is auto-created on first access.
+        """
+        if self._db is None:
+            from bizniz.workspace.workspace_db import WorkspaceDB
+            self._db = WorkspaceDB(self)
+        return self._db
 
     # ------------------------------------------------------------------
     # Path helpers

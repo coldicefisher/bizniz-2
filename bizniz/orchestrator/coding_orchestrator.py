@@ -109,7 +109,7 @@ class CodingOrchestrator:
 
         # ── Iteration 1: fresh generate ────────────────────────────────────────
         log("Orchestrator: generating initial code...")
-        code_result = self._autocoder.generate(
+        code_result = self._autocoder.generate_only(
             prompt=prompt,
             filename=code_filename,
         )
@@ -142,7 +142,44 @@ class CodingOrchestrator:
 
             # Tests failed — extract failure output for repair
             failure_output = _build_failure_message(eval_result, test_code=current_tests)
-            log(f"Orchestrator: tests failed — repairing code...\n{failure_output[:400]}")
+            log(f"Orchestrator: tests failed —\n{failure_output}")
+
+            # If pytest couldn't even collect the tests (exit code 2), the test
+            # file itself is broken (syntax error, bad import, etc.).  Regenerate
+            # the tests using the original prompt + current code context.
+            is_collection_error = (
+                eval_result.error
+                and eval_result.error.message
+                and "exited with code 2" in eval_result.error.message
+            )
+            if is_collection_error:
+                log("Orchestrator: test collection error — regenerating tests...")
+                # Include the error so the AI knows what went wrong with the previous tests
+                error_detail = ""
+                if eval_result.error and eval_result.error.traceback:
+                    error_detail = eval_result.error.traceback
+                elif eval_result.stdout:
+                    error_detail = eval_result.stdout
+
+                regen_prompt = (
+                    f"{prompt}\n\n"
+                    f"Here is the current implementation that tests must be written for:\n"
+                    f"```python\n{current_code}\n```\n\n"
+                    f"IMPORTANT: The previous test file had errors and could not be collected by pytest.\n"
+                    f"The error was:\n{error_detail}\n\n"
+                    f"Make sure all test functions use only defined fixtures or pytest.mark.parametrize.\n"
+                    f"Do NOT use undefined fixture parameters in test function signatures."
+                )
+                test_result = self._autotester.process_from_prompt(
+                    prompt=regen_prompt,
+                    output_path=test_filename,
+                    code_filename=code_filename,
+                )
+                current_tests = test_result.tests
+                # Reset stale detection — code didn't change but tests did
+                stale_count = 0
+                previous_code_hash = None
+                continue
 
             # Stale detection before repair — require 2+ consecutive identical hashes
             current_hash = _hash(current_code)

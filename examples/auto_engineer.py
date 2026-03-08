@@ -33,7 +33,7 @@ from bizniz.workspace.local_workspace import LocalWorkspace
 def make_orchestrator(client, workspace):
     """Factory: returns a fresh CodingOrchestrator per issue."""
     # sandbox = PythonSandboxExecutionEnvironment()
-    sandbox = DockerExecutionEnvironment(image="python:3.12-slim")
+    sandbox = DockerExecutionEnvironment(image="bizniz-python-runner")
     pytest_env = PytestEnvironment(workspace_root=workspace.root)
 
     return CodingOrchestrator(
@@ -49,7 +49,7 @@ def make_orchestrator(client, workspace):
         ),
         test_environment=pytest_env,
         workspace=workspace,
-        max_iterations=5,
+        max_iterations=10,
         on_status_message=lambda msg: print(f"    [orchestrator] {msg}"),
     )
 

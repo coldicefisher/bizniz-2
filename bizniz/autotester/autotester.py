@@ -67,6 +67,19 @@ class Autotester(BaseAIAgent):
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
+    def _lookup_problem_statement(self, code_path: str) -> Optional[str]:
+        """
+        Look up the problem statement for a code file from the workspace DB.
+        Returns None if no matching issue exists.
+        """
+        try:
+            ctx = self._workspace.db.get_context_for_code_file(code_path)
+            if ctx and ctx.get("problem_statement"):
+                return ctx["problem_statement"]
+        except Exception:
+            pass
+        return None
+
     def process_from_code(
         self,
         code_path: str,
@@ -76,8 +89,9 @@ class Autotester(BaseAIAgent):
         on_save_tests: Optional[Callable[[str], None]] = None,
     ) -> AutotesterResult:
         """
-        Mode 1: read code from workspace, read its embedded problem statement,
-        generate a pytest test suite.
+        Mode 1: read code from workspace, look up its problem statement from the
+        workspace DB (falling back to embedded file metadata), then generate a
+        pytest test suite.
 
         Parameters
         ----------
@@ -94,12 +108,19 @@ class Autotester(BaseAIAgent):
 
         log(f"Mode 1: reading code from {code_path}")
         code = self._workspace.read_file(path=code_path)
-        metadata = read_code_metadata(code)
-        problem_statement = metadata.get("problem_statement") or "(no problem statement found)"
+
+        # Source of truth: workspace DB first, then file metadata fallback
+        problem_statement = self._lookup_problem_statement(code_path)
+        if not problem_statement:
+            metadata = read_code_metadata(code)
+            problem_statement = metadata.get("problem_statement") or "(no problem statement found)"
+
+        module_name = code_path.replace(".py", "")
 
         user_prompt = FROM_CODE_PROMPT_TEMPLATE.format(
             problem_statement=problem_statement,
             code=code,
+            module_name=module_name,
         )
 
         log("Requesting tests from AI (from_code mode)...")
@@ -197,13 +218,20 @@ class Autotester(BaseAIAgent):
         log(f"Mode 3: reading code from {code_path} and tests from {test_path}")
         code = self._workspace.read_file(path=code_path)
         existing_tests = self._workspace.read_file(path=test_path)
-        metadata = read_code_metadata(code)
-        problem_statement = metadata.get("problem_statement") or "(no problem statement found)"
+
+        # Source of truth: workspace DB first, then file metadata fallback
+        problem_statement = self._lookup_problem_statement(code_path)
+        if not problem_statement:
+            metadata = read_code_metadata(code)
+            problem_statement = metadata.get("problem_statement") or "(no problem statement found)"
+
+        module_name = code_path.replace(".py", "")
 
         user_prompt = REVIEW_PROMPT_TEMPLATE.format(
             problem_statement=problem_statement,
             code=code,
             existing_tests=existing_tests,
+            module_name=module_name,
         )
 
         log("Requesting improved tests from AI (review mode)...")

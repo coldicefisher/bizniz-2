@@ -176,6 +176,45 @@ class WorkspaceDB:
         )
         self._conn.commit()
 
+    def get_issue_by_code_file(self, code_file: str) -> Optional[sqlite3.Row]:
+        """Look up an issue by its code_file path."""
+        cur = self._conn.execute(
+            "SELECT * FROM issues WHERE code_file = ? ORDER BY id DESC LIMIT 1",
+            (code_file,),
+        )
+        return cur.fetchone()
+
+    def get_problem_for_issue(self, issue_id: int) -> Optional[str]:
+        """Return the problem statement associated with an issue."""
+        cur = self._conn.execute(
+            """SELECT p.statement FROM problems p
+               JOIN issues i ON i.problem_id = p.id
+               WHERE i.id = ?""",
+            (issue_id,),
+        )
+        row = cur.fetchone()
+        return row["statement"] if row else None
+
+    def get_context_for_code_file(self, code_file: str) -> Optional[dict]:
+        """
+        Look up an issue by code_file and return its full context:
+        problem_statement, issue description, title, and test_file.
+        Returns None if no matching issue exists.
+        """
+        cur = self._conn.execute(
+            """SELECT i.id, i.title, i.description, i.code_file, i.test_file,
+                      p.statement as problem_statement
+               FROM issues i
+               JOIN problems p ON i.problem_id = p.id
+               WHERE i.code_file = ?
+               ORDER BY i.id DESC LIMIT 1""",
+            (code_file,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
     # ── Lifecycle ───────────────────────────────────────────────────────────────
 
     def close(self):

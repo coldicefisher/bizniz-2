@@ -16,7 +16,6 @@ from bizniz.clients.chatgpt.messages import Message
 from bizniz.clients.chatgpt.types.response_format import ResponseFormat
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.workspace.base_workspace import BaseWorkspace
-from bizniz.workspace.workspace_db import WorkspaceDB
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.orchestrator.types import OrchestratorResult
 
@@ -73,7 +72,6 @@ class AutoEngineer(BaseAIAgent):
             on_status_message=on_status_message,
         )
         self._orchestrator_factory = orchestrator_factory
-        self._db = WorkspaceDB(workspace)
 
     # ── BaseAIAgent contract ────────────────────────────────────────────────────
 
@@ -94,7 +92,7 @@ class AutoEngineer(BaseAIAgent):
                 self._on_status_message(msg)
 
         log("AutoEngineer: saving problem statement...")
-        problem_id = self._db.save_problem(problem_statement)
+        problem_id = self._workspace.db.save_problem(problem_statement)
 
         log("AutoEngineer: calling AI for engineering analysis...")
         user_prompt = ANALYZE_PROMPT_TEMPLATE.format(
@@ -122,11 +120,11 @@ class AutoEngineer(BaseAIAgent):
             if self._on_status_message:
                 self._on_status_message(msg)
 
-        row = self._db.get_issue(issue_id)
+        row = self._workspace.db.get_issue(issue_id)
         if row is None:
             raise ValueError(f"Issue {issue_id} not found in workspace DB.")
 
-        self._db.update_issue_status(issue_id, "in_progress")
+        self._workspace.db.update_issue_status(issue_id, "in_progress")
         log(f"AutoEngineer: dispatching orchestrator for issue #{issue_id} — {row['title']}")
 
         orchestrator = self._orchestrator_factory()
@@ -137,10 +135,10 @@ class AutoEngineer(BaseAIAgent):
         )
 
         if result.success:
-            self._db.close_issue(issue_id)
+            self._workspace.db.close_issue(issue_id)
             log(f"AutoEngineer: issue #{issue_id} closed successfully.")
         else:
-            self._db.update_issue_status(issue_id, "open")
+            self._workspace.db.update_issue_status(issue_id, "open")
             log(f"AutoEngineer: issue #{issue_id} could not be resolved — reset to open.")
 
         return result
@@ -158,8 +156,9 @@ class AutoEngineer(BaseAIAgent):
         return results
 
     def close(self):
-        """Close the underlying database connection."""
-        self._db.close()
+        """Close the underlying database connection (if open)."""
+        if self._workspace._db is not None:
+            self._workspace._db.close()
 
     def __enter__(self):
         return self
@@ -216,22 +215,22 @@ class AutoEngineer(BaseAIAgent):
 
         # Business requirements
         for text in raw.get("business_requirements", []):
-            db_id = self._db.save_requirement(problem_id, "business", text)
+            db_id = self._workspace.db.save_requirement(problem_id, "business", text)
             requirements.append(EngineeringRequirement(db_id=db_id, type="business", text=text))
 
         # Use cases
         for uc in raw.get("use_cases", []):
-            db_id = self._db.save_use_case(problem_id, uc["title"], uc["description"])
+            db_id = self._workspace.db.save_use_case(problem_id, uc["title"], uc["description"])
             use_cases.append(EngineeringUseCase(db_id=db_id, title=uc["title"], description=uc["description"]))
 
         # Functional requirements
         for text in raw.get("functional_requirements", []):
-            db_id = self._db.save_requirement(problem_id, "functional", text)
+            db_id = self._workspace.db.save_requirement(problem_id, "functional", text)
             requirements.append(EngineeringRequirement(db_id=db_id, type="functional", text=text))
 
         # Non-functional requirements
         for text in raw.get("nonfunctional_requirements", []):
-            db_id = self._db.save_requirement(problem_id, "nonfunctional", text)
+            db_id = self._workspace.db.save_requirement(problem_id, "nonfunctional", text)
             requirements.append(EngineeringRequirement(db_id=db_id, type="nonfunctional", text=text))
 
         # Issues — deduplicate filenames before saving
@@ -244,7 +243,7 @@ class AutoEngineer(BaseAIAgent):
             seen_code_files.add(code_file)
             seen_test_files.add(test_file)
 
-            db_id = self._db.save_issue(
+            db_id = self._workspace.db.save_issue(
                 problem_id=problem_id,
                 title=issue["title"],
                 description=issue["description"],

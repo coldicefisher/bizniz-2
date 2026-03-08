@@ -66,14 +66,48 @@ class Autocoder(BaseAIAgent):
                 data = json.loads(data)
             except (json.JSONDecodeError, TypeError):
                 data = {}
+        if not isinstance(data, dict):
+            data = {}
         if isinstance(data.get("kwargs"), str):
             try:
                 data["kwargs"] = json.loads(data["kwargs"])
             except (json.JSONDecodeError, TypeError):
                 data["kwargs"] = {}
+        # Ensure symbol is always present — default to "main" if the AI omitted it
+        if not data.get("symbol"):
+            data["symbol"] = "main"
         return data
 
     # Generate ///////////////////////////////////////////////////////////////////////////////////
+
+    def generate_only(
+        self,
+        prompt: str,
+        filename: str,
+        on_status_message: Optional[Callable[[str], None]] = None,
+    ) -> AutocoderProcessResult:
+        '''
+        Generate code for the given prompt and save it without executing.
+        Use this when the caller has its own validation loop (e.g. orchestrator + pytest).
+        '''
+        if on_status_message is not None:
+            self._on_status_message = on_status_message
+
+        def log(message: str):
+            if self._on_status_message is not None:
+                self._on_status_message(message)
+
+        log("Requesting code from AI...")
+        try:
+            code, call_spec = self._generate_code(
+                messages=[Message(role="user", content=prompt)]
+            )
+        except Exception as e:
+            raise AutocoderProcessError(f"Failed to generate code: {e}") from e
+
+        log(f"Saving {filename} to workspace...")
+        self._save_code_to_file(code=code, filename=filename, prompt=prompt)
+        return AutocoderProcessResult(code=code, output=None)
 
     def generate(
         self,

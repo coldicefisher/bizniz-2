@@ -19,7 +19,7 @@ GENERATED_TESTS = "def test_add():\n    assert add(1, 2) == 3\n"
 @pytest.fixture
 def mock_autocoder():
     ac = MagicMock(spec=Autocoder)
-    ac.generate.return_value = AutocoderProcessResult(code=GENERATED_CODE)
+    ac.generate_only.return_value = AutocoderProcessResult(code=GENERATED_CODE)
     ac.repair.return_value = AutocoderProcessResult(code=GENERATED_CODE + "# repaired\n")
     return ac
 

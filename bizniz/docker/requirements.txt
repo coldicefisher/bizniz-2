@@ -1,0 +1,69 @@
+
+
+##################### Encryption and Hashing ###############################
+setuptools
+setuptools-rust~=0.12.1
+cryptography~=35.0.0
+
+Pillow~=10.1
+bcrypt~=3.2.0
+
+itsdangerous~=2.0.1 # Library for signing data with a key. This can be used to hash documents.
+scrypt~=0.8.20
+argon2-cffi~=21.3.0
+argon2~=0.1.10
+
+########################### Database Connectors ############################
+pymysql~=1.1.1
+dbutils~=3.1.0 # For pooling connections, etc
+#################### Servers, Web Frameworks, and Helpers ##################
+uvicorn~=0.20.0
+fastapi[all]~=0.109.0
+
+
+################### KAFKA ####################################################
+# confluent-avro~=1.8.0
+# confluent-kafka~=1.6.1
+# fastavro~=1.4.4
+# jsonschema~=3.2.0
+
+
+
+###################### Data Analysis ##########################################
+# numpy~=1.24.0
+# pandas~=1.5.0
+
+
+##################### COMMS and SMS ###########################################
+# telnyx~=2.0.0
+# sendgrid~=6.10.0
+# twilio~=8.3.0
+# sendgrid~=6.10.0
+# pyotp~=2.8.0
+# qrcode~=7.4.2
+
+
+#################### MISC #####################################################
+
+# PLEASE READ!!
+# urllib3 VERSION is very specific to the requests version. Must be > 1.26 AND < 1.21 AND not 1.25.0 and not 1.25.1
+
+urllib3~=1.24.3 # Used by requests
+requests~=2.23.0 # HTTP library
+
+regex~=2020.2.20
+pytest~=8.3.2 # Testing framework
+pytest-asyncio~=0.14.0 # Async testing framework
+pytz~=2022.0 # Timezone library
+
+ipython~=8.11.0 # Interactive python shell
+beautifulsoup4~=4.10.0 # Scraping library
+redis~=5.0.8 # Redis client
+aioredis~=2.0.1
+# docker~=5.0.3
+
+pymupdf~=1.24.4
+
+openai~=2.26.0 # OpenAI API client
+
+lxml~=6.0.2 # XML parsing library

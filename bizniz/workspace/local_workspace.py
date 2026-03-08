@@ -21,7 +21,7 @@ class LocalWorkspace(BaseWorkspace):
         *,
         create: bool = True,
     ):
-        root_path = Path(root).resolve()
+        root_path = Path(root).expanduser().resolve()
 
         if root_path.exists():
             if not root_path.is_dir():

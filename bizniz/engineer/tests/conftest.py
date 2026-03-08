@@ -49,9 +49,7 @@ def mock_environment():
 
 @pytest.fixture
 def mock_workspace(tmp_path):
-    ws = MagicMock(spec=BaseWorkspace)
-    ws.root = tmp_path
-    return ws
+    return BaseWorkspace(root=tmp_path)
 
 
 @pytest.fixture
@@ -62,8 +60,7 @@ def mock_orchestrator():
 
 
 @pytest.fixture
-def engineer(mock_client, mock_environment, mock_workspace, mock_orchestrator, tmp_path):
-    mock_workspace.root = tmp_path
+def engineer(mock_client, mock_environment, mock_workspace, mock_orchestrator):
     return AutoEngineer(
         client=mock_client,
         environment=mock_environment,

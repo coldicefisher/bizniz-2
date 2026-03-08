@@ -97,7 +97,7 @@ class PytestEnvironment(BaseExecutionEnvironment):
             "python3", "-m", "pytest",
             str(test_path),
             "-v",
-            "--tb=short",
+            "--tb=long",
             "--no-header",
         ] + self._extra_pytest_args
 

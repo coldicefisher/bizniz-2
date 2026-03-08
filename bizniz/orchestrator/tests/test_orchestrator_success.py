@@ -17,7 +17,7 @@ def test_success_on_first_iteration(orchestrator, mock_autocoder, mock_autoteste
 
 def test_autocoder_process_called_with_prompt(orchestrator, mock_autocoder):
     orchestrator.run(prompt=PROMPT, code_filename="add.py", test_filename="test_add.py")
-    mock_autocoder.generate.assert_called_once_with(
+    mock_autocoder.generate_only.assert_called_once_with(
         prompt=PROMPT,
         filename="add.py",
     )

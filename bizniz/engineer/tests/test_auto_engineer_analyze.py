@@ -56,16 +56,17 @@ def test_analyze_calls_ai(engineer, mock_client):
     mock_client.get_text.assert_called_once()
 
 
-def test_analyze_raises_on_bad_ai_response(mock_client, mock_environment, mock_workspace, mock_orchestrator, tmp_path):
+def test_analyze_raises_on_bad_ai_response(mock_client, mock_environment, mock_orchestrator, tmp_path):
     from bizniz.engineer.auto_engineer import AutoEngineer
+    from bizniz.workspace.base_workspace import BaseWorkspace
 
-    mock_workspace.root = tmp_path
+    ws = BaseWorkspace(root=tmp_path)
     mock_client.get_text.side_effect = Exception("Network error")
 
     eng = AutoEngineer(
         client=mock_client,
         environment=mock_environment,
-        workspace=mock_workspace,
+        workspace=ws,
         orchestrator_factory=lambda: mock_orchestrator,
         max_retries=2,
     )
