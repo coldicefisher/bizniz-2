@@ -18,8 +18,8 @@ def test_emit_calls_on_event_callback(autocoder, mock_environment):
     )
     events = []
 
-    autocoder.process(
-        process_prompt="test",
+    autocoder.generate(
+        prompt="test",
         filename="test.py",
         on_event=events.append,
     )
@@ -34,8 +34,8 @@ def test_generate_stage_event_fired_on_success(autocoder, mock_environment):
     )
     events = []
 
-    autocoder.process(
-        process_prompt="test",
+    autocoder.generate(
+        prompt="test",
         filename="test.py",
         on_event=events.append,
     )
@@ -74,8 +74,8 @@ def test_repair_stage_event_fired_on_failure(mock_client, mock_environment, mock
     )
 
     events = []
-    autocoder.process(
-        process_prompt="test",
+    autocoder.generate(
+        prompt="test",
         filename="test.py",
         on_event=events.append,
     )
@@ -89,4 +89,4 @@ def test_emit_no_callback_does_not_raise(autocoder, mock_environment):
         success=True, result=0
     )
     # No on_event provided — should not raise
-    autocoder.process(process_prompt="test", filename="test.py")
+    autocoder.generate(prompt="test", filename="test.py")

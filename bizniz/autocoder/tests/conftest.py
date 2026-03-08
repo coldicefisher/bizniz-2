@@ -2,7 +2,7 @@ import pytest
 import json
 from unittest.mock import MagicMock
 
-from bizniz.autocoder.clients.base_ai_client import BaseAIClient
+from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.environment.types import (
     ExecutionEnvironmentResult,

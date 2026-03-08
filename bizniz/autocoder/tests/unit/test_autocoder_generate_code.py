@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 from bizniz.autocoder.autocoder import Autocoder
 from bizniz.autocoder.types import AutocoderBadAIResponseError
-from bizniz.autocoder.clients.chatgpt.messages import Message
+from bizniz.clients.chatgpt.messages import Message
 from bizniz.environment.types import ExecutionCallSpec
 
 from bizniz.autocoder.tests.conftest import make_get_text_response, VALID_GENERATE_JSON

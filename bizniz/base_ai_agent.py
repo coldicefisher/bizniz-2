@@ -9,9 +9,9 @@ import datetime
 from typing import Optional, Callable, Union, Any, Dict, List, Tuple, Literal
 
 
-from bizniz.autocoder.clients.chatgpt.messages import Message, MessageList, normalize_messages
+from bizniz.clients.chatgpt.messages import Message, MessageList, normalize_messages
 
-from bizniz.autocoder.clients.base_ai_client import BaseAIClient
+from bizniz.clients.base_ai_client import BaseAIClient
 
 from bizniz.autocoder.types import (
     AutocoderFailedErrorList,
@@ -27,6 +27,7 @@ from bizniz.environment.types import (
 from bizniz.workspace.base_workspace import BaseWorkspace
 
 from bizniz.utils.json import clean_llm_json
+from bizniz.utils.code_metadata import build_metadata_block
 
 class BaseAIAgent(ABC):
     '''
@@ -117,14 +118,27 @@ class BaseAIAgent(ABC):
     
     
     # Do all the backups in one place and saving here.
-    def _save_code_to_file(self, code: str, filename: str, prompt: Optional[str] = None):
+    def _save_code_to_file(self, code: str, filename: str, prompt: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None):
         """
-        Save code to the filename provided in the workspace. If a file with the same name already exists, back it up to a cached/ directory with a timestamp before saving the new code.
-        
+        Save code to the filename in the workspace, optionally with a structured
+        metadata header.  If a cached copy already exists it is timestamped and
+        rotated before the new file is written.
+
+        Parameters
+        ----------
+        code:
+            The Python source to save.
+        filename:
+            Workspace-relative filename.
+        prompt:
+            The problem-statement / prompt that produced this code.  Written
+            into the metadata block when provided.
+        metadata:
+            Additional key-value pairs to embed in the metadata block.
         """
 
         full_path = self._workspace.path(filename)
-        file_dir = os.path.dirname(full_path)   
+        file_dir = os.path.dirname(full_path)
 
         cache_dir = os.path.join(file_dir, "cached")
         os.makedirs(cache_dir, exist_ok=True)
@@ -132,8 +146,8 @@ class BaseAIAgent(ABC):
         if not filename.endswith(".py"):
             filename += ".py"
 
-        # Sanitize filename once (safe-guard)
-        filename = (
+        # Sanitize filename for the cache copy (safe-guard against bad chars)
+        sanitized = (
             filename
                 .replace(" ", "_")
                 .replace("/", "_")
@@ -151,40 +165,28 @@ class BaseAIAgent(ABC):
                 .replace("--", "_")
         )
 
-        cached_file_path = os.path.join(cache_dir, filename)
+        cached_file_path = os.path.join(cache_dir, sanitized)
 
-        # Backup existing file if it exists and is non-empty
+        # Rotate existing cached file if it is non-empty
         if os.path.exists(cached_file_path):
             with open(cached_file_path, "r") as f:
                 existing_content = f.read()
 
             if existing_content.strip():
                 timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-                backup_name = f"{timestamp}_{filename}"
-                backup_path = os.path.join(cache_dir, backup_name)
+                backup_path = os.path.join(cache_dir, f"{timestamp}_{sanitized}")
                 shutil.move(cached_file_path, backup_path)
-                
-        
-        # Get the autocoder metadata.
-        # Split the problem statement by 100 character chunks for easier reading.
-        problem_statement_lines = []
+
+        # Build the metadata block
+        meta = metadata.copy() if metadata else {}
         if prompt is not None:
-            problem_statement_lines = textwrap.wrap(prompt, width=100)
-            
+            meta["problem_statement"] = prompt
+        meta.setdefault("saved_at", datetime.datetime.now(datetime.timezone.utc).isoformat())
+
         with open(full_path, "w") as f:
-            # Write the problem statement as a comment at the top of the file for context. This is 
-            # helpful for understanding the code later, especially if the filename is not descriptive.    
-            if prompt is not None:  
-                f.write(f'"""\n')
-                f.write(f"Problem Statement:\n")
-                f.write(f'{"=" * int(len("Problem Statement:") * 1.5)}\n')
-                for line in problem_statement_lines:
-                    f.write(f"# {line}\n")
-                
-                f.write(f"=" * 100 + "\n")
-                f.write(f'"""\n\n')
-            
-            # Write the code
+            if meta:
+                f.write(build_metadata_block(meta))
+                f.write("\n\n")
             f.write(code)
 
         os.chmod(full_path, 0o666)

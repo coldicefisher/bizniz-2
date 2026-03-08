@@ -14,7 +14,7 @@ def test_process_success_returns_result(autocoder, mock_environment):
         success=True, result=42
     )
 
-    result = autocoder.process(process_prompt="Add numbers", filename="add.py")
+    result = autocoder.generate(prompt="Add numbers", filename="add.py")
 
     assert isinstance(result, AutocoderProcessResult)
     assert result.output == 42
@@ -26,7 +26,7 @@ def test_process_saves_code_to_workspace(autocoder, mock_environment, mock_works
         success=True, result=42
     )
 
-    autocoder.process(process_prompt="Add numbers", filename="add.py")
+    autocoder.generate(prompt="Add numbers", filename="add.py")
 
     mock_workspace.path.assert_called()
 
@@ -37,8 +37,8 @@ def test_process_calls_on_save_code_callback(autocoder, mock_environment):
     )
     on_save_code = MagicMock()
 
-    autocoder.process(
-        process_prompt="Add numbers",
+    autocoder.generate(
+        prompt="Add numbers",
         filename="add.py",
         on_save_code=on_save_code,
     )
@@ -77,7 +77,7 @@ def test_process_repairs_on_first_failure(mock_client, mock_environment, mock_wo
         max_retries=3,
     )
 
-    result = autocoder.process(process_prompt="Fix me", filename="fix.py")
+    result = autocoder.generate(prompt="Fix me", filename="fix.py")
 
     assert result.output == 99
     assert calls["count"] == 2
@@ -104,7 +104,7 @@ def test_process_raises_after_exhausted_retries(mock_client, mock_environment, m
     )
 
     with pytest.raises(AutocoderProcessError):
-        autocoder.process(process_prompt="Broken", filename="broken.py")
+        autocoder.generate(prompt="Broken", filename="broken.py")
 
 
 def test_process_loads_existing_code_from_workspace(mock_client, mock_environment, mock_workspace):
@@ -120,7 +120,7 @@ def test_process_loads_existing_code_from_workspace(mock_client, mock_environmen
         workspace=mock_workspace,
     )
 
-    autocoder.process(process_prompt="Do stuff", filename="cached.py")
+    autocoder.generate(prompt="Do stuff", filename="cached.py")
 
     mock_workspace.read_file.assert_called_once()
 
@@ -131,8 +131,8 @@ def test_process_fires_status_messages(autocoder, mock_environment):
     )
     messages = []
 
-    autocoder.process(
-        process_prompt="test",
+    autocoder.generate(
+        prompt="test",
         filename="test.py",
         on_status_message=messages.append,
     )
@@ -146,8 +146,8 @@ def test_process_fires_on_event(autocoder, mock_environment):
     )
     events = []
 
-    autocoder.process(
-        process_prompt="test",
+    autocoder.generate(
+        prompt="test",
         filename="test.py",
         on_event=events.append,
     )
