@@ -23,8 +23,10 @@ class BaseAIClient(ABC):
         message_history: MessageList = None,
         message_history_filepath: str = None,
         use_message_history: bool = True,
-        message_history_limit: int = 10
-    ) -> Tuple[str, str]:
+        message_history_limit: int = 10,
+        schema: dict = None,
+        **kwargs,
+    ) -> Tuple[str, str, List]:
 
         pass
 

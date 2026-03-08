@@ -66,7 +66,7 @@ def test_chatgpt_client_azure_get_text_with_history(azure_config, mock_completio
         return_value=mock_completion
     )
 
-    text, job_id = azure_client.get_text(
+    text, job_id, output_messages = azure_client.get_text(
         instruction_messages=[{
             "role": Role.SYSTEM.value,
             "content": "You are a helpful assistant."
@@ -134,7 +134,7 @@ def test_chatgpt_client_openai_get_text_with_history(openai_config, mock_complet
         return_value=mock_completion
     )
 
-    text, job_id = openai_client.get_text(
+    text, job_id, output_messages = openai_client.get_text(
         instruction_messages=[{
             "role": Role.SYSTEM.value,
             "content": "You are a helpful assistant."
@@ -205,7 +205,7 @@ def test_chatgpt_client_azure_get_text_with_history_passed_to_get_text(azure_con
         return_value=mock_completion
     )
 
-    text, job_id = azure_client.get_text(
+    text, job_id, output_messages = azure_client.get_text(
         instruction_messages=[{
             "role": Role.SYSTEM.value,
             "content": "You are a helpful assistant."
@@ -274,7 +274,7 @@ def test_chatgpt_client_openai_get_text_with_history_passed_to_get_text(openai_c
         return_value=mock_completion
     )
 
-    text, job_id = openai_client.get_text(
+    text, job_id, output_messages = openai_client.get_text(
         instruction_messages=[{
             "role": Role.SYSTEM.value,
             "content": "You are a helpful assistant."

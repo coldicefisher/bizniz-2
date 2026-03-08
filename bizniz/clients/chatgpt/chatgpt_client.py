@@ -13,7 +13,7 @@ from .models import OpenAIModel
 from .errors import (
     OpenAIClientError, OpenAIRateLimit, OpenAIAuthError, OpenAIInvalidRequest
 )
-from bizniz.clients.chatgpt.types.response_format import ResponseFormat
+from bizniz.clients.chatgpt.types.response_format import ResponseFormat, parse_response_format
 # from python_core.data_connectors.mysql_connector import MySQLConnector
 
 from typing import List, Dict, Any, Tuple, Union, Optional, Callable
@@ -278,21 +278,22 @@ class ChatGPTClient(BaseAIClient):
     # TEXT COMPLETION ///////////////////////////////////////////////////////////////////////////////
     def get_text(
         self,
-        
-        instruction_messages: Union[MessageList, List[dict]],
-        messages: Union[MessageList, List[dict]],
-        
+
+        instruction_messages: Union[MessageList, List[dict], None] = None,
+        messages: Union[MessageList, List[dict], None] = None,
+
         max_tokens: Optional[int] = None,
-        
+
         response_format: ResponseFormat = ResponseFormat.TEXT,
-        
+        schema: Optional[Dict[str, Any]] = None,
+
         job_description: str = None,
-        
+
         message_history: Optional[MessageList] = None,
         message_history_filepath: Optional[str] = None,
         use_message_history: Optional[bool] = True,
         message_history_limit: Optional[int] = 10,
-    ) -> Tuple[str, str]:
+    ) -> Tuple[str, str, List[dict]]:
         """
         Generate a text completion using the configured OpenAI/Azure client.
         Args:
@@ -300,11 +301,12 @@ class ChatGPTClient(BaseAIClient):
             messages: User/assistant messages to complete (MessageList or list of dicts).
             max_tokens: Optional maximum output tokens.
             response_format: Desired response format (e.g., text or JSON).
+            schema: JSON schema dict for structured output (required when response_format is JSON_SCHEMA).
             job_description: Optional description for logging.
             use_message_history: Whether to prepend stored message history.
             message_history_limit: Maximum history messages to include.
         Returns:
-            Tuple of (completion text, job_id).
+            Tuple of (completion text, job_id, output_messages).
         Raises:
             AutocoderClientError: On message preprocessing failures.
             OpenAIAuthError: If authentication fails.
@@ -312,10 +314,13 @@ class ChatGPTClient(BaseAIClient):
             OpenAIInvalidRequest: If the request is invalid.
             OpenAIClientError: For other unexpected errors.
         """
-        
+
         if message_history is not None or message_history_filepath is not None:
             self._set_message_history(message_history, message_history_filepath)
-        
+
+        if instruction_messages is None:
+            instruction_messages = []
+
         try:
             instruction_messages = instruction_messages.to_dict()
             # Filter out any messages that are not system messages
@@ -324,14 +329,17 @@ class ChatGPTClient(BaseAIClient):
             pass  # Assume it's already a list of dicts
         except Exception as e:
             raise AutocoderClientError(f"Failed to process instruction messages: {e}")
-        
+
+        if messages is None:
+            messages = []
+
         try:
             messages = messages.to_dict()
         except AttributeError:
             pass  # Assume it's already a list of dicts
         except Exception as e:
             raise AutocoderClientError(f"Failed to process messages: {e}")
-        
+
         message_with_history = None
         # If we are using message history, we want to limit the number of messages we include in the prompt to avoid hitting context length limits. We will include the most recent messages up to the limit.
         if use_message_history:
@@ -339,17 +347,12 @@ class ChatGPTClient(BaseAIClient):
             message_with_history = instruction_messages + _message_history + messages
         else:
             message_with_history = instruction_messages + messages
-            
-        
-        # if model_name == 'o4-mini':
+
+
         try:
-            # Azure has to use chat.completions whereas OpenAI can use responses API. The response format parameter is not currently supported in the Azure SDK for Python, so we will ignore it for Azure.
             completion = None
-            _response_format = response_format
-            # If the response format is an enum, get the value
-            if hasattr(_response_format, "value"):
-                _response_format = _response_format.value
-                
+            _response_format = parse_response_format(response_format, schema)
+
             if self._config.is_azure:
                 completion = self._ai_agent.chat.completions.create(
                     model=self._model_name,
@@ -357,18 +360,18 @@ class ChatGPTClient(BaseAIClient):
                     max_completion_tokens=max_tokens or self.max_tokens or 10_000,
                     response_format=_response_format,
                 )
-            
+
             else:
                 completion = self._ai_agent.responses.create(
                     model=self._model_name,
                     input=message_with_history,
                     max_output_tokens=max_tokens or self.max_tokens or 10_000,
-                    response_format=_response_format, # Not supported for our Azure SDK in Responses API.
+                    response_format=_response_format,
                 )
-            
-            
+
+
             job_id = None
-            
+
             if self._db_client:
                 job_id = self._log_request(
                     model_name=self._model_name,
@@ -379,33 +382,36 @@ class ChatGPTClient(BaseAIClient):
                 )
             else:
                 job_id = str(uuid.uuid4())
-                
-            
+
+
             # Add the messages to history. Filter out any system messages since those are not relevant to the history and can cause issues with context length.
             filtered_messages = [m for m in messages if m["role"] != "system"]
             self._message_history.extend(filtered_messages)
             # Append the assistant's response to the message history as well.
-            self._message_history.append({
+            output_message = {
                 "role": "assistant",
                 "content": completion.choices[0].message.content
-            })
-            
+            }
+            self._message_history.append(output_message)
+
+            output_messages = [output_message]
+
             # If we have a callback, call it for each message in the response.
             if self.on_message_callback:
                 for choice in completion.choices:
                     self.on_message_callback(Message(
-                        role=choice.message.role, 
+                        role=choice.message.role,
                         content=choice.message.content
                     ))
-                    
+
             # If we have a message history update callback, call it with the updated message history.
             if self.on_message_history_update_callback:
                 self.on_message_history_update_callback(self._message_history)
-                    
+
             # Save the message history to file if applicable.
             self._save_message_history_to_file()
-            return completion.choices[0].message.content, job_id
-        
+            return completion.choices[0].message.content, job_id, output_messages
+
 
         except AuthenticationError as e:
             raise OpenAIAuthError(str(e))
