@@ -169,9 +169,11 @@ class ChatGPTClient(BaseAIClient):
         # END SET THE AI AGENT //////////////////////////////////////////////////////////////////////////////////
         
         self._set_message_history(message_history, message_history_filepath)
-        
-        
-        
+
+
+    def set_model(self, model_name: str) -> None:
+        self._model_name = model_name
+
     def _set_message_history(self, message_history: Optional[List[Message]], message_history_filepath: Optional[str] = None):
         # SET MESSAGE HISTORY ///////////////////////////////////////////////////////////////////////////////////
         self._message_history = []

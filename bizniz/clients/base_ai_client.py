@@ -31,6 +31,10 @@ class BaseAIClient(ABC):
         pass
 
 
+    @abstractmethod
+    def set_model(self, model_name: str) -> None:
+        pass
+
     @property
     @abstractmethod
     def ai_agent(self) -> Any:
