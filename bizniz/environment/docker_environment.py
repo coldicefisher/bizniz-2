@@ -133,12 +133,12 @@ class DockerExecutionEnvironment(BaseExecutionEnvironment):
                     return ExecutionEnvironmentResult(
                         success=False,
                         result=None,
+                        stdout=proc.stdout,
+                        stderr=proc.stderr,
                         error=ExecutionEnvironmentErrorDetails(
                             stage="execution",
                             type="RuntimeError",
-                            message="Docker execution failed",
-                            stdout=proc.stdout,
-                            stderr=proc.stderr,
+                            message=proc.stderr.strip() if proc.stderr else "Docker execution failed",
                         ),
                     )
 
@@ -152,12 +152,12 @@ class DockerExecutionEnvironment(BaseExecutionEnvironment):
                     return ExecutionEnvironmentResult(
                         success=False,
                         result=None,
+                        stdout=proc.stdout,
+                        stderr=proc.stderr,
                         error=ExecutionEnvironmentErrorDetails(
                             stage="execution",
                             type="InvalidOutput",
                             message="Runner returned invalid JSON",
-                            stdout=proc.stdout,
-                            stderr=proc.stderr,
                         ),
                     )
 
@@ -177,13 +177,13 @@ class DockerExecutionEnvironment(BaseExecutionEnvironment):
                     return ExecutionEnvironmentResult(
                         success=False,
                         result=None,
+                        stdout=proc.stdout,
+                        stderr=proc.stderr,
                         error=ExecutionEnvironmentErrorDetails(
                             stage="execution",
                             type=error.get("type", "RuntimeError"),
                             message=error.get("message", ""),
                             traceback=error.get("traceback"),
-                            stdout=proc.stdout,
-                            stderr=proc.stderr,
                         ),
                     )
 
@@ -199,12 +199,12 @@ class DockerExecutionEnvironment(BaseExecutionEnvironment):
             return ExecutionEnvironmentResult(
                 success=False,
                 result=None,
+                stdout=e.stdout if isinstance(e.stdout, str) else None,
+                stderr=e.stderr if isinstance(e.stderr, str) else None,
                 error=ExecutionEnvironmentErrorDetails(
                     stage="timeout",
                     type="TimeoutError",
                     message=f"Execution exceeded {self.timeout} seconds",
-                    stdout=e.stdout,
-                    stderr=e.stderr,
                 ),
             )
 
