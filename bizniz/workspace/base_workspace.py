@@ -1,4 +1,4 @@
-# verix/workspace/base_workspace.py
+# bizniz/workspace/base_workspace.py
 
 import os
 import subprocess

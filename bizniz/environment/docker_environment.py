@@ -6,25 +6,25 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
-from verix.environment.base_environment import BaseExecutionEnvironment
-from verix.environment.types import (
+from bizniz.environment.base_environment import BaseExecutionEnvironment
+from bizniz.environment.types import (
     ExecutionEnvironmentResult,
     ExecutionEnvironmentErrorDetails,
     ExecutionCallSpec,
 )
 
-from verix.workspace.base_workspace import BaseWorkspace
+from bizniz.workspace.base_workspace import BaseWorkspace
 
 
 class DockerExecutionEnvironment(BaseExecutionEnvironment):
 
     name: str = "docker-python-environment"
 
-    EXEC_ROOT = Path.cwd() / ".verix" / "exec"
+    EXEC_ROOT = Path.cwd() / ".bizniz" / "exec"
 
     def __init__(
         self,
-        image: str = "verix-python-runner",
+        image: str = "bizniz-python-runner",
         network_disabled: bool = True,
         memory_limit: str = "512m",
         cpus: float = 1.0,

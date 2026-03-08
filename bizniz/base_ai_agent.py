@@ -23,12 +23,12 @@ from pydantic import ValidationError
 from openai import AzureOpenAI, OpenAI
 
 
-from verix.autocoder.clients.chatgpt.messages import Message, MessageList, normalize_messages
+from bizniz.autocoder.clients.chatgpt.messages import Message, MessageList, normalize_messages
 
-from verix.autocoder.clients.chatgpt.types.response_format import ResponseFormat
-from verix.autocoder.clients.base_ai_client import BaseAIClient
+from bizniz.autocoder.clients.chatgpt.types.response_format import ResponseFormat
+from bizniz.autocoder.clients.base_ai_client import BaseAIClient
 
-from verix.autocoder.types import (
+from bizniz.autocoder.types import (
     AutocoderProcessError,
     AutocoderBadAIResponseError,
     AutocoderProcessResult,
@@ -39,14 +39,14 @@ from verix.autocoder.types import (
     
 )
 
-from verix.environment.base_environment import BaseExecutionEnvironment
-from verix.environment.types import (
+from bizniz.environment.base_environment import BaseExecutionEnvironment
+from bizniz.environment.types import (
     ExecutionCallSpec,
     ExecutionEnvironmentResult,
     ExecutionEnvironmentErrorDetails,
     ExecutionTrace
 )
-from verix.workspace.base_workspace import BaseWorkspace
+from bizniz.workspace.base_workspace import BaseWorkspace
 
 
 class Autocoder:

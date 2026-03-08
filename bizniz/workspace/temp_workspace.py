@@ -1,11 +1,11 @@
-# verix/workspace/temp_workspace.py
+# bizniz/workspace/temp_workspace.py
 
 from pathlib import Path
 import tempfile
 import shutil
 from typing import Optional
 
-from verix.workspace.base_workspace import BaseWorkspace
+from bizniz.workspace.base_workspace import BaseWorkspace
 
 
 class TempWorkspace(BaseWorkspace):
@@ -22,7 +22,7 @@ class TempWorkspace(BaseWorkspace):
     def __init__(
         self,
         *,
-        prefix: str = "verix_",
+        prefix: str = "bizniz_",
         root: Optional[str | Path] = None
     ):
         if root is None:

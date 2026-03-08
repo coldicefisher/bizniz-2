@@ -1,14 +1,14 @@
-# verix/environment/tests/test_python_sandbox_envrionment.py
+# bizniz/environment/tests/test_python_sandbox_envrionment.py
 
-from verix.environment.python_environment import PythonSandboxExecutionEnvironment
+from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 
-from verix.environment.types import (
+from bizniz.environment.types import (
     ExecutionCallSpec, 
     ExecutionEnvironmentResult, 
     ExecutionEnvironmentErrorDetails
 )
 
-from verix.environment.base_environment import BaseExecutionEnvironment
+from bizniz.environment.base_environment import BaseExecutionEnvironment
 
 def test_execute_simple_function(env: BaseExecutionEnvironment):
 

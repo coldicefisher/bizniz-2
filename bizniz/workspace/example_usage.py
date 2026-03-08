@@ -1,5 +1,5 @@
-from verix.workspace.local_workspace import LocalWorkspace
-from verix.workspace.temp_workspace import TempWorkspace
+from bizniz.workspace.local_workspace import LocalWorkspace
+from bizniz.workspace.temp_workspace import TempWorkspace
 
 
 

@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import os
 
 import shutil
+import textwrap
 from enum import Enum
 from os import environ as env
 import json
@@ -22,14 +23,16 @@ from pydantic import ValidationError
 from openai import AzureOpenAI, OpenAI
 
 
-from verix.autocoder.clients.chatgpt.messages import Message, MessageList, normalize_messages
+from bizniz.autocoder.clients.chatgpt.messages import Message, MessageList, normalize_messages
+from bizniz.autocoder.prompts.repair_prompt import REPAIR_PROMPT
+from bizniz.autocoder.prompts.verification_prompt import VERIFICATION_PROMPT, VERIFICATION_PROMPT_INSTRUCTIONS
+from bizniz.autocoder.prompts.generate_prompts import GENERATE_SYSTEM_INSTRUCTIONS_PROMPT, GENERATE_RETURN_FORMAT_PROMPT
 
+from bizniz.autocoder.clients.chatgpt.types.response_format import ResponseFormat
+# from bizniz.autocoder.evaluate_code import evaluate_generated_code
+from bizniz.autocoder.clients.base_ai_client import BaseAIClient
 
-from verix.autocoder.clients.chatgpt.types.response_format import ResponseFormat
-# from verix.autocoder.evaluate_code import evaluate_generated_code
-from verix.autocoder.clients.base_ai_client import BaseAIClient
-
-from verix.autocoder.types import (
+from bizniz.autocoder.types import (
     AutocoderProcessError,
     AutocoderBadAIResponseError,
     AutocoderProcessResult,
@@ -40,48 +43,32 @@ from verix.autocoder.types import (
     
 )
 
-from verix.autocoder.prompts.prompt_schemas import (
+from bizniz.autocoder.prompts.prompt_schemas import (
     RepairPromptSchema,
     VerificationPromptSchema,
     GeneratePromptSchema,
 )
-from verix.environment.base_environment import BaseExecutionEnvironment
-from verix.environment.types import (
+from bizniz.environment.base_environment import BaseExecutionEnvironment
+from bizniz.environment.types import (
     ExecutionCallSpec,
     ExecutionEnvironmentResult,
     ExecutionEnvironmentErrorDetails,
     ExecutionTrace
 )
-from verix.workspace.base_workspace import BaseWorkspace
+from bizniz.workspace.base_workspace import BaseWorkspace
 
 
 class Autocoder:
     '''
-    Autocoder is a class that manages the process of generating, evaluating, validating, and repairing code using an AI assistant. It is 
-    designed to be flexible and configurable for various use cases.
     
-    The assistants API is gone in August 2026. We now use the responses API. We OWN the memory. More complex because we have to manage 
-    the threads and messages. We must ensure the following workflow:
-        - We use a "system" message for the initial prompt and instructions. This is static and set at initialization.
-        - We use "user" messages for the code generation and repair prompts. These are dynamic and set at runtime.
-        - We store the messages in a "thread" in our configuration folder. This thread is then loaded for each autcoder.
-        - autocoder is "defined" as the `module_name`.
-        
-    Code configuration and interacting in a production architecture:
-    - We have a configuration directory (default ~/.autocoder_config) where we store:
-        - A folder for each module_name (e.g. ~/.autocoder_config/code/)
-        - `module_name` is the directory in which the code will be stored.
-        - `filename` is the actual file. We would set this so our code can be used e.g. a FastAPI route could auto 
-            generate and then be imported and used directly using the `module_name` and `filename` to find the code. If `filename` is not set, we generate a unique filename each time.
     '''
 
     def __init__(self, 
-                    filename: str,
                     
                     client: BaseAIClient,
                     environment: BaseExecutionEnvironment,
                     workspace: BaseWorkspace, # REQUIRED: We need to be able to save and load files. This is key to our workflow.
-                    max_retries: Optional[int] = 3,
+                    max_retries: Optional[int] = 5,
                     
                     # EVENTS AND CALLBACKS
                     on_event: Optional[Callable[[AutocoderOnEventCallback], None]] = None,
@@ -117,12 +104,12 @@ class Autocoder:
         
         
         
-        # formatted_header_prompt = GENERATE_SYSTEM_INSTRUCTIONS_PROMPT.format(
-        #     # evaluation_environment=evaluate_code_source,
-        #     evaluation_environment=environment.describe(),
-        # )
+        formatted_header_prompt = GENERATE_SYSTEM_INSTRUCTIONS_PROMPT.format(
+            # evaluation_environment=evaluate_code_source,
+            evaluation_environment=environment.describe(),
+        )
         
-        # self._process_system_prompt = formatted_header_prompt + GENERATE_RETURN_FORMAT_PROMPT
+        self._process_system_prompt = formatted_header_prompt + GENERATE_RETURN_FORMAT_PROMPT
         
         
         # ///////////////////////////////////////////////////////////////////////////
@@ -137,26 +124,6 @@ class Autocoder:
         
     # END CONSTURUCTOR ////////////////////////////////////////////////////////////////////////////
     
-    
-    
-    def _get_environment_description(self) -> str:
-        '''
-        Gets the description of the execution environment to be included in the prompt.
-        '''
-        description = "The code will be executed in a restricted Python environment with the following settings:\n\n"
-        description += "Allowed Modules:\n"
-        for module in self._environment_settings.allowed_modules:
-            description += f"- {module}\n"
-        
-        description += "\nExposed Globals:\n"
-        for global_var in self._environment_settings.exposed_globals:
-            description += f"- {global_var}\n"
-        
-        description += "\nExposed Builtins:\n"
-        for builtin in self._environment_settings.exposed_builtins:
-            description += f"- {builtin}\n"
-        
-        return description
         
     @property
     def input_data(self) -> str:
@@ -207,20 +174,20 @@ class Autocoder:
             self._on_status_message = on_status_message
         
         # Helper INNER functions /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-        def return_result(original_code: str, output: Optional[str], code: Optional[str]) -> AutocoderProcessResult:
+        def return_result(original_code: str, prompt: str, output: Optional[str], new_code: Optional[str]) -> AutocoderProcessResult:
             
             # Hash the old code and the new code, and if they are different, save the new code to disk
             original_code_hash = hashlib.sha256(original_code.encode()).hexdigest() if original_code else None
-            new_code_hash = hashlib.sha256(code.encode()).hexdigest() if code else None
+            new_code_hash = hashlib.sha256(new_code.encode()).hexdigest() if new_code else None
             if not original_code or original_code_hash != new_code_hash:
                 
                 
                 log("Saving new code to disk...")
-                self._save_code_to_file(code, filename)
+                self._save_code_to_file(code=new_code, filename=filename, prompt=prompt)
                 
                 if on_save_code is not None:
                     log("Saving new code via on_save_code callback...")
-                    on_save_code(code)    
+                    on_save_code(new_code)    
             else:
                 log("Code unchanged, not saving.")
                 
@@ -510,7 +477,7 @@ class Autocoder:
     
     
     # Do all the backups in one place and saving here.
-    def _save_code_to_file(self, code: str, filename: str):
+    def _save_code_to_file(self, code: str, filename: str, prompt: str):
         """
         Save code to the filename provided in the workspace. If a file with the same name already exists, back it up to a cached/ directory with a timestamp before saving the new code.
         
@@ -557,8 +524,23 @@ class Autocoder:
                 backup_path = os.path.join(cache_dir, backup_name)
                 shutil.move(cached_file_path, backup_path)
                 
-        # Write new code
+        
+        # Get the autocoder metadata.
+        # Split the problem statement by 100 character chunks for easier reading.
+        problem_statement_lines = textwrap.wrap(prompt, width=100)
         with open(full_path, "w") as f:
+            # Write the problem statement as a comment at the top of the file for context. This is 
+            # helpful for understanding the code later, especially if the filename is not descriptive.    
+            f.write(f'"""\n')
+            f.write(f"Problem Statement:\n")
+            f.write(f'{"=" * int(len("Problem Statement:") * 1.5)}\n')
+            for line in problem_statement_lines:
+                f.write(f"# {line}\n")
+            
+            f.write(f"=" * 100 + "\n")
+            f.write(f'"""\n\n')
+            
+            # Write the code
             f.write(code)
 
         os.chmod(full_path, 0o666)
@@ -622,6 +604,16 @@ class Autocoder:
                     self._message_history.append(message)
 
 
+
+    @property
+    def get_metadata(self, prompt: str) -> Dict[str, Any]:
+        return {
+            "environment_description": self._environment.describe(),
+            "workspace_description": self._workspace.describe(),
+            "message_history_length": len(self._message_history),
+            "problem_statement": prompt,
+        }
+        
 
 def clean_llm_json(text: str) -> str:
     # Remove zero-width characters

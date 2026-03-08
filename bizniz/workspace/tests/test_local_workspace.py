@@ -1,8 +1,8 @@
-# verix/workspace/tests/test_local_workspace.py
+# bizniz/workspace/tests/test_local_workspace.py
 
 import pytest
 from pathlib import Path
-from verix.workspace.local_workspace import LocalWorkspace
+from bizniz.workspace.local_workspace import LocalWorkspace
 
 
 

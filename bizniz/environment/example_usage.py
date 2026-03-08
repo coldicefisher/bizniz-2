@@ -1,5 +1,5 @@
-from verix.environment.python_environment import PythonSandboxExecutionEnvironment
-from verix.environment.docker_environment import DockerExecutionEnvironment
+from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
+from bizniz.environment.docker_environment import DockerExecutionEnvironment
 
 
 

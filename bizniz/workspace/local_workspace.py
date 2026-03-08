@@ -1,9 +1,9 @@
-# verix/workspace/local_workspace.py
+# bizniz/workspace/local_workspace.py
 
 from pathlib import Path
 from typing import Union
 
-from verix.workspace.base_workspace import BaseWorkspace
+from bizniz.workspace.base_workspace import BaseWorkspace
 
 
 class LocalWorkspace(BaseWorkspace):

@@ -2,9 +2,9 @@ import shutil
 from unittest import result
 import pytest
 
-from verix.environment.docker_environment import DockerExecutionEnvironment
-from verix.environment.types import ExecutionCallSpec
-from verix.workspace.temp_workspace import TempWorkspace
+from bizniz.environment.docker_environment import DockerExecutionEnvironment
+from bizniz.environment.types import ExecutionCallSpec
+from bizniz.workspace.temp_workspace import TempWorkspace
 
 
 def docker_available():

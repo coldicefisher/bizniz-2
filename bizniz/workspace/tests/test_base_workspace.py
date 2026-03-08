@@ -1,11 +1,11 @@
-# verix/workspace/tests/test_base_workspace.py
+# bizniz/workspace/tests/test_base_workspace.py
 
 import os
 from pathlib import Path
 
 import pytest
 
-from verix.workspace.base_workspace import BaseWorkspace
+from bizniz.workspace.base_workspace import BaseWorkspace
 
 
 def test_workspace_initializes_directory(tmp_path):

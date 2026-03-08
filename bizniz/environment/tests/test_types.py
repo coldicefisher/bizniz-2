@@ -1,6 +1,6 @@
-# verix/environment/tests/test_types.py
+# bizniz/environment/tests/test_types.py
 
-from verix.environment.types import ExecutionEnvironmentErrorDetails, ExecutionEnvironmentResult
+from bizniz.environment.types import ExecutionEnvironmentErrorDetails, ExecutionEnvironmentResult
 
 
 def test_execution_environment_result_success():

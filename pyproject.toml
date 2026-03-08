@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 
 [project]
-name = "verix"
+name = "bizniz"
 version = "0.1.0"
 description = "AI Coding system"
 requires-python = ">=3.10"
@@ -18,7 +18,7 @@ dynamic = ["dependencies"]
 
 
 [tool.setuptools]
-packages = ["verix"]
+packages = ["bizniz"]
 
 
 [tool.setuptools.dynamic]
