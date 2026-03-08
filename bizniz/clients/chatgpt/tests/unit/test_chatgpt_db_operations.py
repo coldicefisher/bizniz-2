@@ -12,17 +12,17 @@ from openai import OpenAI, AzureOpenAI
 
 
 
-def test_logs_request(openai_config, mock_completion):
+def test_logs_request(openai_config, mock_response):
     mock_db = MagicMock()
-    
+
     client = ChatGPTClient(
         config=openai_config,
         api_key="test",
         db_client=mock_db
     )
-    
+
     client._ai_agent = MagicMock()
-    client._ai_agent.responses.create.return_value = mock_completion
+    client._ai_agent.responses.create.return_value = mock_response
     
     client.get_text(
         instruction_messages=[{"role": "system", "content": "x"}],

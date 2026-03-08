@@ -350,24 +350,33 @@ class ChatGPTClient(BaseAIClient):
 
 
         try:
-            completion = None
             _response_format = parse_response_format(response_format, schema)
+            response_text = None
 
             if self._config.is_azure:
+                # Azure uses Chat Completions API
                 completion = self._ai_agent.chat.completions.create(
                     model=self._model_name,
                     messages=message_with_history,
                     max_completion_tokens=max_tokens or self.max_tokens or 10_000,
                     response_format=_response_format,
                 )
+                response_text = completion.choices[0].message.content
+                input_tokens = completion.usage.prompt_tokens
+                output_tokens = completion.usage.completion_tokens
 
             else:
+                # OpenAI uses Responses API — format goes in `text` param
+                responses_text_param = {"format": _response_format}
                 completion = self._ai_agent.responses.create(
                     model=self._model_name,
                     input=message_with_history,
                     max_output_tokens=max_tokens or self.max_tokens or 10_000,
-                    response_format=_response_format,
+                    text=responses_text_param,
                 )
+                response_text = completion.output_text
+                input_tokens = completion.usage.input_tokens
+                output_tokens = completion.usage.output_tokens
 
 
             job_id = None
@@ -375,8 +384,8 @@ class ChatGPTClient(BaseAIClient):
             if self._db_client:
                 job_id = self._log_request(
                     model_name=self._model_name,
-                    input_tokens=completion.usage.prompt_tokens,
-                    output_tokens=completion.usage.completion_tokens,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
                     job_description=job_description or "ChatGPT text completion",
                     data=message_with_history
                 )
@@ -390,7 +399,7 @@ class ChatGPTClient(BaseAIClient):
             # Append the assistant's response to the message history as well.
             output_message = {
                 "role": "assistant",
-                "content": completion.choices[0].message.content
+                "content": response_text
             }
             self._message_history.append(output_message)
 
@@ -398,11 +407,10 @@ class ChatGPTClient(BaseAIClient):
 
             # If we have a callback, call it for each message in the response.
             if self.on_message_callback:
-                for choice in completion.choices:
-                    self.on_message_callback(Message(
-                        role=choice.message.role,
-                        content=choice.message.content
-                    ))
+                self.on_message_callback(Message(
+                    role="assistant",
+                    content=response_text
+                ))
 
             # If we have a message history update callback, call it with the updated message history.
             if self.on_message_history_update_callback:
@@ -410,7 +418,7 @@ class ChatGPTClient(BaseAIClient):
 
             # Save the message history to file if applicable.
             self._save_message_history_to_file()
-            return completion.choices[0].message.content, job_id, output_messages
+            return response_text, job_id, output_messages
 
 
         except AuthenticationError as e:

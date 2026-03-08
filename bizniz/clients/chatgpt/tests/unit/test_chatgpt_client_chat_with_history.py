@@ -96,7 +96,7 @@ def test_chatgpt_client_azure_get_text_with_history(azure_config, mock_completio
     assert job_id is not None
 
 
-def test_chatgpt_client_openai_get_text_with_history(openai_config, mock_completion):
+def test_chatgpt_client_openai_get_text_with_history(openai_config, mock_response):
     messages = []
     received_message_history = []
     passed_message_history = [
@@ -109,29 +109,29 @@ def test_chatgpt_client_openai_get_text_with_history(openai_config, mock_complet
                 "content": "Previous response assistant"
             }
         ]
-    
+
     def update_history(history):
-        
-        nonlocal received_message_history   
+
+        nonlocal received_message_history
         received_message_history = history
 
     openai_client = ChatGPTClient(
-        config=openai_config, 
+        config=openai_config,
         api_key="test",
         message_history=deepcopy(passed_message_history),
         on_message_callback=lambda message: messages.append(message),
         on_message_history_update_callback=update_history
     )
-    
+
     assert openai_client.config.is_azure is False
     assert openai_client.config.api_base == "https://api.openai.com/v1/"
     assert "gpt-3.5-turbo" in openai_client.config.available_models
     assert openai_client.config.default_model == "gpt-3.5-turbo"
 
-    # Mock the Azure client chain
+    # Mock the OpenAI Responses API
     openai_client._ai_agent.responses = MagicMock()
     openai_client._ai_agent.responses.create = MagicMock(
-        return_value=mock_completion
+        return_value=mock_response
     )
 
     text, job_id, output_messages = openai_client.get_text(
@@ -236,7 +236,7 @@ def test_chatgpt_client_azure_get_text_with_history_passed_to_get_text(azure_con
     assert job_id is not None
 
 
-def test_chatgpt_client_openai_get_text_with_history_passed_to_get_text(openai_config, mock_completion):
+def test_chatgpt_client_openai_get_text_with_history_passed_to_get_text(openai_config, mock_response):
     messages = []
     received_message_history = []
     passed_message_history = [
@@ -249,29 +249,29 @@ def test_chatgpt_client_openai_get_text_with_history_passed_to_get_text(openai_c
                 "content": "Previous response assistant"
             }
         ]
-    
+
     def update_history(history):
-        
-        nonlocal received_message_history   
+
+        nonlocal received_message_history
         received_message_history = history
 
     openai_client = ChatGPTClient(
-        config=openai_config, 
+        config=openai_config,
         api_key="test",
         # message_history=deepcopy(passed_message_history),
         on_message_callback=lambda message: messages.append(message),
         on_message_history_update_callback=update_history
     )
-    
+
     assert openai_client.config.is_azure is False
     assert openai_client.config.api_base == "https://api.openai.com/v1/"
     assert "gpt-3.5-turbo" in openai_client.config.available_models
     assert openai_client.config.default_model == "gpt-3.5-turbo"
 
-    # Mock the Azure client chain
+    # Mock the OpenAI Responses API
     openai_client._ai_agent.responses = MagicMock()
     openai_client._ai_agent.responses.create = MagicMock(
-        return_value=mock_completion
+        return_value=mock_response
     )
 
     text, job_id, output_messages = openai_client.get_text(

@@ -47,7 +47,7 @@ def test_chatgpt_client_azure_get_text(azure_config, mock_completion):
     assert job_id is not None
 
 
-def test_chatgpt_client_openai_get_text(openai_config, mock_completion):
+def test_chatgpt_client_openai_get_text(openai_config, mock_response):
     openai_client = ChatGPTClient(config=openai_config, api_key="test")
     assert openai_client.config.is_azure is False
     assert openai_client._config.is_azure is False
@@ -56,11 +56,9 @@ def test_chatgpt_client_openai_get_text(openai_config, mock_completion):
     assert "gpt-3.5-turbo" in openai_client._config.available_models
 
 
-    # Mock the Azure client chain
-    openai_client._ai_agent.chat = MagicMock()
-    openai_client._ai_agent.responses.create = MagicMock()
+    # Mock the OpenAI Responses API
     openai_client._ai_agent.responses.create = MagicMock(
-        return_value=mock_completion
+        return_value=mock_response
     )
 
     text, job_id, output_messages = openai_client.get_text(

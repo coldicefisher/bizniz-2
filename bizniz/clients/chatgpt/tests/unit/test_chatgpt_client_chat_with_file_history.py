@@ -108,7 +108,7 @@ def test_chatgpt_client_azure_get_text_with_file_history(azure_config, mock_comp
         print(f"Failed to remove test message history file: {e}")
 
 
-def test_chatgpt_client_openai_get_text_with_file_history(openai_config, mock_completion):
+def test_chatgpt_client_openai_get_text_with_file_history(openai_config, mock_response):
     print("Testing get_text with message history and callback...")
     messages = []
     received_message_history = []
@@ -148,10 +148,10 @@ def test_chatgpt_client_openai_get_text_with_file_history(openai_config, mock_co
     assert "gpt-3.5-turbo" in openai_client.config.available_models
     assert openai_client.config.default_model == "gpt-3.5-turbo"
 
-    # Mock the Azure client chain
+    # Mock the OpenAI Responses API
     openai_client._ai_agent.responses = MagicMock()
     openai_client._ai_agent.responses.create = MagicMock(
-        return_value=mock_completion
+        return_value=mock_response
     )
 
     text, job_id, output_messages = openai_client.get_text(

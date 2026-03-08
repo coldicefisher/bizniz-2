@@ -56,6 +56,7 @@ def mock_openai_clients(monkeypatch):
 
 @pytest.fixture
 def mock_completion():
+    """Mock for Chat Completions API (Azure)."""
     return SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -68,6 +69,25 @@ def mock_completion():
         usage=SimpleNamespace(
             prompt_tokens=10,
             completion_tokens=5
+        )
+    )
+
+
+@pytest.fixture
+def mock_response():
+    """Mock for Responses API (OpenAI)."""
+    return SimpleNamespace(
+        output_text="Mocked response",
+        output=[
+            SimpleNamespace(
+                type="message",
+                role="assistant",
+                content=[SimpleNamespace(type="output_text", text="Mocked response")]
+            )
+        ],
+        usage=SimpleNamespace(
+            input_tokens=10,
+            output_tokens=5
         )
     )
 

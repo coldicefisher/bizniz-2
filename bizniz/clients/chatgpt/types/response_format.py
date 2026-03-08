@@ -42,7 +42,8 @@ def parse_response_format(response_format: Optional[ResponseFormat] = None, sche
                     raise ValueError("Schema must be provided for JSON_SCHEMA response format and must be a dict.")
                 return {
                     "type": "json_schema",
-                    "json_schema": schema
+                    "name": "response",
+                    "schema": schema
                 }
     else:
         return {"type": "json_object"}
