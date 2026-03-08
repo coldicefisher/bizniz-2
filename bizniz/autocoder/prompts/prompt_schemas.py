@@ -1,22 +1,11 @@
 GeneratePromptSchema = {
     "type": "object",
     "properties": {
-        "code": {
-            "type": "string"
-        },
-        "call_spec": {
-            "type": "object",
-            "properties": {
-                "symbol": {"type": "string"},
-                "args": {"type": "array", "items": {}},
-                "kwargs": {"type": "object"}
-            },
-            "required": ["symbol"],
-            "additionalProperties": False
-        }
+        "code": {"type": "string"},
+        "call_spec": {"type": "string"},
     },
     "required": ["code", "call_spec"],
-    "additionalProperties": False
+    "additionalProperties": False,
 }
 
 RepairPromptSchema = {
@@ -25,19 +14,10 @@ RepairPromptSchema = {
         "code": {"type": "string"},
         "analysis": {"type": "string"},
         "fix_plan": {"type": "string"},
-        "call_spec": {
-            "type": "object",
-            "properties": {
-                "symbol": {"type": "string"},
-                "args": {"type": "array", "items": {}},
-                "kwargs": {"type": "object"}
-            },
-            "required": ["symbol"],
-            "additionalProperties": False
-        }
+        "call_spec": {"type": "string"},
     },
     "required": ["code", "analysis", "fix_plan", "call_spec"],
-    "additionalProperties": False
+    "additionalProperties": False,
 }
 
 
@@ -47,20 +27,11 @@ VerificationPromptSchema = {
         "is_valid": {"type": "boolean"},
         "errors": {
             "type": "array",
-            "items": {"type": "string"}
+            "items": {"type": "string"},
         },
         "code": {"type": "string"},
-        "call_spec": {
-            "type": "object",
-            "properties": {
-                "symbol": {"type": "string"},
-                "args": {"type": "array", "items": {}},
-                "kwargs": {"type": "object"}
-            },
-            "required": ["symbol"],
-            "additionalProperties": False
-        }
+        "call_spec": {"type": "string"},
     },
     "required": ["is_valid", "errors", "code", "call_spec"],
-    "additionalProperties": False
+    "additionalProperties": False,
 }

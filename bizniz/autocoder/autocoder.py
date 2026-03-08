@@ -58,6 +58,21 @@ class Autocoder(BaseAIAgent):
             + GENERATE_RETURN_FORMAT_PROMPT
         )
 
+    @staticmethod
+    def _normalize_call_spec(data) -> dict:
+        """Normalize call_spec from structured output (may be a JSON string or dict)."""
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                data = {}
+        if isinstance(data.get("kwargs"), str):
+            try:
+                data["kwargs"] = json.loads(data["kwargs"])
+            except (json.JSONDecodeError, TypeError):
+                data["kwargs"] = {}
+        return data
+
     # Generate ///////////////////////////////////////////////////////////////////////////////////
 
     def generate(
@@ -189,7 +204,7 @@ class Autocoder(BaseAIAgent):
                 json_response = json.loads(text)
 
                 code = self._strip_code_block(json_response.get("code", ""))
-                call_spec = ExecutionCallSpec(**json_response.get("call_spec", {}))
+                call_spec = ExecutionCallSpec(**self._normalize_call_spec(json_response.get("call_spec", {})))
 
                 self.emit(AutocoderOnEventCallback(
                     stage="generate",
@@ -262,7 +277,7 @@ class Autocoder(BaseAIAgent):
                     last_error = "AI returned empty code during repair."
                     continue
 
-                call_spec = ExecutionCallSpec(**json_response.get("call_spec", {}))
+                call_spec = ExecutionCallSpec(**self._normalize_call_spec(json_response.get("call_spec", {})))
 
                 self.emit(AutocoderOnEventCallback(
                     stage="repair",

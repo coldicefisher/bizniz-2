@@ -27,7 +27,7 @@ if __name__ == "__main__":
 
     # 1. Set up dependencies
     client = ChatGPTClient(
-        config=ChatGPTClientConfig(),
+        config=ChatGPTClientConfig(default_model="gpt-4o-mini"),
         api_key=None,  # reads from OPENAI_API_KEY env var
     )
 
