@@ -15,6 +15,7 @@ class DeepDiagnosis(BaseModel):
     affected_files: List[str]
     fix_plan: List[str]
     suggested_approach: str
+    missing_packages: List[str] = []
     confidence: Literal["high", "medium", "low"]
     repair_history_analysis: str
 

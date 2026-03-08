@@ -215,9 +215,27 @@ class CodingOrchestrator:
                 continue
 
             # ── Autodebugger-driven diagnosis ─────────────────────────────────
-            if self._autodebugger is not None:
+            try:
+                if self._autodebugger is not None:
+                    current_code, current_tests, stale_count, previous_code_hash = (
+                        self._handle_failure_with_debugger(
+                            prompt=prompt,
+                            failure_output=failure_output,
+                            current_code=current_code,
+                            current_tests=current_tests,
+                            code_filename=code_filename,
+                            test_filename=test_filename,
+                            stale_count=stale_count,
+                            previous_code_hash=previous_code_hash,
+                            iteration=iteration,
+                            log=log,
+                        )
+                    )
+                    continue
+
+                # ── Heuristic fallback (no autodebugger) ──────────────────────
                 current_code, current_tests, stale_count, previous_code_hash = (
-                    self._handle_failure_with_debugger(
+                    self._handle_failure_heuristic(
                         prompt=prompt,
                         failure_output=failure_output,
                         current_code=current_code,
@@ -230,23 +248,8 @@ class CodingOrchestrator:
                         log=log,
                     )
                 )
-                continue
-
-            # ── Heuristic fallback (no autodebugger) ──────────────────────────
-            current_code, current_tests, stale_count, previous_code_hash = (
-                self._handle_failure_heuristic(
-                    prompt=prompt,
-                    failure_output=failure_output,
-                    current_code=current_code,
-                    current_tests=current_tests,
-                    code_filename=code_filename,
-                    test_filename=test_filename,
-                    stale_count=stale_count,
-                    previous_code_hash=previous_code_hash,
-                    iteration=iteration,
-                    log=log,
-                )
-            )
+            except Exception as e:
+                log(f"Orchestrator: repair failed ({type(e).__name__}: {e}), retrying...")
 
         raise OrchestratorMaxIterationsError(
             f"Failed to produce passing tests after {self._max_iterations} iterations."
@@ -422,20 +425,23 @@ class CodingOrchestrator:
                 continue
 
             # ── Repair ────────────────────────────────────────────────────
-            current_files, current_test_files, stale_count, previous_code_hash = (
-                self._handle_multi_failure(
-                    prompt=prompt,
-                    failure_output=failure_output,
-                    current_files=current_files,
-                    current_test_files=current_test_files,
-                    target_files=target_files,
-                    test_files=list(current_test_files.keys()),
-                    architecture_context=architecture_context,
-                    stale_count=stale_count,
-                    previous_code_hash=previous_code_hash,
-                    log=log,
+            try:
+                current_files, current_test_files, stale_count, previous_code_hash = (
+                    self._handle_multi_failure(
+                        prompt=prompt,
+                        failure_output=failure_output,
+                        current_files=current_files,
+                        current_test_files=current_test_files,
+                        target_files=target_files,
+                        test_files=list(current_test_files.keys()),
+                        architecture_context=architecture_context,
+                        stale_count=stale_count,
+                        previous_code_hash=previous_code_hash,
+                        log=log,
+                    )
                 )
-            )
+            except Exception as e:
+                log(f"Orchestrator: repair failed ({type(e).__name__}: {e}), retrying...")
 
         raise OrchestratorMaxIterationsError(
             f"Failed to produce passing tests after {self._max_iterations} iterations."
@@ -490,9 +496,22 @@ class CodingOrchestrator:
                 except Exception as e:
                     log(f"Orchestrator: deep diagnosis failed ({e}), proceeding with escalation...")
 
+            # Install missing packages if identified
+            if deep_diagnosis and deep_diagnosis.missing_packages:
+                for pkg in deep_diagnosis.missing_packages:
+                    log(f"Orchestrator: deep diagnosis identified missing package '{pkg}', installing...")
+                    self._install_package(pkg, log)
+
             # Escalate model
             self._try_escalate_model(log)
             self._stall_detector.reset_counters()
+
+            # If the issue was purely a dependency problem, re-run without repair
+            if (deep_diagnosis
+                    and deep_diagnosis.root_cause_category == "dependency_issue"
+                    and deep_diagnosis.missing_packages):
+                log("Orchestrator: dependency issue resolved — retrying tests...")
+                return current_files, current_test_files, 0, None
 
             # Act on deep diagnosis fix_target
             if deep_diagnosis and deep_diagnosis.fix_target in ("tests", "both"):

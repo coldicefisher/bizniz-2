@@ -20,12 +20,17 @@ DeepDiagnosisSchema = {
             "affected_files": {"type": "array", "items": {"type": "string"}},
             "fix_plan": {"type": "array", "items": {"type": "string"}},
             "suggested_approach": {"type": "string"},
+            "missing_packages": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "pip package names that need to be installed (empty if not a dependency issue).",
+            },
             "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
             "repair_history_analysis": {"type": "string"},
         },
         "required": [
             "root_cause", "root_cause_category", "fix_target", "affected_files",
-            "fix_plan", "suggested_approach", "confidence", "repair_history_analysis",
+            "fix_plan", "suggested_approach", "missing_packages", "confidence", "repair_history_analysis",
         ],
         "additionalProperties": False,
     },

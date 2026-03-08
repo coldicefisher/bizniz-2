@@ -155,6 +155,7 @@ class DeepDebugger:
                     affected_files=json_response["affected_files"],
                     fix_plan=json_response["fix_plan"],
                     suggested_approach=json_response["suggested_approach"],
+                    missing_packages=json_response.get("missing_packages", []),
                     confidence=json_response["confidence"],
                     repair_history_analysis=json_response["repair_history_analysis"],
                 )

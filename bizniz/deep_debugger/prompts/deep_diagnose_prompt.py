@@ -41,4 +41,5 @@ The following repair attempts have been made:
    - "both" if both code and tests need changes
 6. Produce a concrete, ordered fix plan that addresses the root cause
 7. Consider interface mismatches between modules, missing imports, circular dependencies, and test assumptions that don't match the actual API
-8. Pay special attention to tests that may be poorly written: testing implementation details instead of behavior, hardcoding values, using wrong function signatures, or importing from wrong modules"""
+8. Pay special attention to tests that may be poorly written: testing implementation details instead of behavior, hardcoding values, using wrong function signatures, or importing from wrong modules
+9. If the root cause is a missing pip package (ModuleNotFoundError, ImportError), list the exact pip package names in missing_packages. Use the pip package name, not the import name (e.g., "Pillow" not "PIL", "python-dateutil" not "dateutil"). If not a dependency issue, return an empty list."""

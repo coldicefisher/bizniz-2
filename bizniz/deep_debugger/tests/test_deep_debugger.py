@@ -14,6 +14,7 @@ def _make_response(
     affected_files=None,
     fix_plan=None,
     suggested_approach="Align the function signatures across modules",
+    missing_packages=None,
     confidence="high",
     repair_history_analysis="Previous repairs only addressed symptoms",
 ):
@@ -21,6 +22,8 @@ def _make_response(
         affected_files = ["tracker.py", "api.py"]
     if fix_plan is None:
         fix_plan = ["Fix tracker.py signature", "Update api.py calls"]
+    if missing_packages is None:
+        missing_packages = []
 
     text = json.dumps({
         "root_cause": root_cause,
@@ -29,6 +32,7 @@ def _make_response(
         "affected_files": affected_files,
         "fix_plan": fix_plan,
         "suggested_approach": suggested_approach,
+        "missing_packages": missing_packages,
         "confidence": confidence,
         "repair_history_analysis": repair_history_analysis,
     })
@@ -171,3 +175,32 @@ class TestDeepDebugger:
 
         assert any("analyzing full project context" in m for m in messages)
         assert any("root cause identified" in m for m in messages)
+
+    def test_dependency_issue_returns_missing_packages(self, mock_client):
+        mock_client.get_text.return_value = _make_response(
+            root_cause="Missing 'requests' package",
+            root_cause_category="dependency_issue",
+            missing_packages=["requests"],
+        )
+        debugger = DeepDebugger(client=mock_client)
+
+        result = debugger.diagnose(
+            error_output="ModuleNotFoundError: No module named 'requests'",
+            source_files={"src.py": "import requests"},
+            test_files={"test_src.py": "pass"},
+        )
+
+        assert result.root_cause_category == "dependency_issue"
+        assert result.missing_packages == ["requests"]
+
+    def test_non_dependency_issue_has_empty_packages(self, mock_client):
+        mock_client.get_text.return_value = _make_response()
+        debugger = DeepDebugger(client=mock_client)
+
+        result = debugger.diagnose(
+            error_output="error",
+            source_files={"src.py": "pass"},
+            test_files={"test_src.py": "pass"},
+        )
+
+        assert result.missing_packages == []
