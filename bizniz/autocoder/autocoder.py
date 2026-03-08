@@ -142,6 +142,23 @@ class Autocoder(BaseAIAgent):
             f"Unable to produce valid code for {filename} after {self.max_retries} attempts."
         )
 
+    def repair(
+        self,
+        previous_code: str,
+        error_message: str,
+        filename: str,
+    ) -> AutocoderProcessResult:
+        """
+        Public method for the orchestrator to request a code repair and save the result.
+        Wraps _repair_code so callers don't touch the private method.
+        """
+        new_code, call_spec = self._repair_code(
+            previous_code=previous_code,
+            error_message=error_message,
+        )
+        self._save_code_to_file(code=new_code, filename=filename)
+        return AutocoderProcessResult(code=new_code, output=None)
+
     # Helpers ///////////////////////////////////////////////////////////////////////////////////
 
     def _generate_code(self, messages: List[Message]) -> tuple:
