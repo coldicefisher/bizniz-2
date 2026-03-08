@@ -10,7 +10,6 @@ description = "AI Coding system"
 requires-python = ">=3.10"
 authors = [
     {name = "Jamey Harris", email = "jameycharris@yahoo.com"},
-    {name = "Abba Tregobov", email = "atregobo@gmail.com"},
 ]
 
 

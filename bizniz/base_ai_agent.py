@@ -3,37 +3,17 @@ import os
 
 import shutil
 import textwrap
-from enum import Enum
-from os import environ as env
-import json
-import uuid
-import inspect
-import sys
-import hashlib
+
 import datetime
-from pathlib import Path
-import re
 
 from typing import Optional, Callable, Union, Any, Dict, List, Tuple, Literal
-
-from pydantic import BaseModel, Field
-from pydantic import ValidationError
-
-
-from openai import AzureOpenAI, OpenAI
 
 
 from bizniz.autocoder.clients.chatgpt.messages import Message, MessageList, normalize_messages
 
-from bizniz.autocoder.clients.chatgpt.types.response_format import ResponseFormat
 from bizniz.autocoder.clients.base_ai_client import BaseAIClient
 
 from bizniz.autocoder.types import (
-    AutocoderProcessError,
-    AutocoderBadAIResponseError,
-    AutocoderProcessResult,
-    AutocoderAIVerificationResult,
-    AutocoderFailedError,
     AutocoderFailedErrorList,
     AutocoderOnEventCallback,
     
@@ -43,13 +23,12 @@ from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.environment.types import (
     ExecutionCallSpec,
     ExecutionEnvironmentResult,
-    ExecutionEnvironmentErrorDetails,
-    ExecutionTrace
 )
 from bizniz.workspace.base_workspace import BaseWorkspace
 
+from bizniz.utils.json import clean_llm_json
 
-class Autocoder:
+class BaseAIAgent(ABC):
     '''
     '''
 
@@ -266,3 +245,6 @@ class Autocoder:
             "problem_statement": prompt,
         }
         
+        
+    def clean_llm_json(self, text: str) -> str:
+        return clean_llm_json(text)
