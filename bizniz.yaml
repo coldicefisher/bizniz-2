@@ -1,0 +1,6 @@
+default_model: gpt-4o-mini
+models:
+  - gpt-4o-mini
+  - gpt-4o
+  - gpt-5
+max_iterations: 20

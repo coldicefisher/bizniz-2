@@ -37,10 +37,12 @@ from typing import Optional, Callable, List
 from bizniz.autocoder.autocoder import Autocoder
 from bizniz.autodebugger.autodebugger import Autodebugger
 from bizniz.autotester.autotester import Autotester
-from bizniz.clients.chatgpt.base_chatgpt_client import BaseChatGPTClient
+from bizniz.clients.base_ai_client import BaseAIClient
+from bizniz.deep_debugger.deep_debugger import DeepDebugger
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.environment.types import ExecutionCallSpec
 from bizniz.orchestrator.model_progression import ModelProgression
+from bizniz.orchestrator.stall_detector import StallDetector
 from bizniz.workspace.base_workspace import BaseWorkspace
 
 from bizniz.autocoder.types import FileChange
@@ -85,7 +87,8 @@ class CodingOrchestrator:
         test_environment: BaseExecutionEnvironment,
         workspace: BaseWorkspace,
         autodebugger: Optional[Autodebugger] = None,
-        client: Optional[BaseChatGPTClient] = None,
+        client: Optional[BaseAIClient] = None,
+        deep_debugger_factory: Optional[Callable[[], DeepDebugger]] = None,
         model_progression: Optional[ModelProgression] = None,
         max_iterations: int = 20,
         on_status_message: Optional[Callable[[str], None]] = None,
@@ -96,9 +99,11 @@ class CodingOrchestrator:
         self._test_environment = test_environment
         self._workspace = workspace
         self._client = client
+        self._deep_debugger_factory = deep_debugger_factory
         self._model_progression = model_progression
         self._max_iterations = max_iterations
         self._on_status_message = on_status_message
+        self._stall_detector = StallDetector()
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -452,36 +457,115 @@ class CodingOrchestrator:
         log: Callable,
     ) -> tuple:
         """
-        Handle a test failure in multi-file mode. Uses autodebugger if available,
-        otherwise repairs code directly.
+        Handle a test failure in multi-file mode.
+
+        Uses StallDetector to track multiple stall signals. When stalled,
+        runs DeepDebugger for comprehensive diagnosis before escalating.
 
         Returns (current_files, current_test_files, stale_count, previous_code_hash).
         """
-        # Compute combined hash for stale detection
+        # Record failure in stall detector
         combined = "".join(sorted(f"{k}:{v}" for k, v in current_files.items()))
         current_hash = _hash(combined)
+        self._stall_detector.record_failure(current_hash, failure_output)
 
-        if current_hash == previous_code_hash:
-            stale_count += 1
-            if stale_count >= 2:
-                self._try_escalate_model(log)
-                # Regenerate tests on stall
-                log("Orchestrator: multi-file repair stalled — regenerating tests...")
+        if self._stall_detector.is_stalled:
+            log(f"Orchestrator: stall detected — {self._stall_detector.stall_reason}")
+
+            # Deep diagnosis before escalation
+            deep_diagnosis = None
+            if self._deep_debugger_factory is not None:
+                try:
+                    log("Orchestrator: running deep diagnosis with fresh LLM instance...")
+                    deep_debugger = self._deep_debugger_factory()
+                    deep_diagnosis = deep_debugger.diagnose(
+                        error_output=failure_output,
+                        source_files=current_files,
+                        test_files=current_test_files,
+                        architecture_context=architecture_context,
+                        repair_history=self._stall_detector.repair_history,
+                    )
+                    log(f"Orchestrator: deep diagnosis — {deep_diagnosis.root_cause_category}, "
+                        f"fix_target={deep_diagnosis.fix_target}")
+                except Exception as e:
+                    log(f"Orchestrator: deep diagnosis failed ({e}), proceeding with escalation...")
+
+            # Escalate model
+            self._try_escalate_model(log)
+            self._stall_detector.reset_counters()
+
+            # Act on deep diagnosis fix_target
+            if deep_diagnosis and deep_diagnosis.fix_target in ("tests", "both"):
+                log("Orchestrator: deep diagnosis recommends fixing tests — regenerating...")
+                enriched_prompt = (
+                    f"{prompt}\n\n"
+                    f"DEEP DIAGNOSIS:\n{deep_diagnosis.root_cause}\n\n"
+                    f"FIX PLAN:\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(deep_diagnosis.fix_plan)) + "\n\n"
+                    f"APPROACH: {deep_diagnosis.suggested_approach}\n\n"
+                    f"Previous failures:\n{failure_output}"
+                )
                 test_result = self._autotester.generate_multi(
-                    problem_statement=prompt + f"\n\nPrevious failures:\n{failure_output}",
+                    problem_statement=enriched_prompt,
                     test_files=test_files,
                     source_code=current_files,
                     architecture_context=architecture_context,
                 )
                 new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
-                return current_files, new_test_files, 0, None
-        else:
-            stale_count = 0
 
-        # Repair code across all files
+                if deep_diagnosis.fix_target == "both":
+                    # Also repair code with diagnosis context
+                    enriched_error = self._build_deep_diagnosis_context(deep_diagnosis, failure_output)
+                    all_files = {**current_files}
+                    for fp, tests in new_test_files.items():
+                        all_files[fp] = tests
+                    repaired = self._autocoder.repair_multi(
+                        current_files=all_files,
+                        error_message=enriched_error,
+                        architecture_context=architecture_context,
+                    )
+                    new_files = dict(current_files)
+                    for ch in repaired.changes:
+                        if ch.filepath in new_test_files:
+                            new_test_files[ch.filepath] = ch.code
+                        else:
+                            new_files[ch.filepath] = ch.code
+                            self._workspace.write_file(path=ch.filepath, content=ch.code)
+                    return new_files, new_test_files, 0, None
+
+                return current_files, new_test_files, 0, None
+
+            if deep_diagnosis and deep_diagnosis.fix_target == "code":
+                # Repair code with deep diagnosis context
+                log("Orchestrator: deep diagnosis recommends fixing code — repairing with diagnosis...")
+                enriched_error = self._build_deep_diagnosis_context(deep_diagnosis, failure_output)
+                all_files = {**current_files}
+                for fp, tests in current_test_files.items():
+                    all_files[fp] = tests
+                repaired = self._autocoder.repair_multi(
+                    current_files=all_files,
+                    error_message=enriched_error,
+                    architecture_context=architecture_context,
+                )
+                new_files, new_test_files = self._apply_multi_repair(
+                    repaired, current_files, current_test_files,
+                )
+                new_hash = _hash("".join(sorted(f"{k}:{v}" for k, v in new_files.items())))
+                return new_files, new_test_files, 0, new_hash
+
+            # No deep diagnosis available — just regenerate tests
+            log("Orchestrator: regenerating tests after stall...")
+            test_result = self._autotester.generate_multi(
+                problem_statement=prompt + f"\n\nPrevious failures:\n{failure_output}",
+                test_files=test_files,
+                source_code=current_files,
+                architecture_context=architecture_context,
+            )
+            new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+            return current_files, new_test_files, 0, None
+
+        # Not stalled — standard repair
         log("Orchestrator: repairing code across files...")
         all_files = {**current_files}
-        # Include test files in context for the repair
         for fp, tests in current_test_files.items():
             all_files[fp] = tests
 
@@ -491,7 +575,14 @@ class CodingOrchestrator:
             architecture_context=architecture_context,
         )
 
-        # Apply changes — only update files that were changed
+        new_files, new_test_files = self._apply_multi_repair(
+            repaired, current_files, current_test_files,
+        )
+        new_hash = _hash("".join(sorted(f"{k}:{v}" for k, v in new_files.items())))
+        return new_files, new_test_files, 0, new_hash
+
+    def _apply_multi_repair(self, repaired, current_files, current_test_files):
+        """Apply repair changes, separating code and test file updates."""
         new_files = dict(current_files)
         new_test_files = dict(current_test_files)
         for ch in repaired.changes:
@@ -499,11 +590,22 @@ class CodingOrchestrator:
                 new_test_files[ch.filepath] = ch.code
             else:
                 new_files[ch.filepath] = ch.code
-                # Save updated code to workspace
                 self._workspace.write_file(path=ch.filepath, content=ch.code)
+        return new_files, new_test_files
 
-        new_hash = _hash("".join(sorted(f"{k}:{v}" for k, v in new_files.items())))
-        return new_files, new_test_files, stale_count, new_hash
+    @staticmethod
+    def _build_deep_diagnosis_context(deep_diagnosis, failure_output: str) -> str:
+        """Build an enriched error message that includes deep diagnosis context."""
+        return (
+            f"DEEP DIAGNOSIS (from comprehensive full-project analysis):\n"
+            f"Root cause: {deep_diagnosis.root_cause}\n"
+            f"Category: {deep_diagnosis.root_cause_category}\n"
+            f"Affected files: {', '.join(deep_diagnosis.affected_files)}\n"
+            f"Fix plan:\n" + "\n".join(f"  {i+1}. {step}" for i, step in enumerate(deep_diagnosis.fix_plan)) + "\n"
+            f"Approach: {deep_diagnosis.suggested_approach}\n"
+            f"Previous repair analysis: {deep_diagnosis.repair_history_analysis}\n\n"
+            f"ORIGINAL ERROR:\n{failure_output}"
+        )
 
     # ── Regression detection ──────────────────────────────────────────────────
 

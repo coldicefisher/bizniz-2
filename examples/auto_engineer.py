@@ -27,20 +27,28 @@ load_dotenv()  # automatically finds .env in current directory or parents
 from bizniz.autocoder.autocoder import Autocoder
 from bizniz.autodebugger.autodebugger import Autodebugger
 from bizniz.autotester.autotester import Autotester
+from bizniz.deep_debugger.deep_debugger import DeepDebugger
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-from bizniz.orchestrator.model_progression import ModelProgression
 from bizniz.engineer.auto_engineer import AutoEngineer
-from bizniz.clients.chatgpt.chatgpt_client import ChatGPTClient, ChatGPTClientConfig
+from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
 from bizniz.environment.pytest_environment import PytestEnvironment
 from bizniz.workspace.local_workspace import LocalWorkspace
 
 
-def make_orchestrator(client, workspace):
+def make_orchestrator(client, workspace, config):
     """Factory: returns a fresh CodingOrchestrator per issue."""
     sandbox = DockerExecutionEnvironment()
     pytest_env = PytestEnvironment(workspace_root=workspace.root)
+
+    def deep_debugger_factory():
+        """Create a DeepDebugger with its own fresh client instance."""
+        fresh_client = config.make_client()
+        return DeepDebugger(
+            client=fresh_client,
+            on_status_message=lambda msg: print(f"    [deep-debugger] {msg}"),
+        )
 
     return CodingOrchestrator(
         autocoder=Autocoder(
@@ -61,15 +69,17 @@ def make_orchestrator(client, workspace):
         test_environment=pytest_env,
         workspace=workspace,
         client=client,
-        model_progression=ModelProgression(),
-        max_iterations=20,
+        deep_debugger_factory=deep_debugger_factory,
+        model_progression=config.make_model_progression(),
+        max_iterations=config.max_iterations,
         on_status_message=lambda msg: print(f"    [orchestrator] {msg}"),
     )
 
 
 if __name__ == "__main__":
 
-    client = ChatGPTClient(config=ChatGPTClientConfig(default_model="gpt-4o-mini"), api_key=None)
+    config = BiznizConfig.find_and_load()
+    client = config.make_client()
 
     # Clean workspace on every run for a fresh start
     workspace_path = os.path.expanduser("~/auto_engineer_workspace")
@@ -85,7 +95,7 @@ if __name__ == "__main__":
         client=client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
-        orchestrator_factory=lambda: make_orchestrator(client, workspace),
+        orchestrator_factory=lambda: make_orchestrator(client, workspace, config),
         on_status_message=lambda msg: print(f"  [engineer] {msg}"),
     ) as engineer:
 

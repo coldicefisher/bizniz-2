@@ -21,6 +21,11 @@ ARCHITECTURE CONTEXT:
 
 ERROR OUTPUT:
 ──────────────────────────────────────────────────────────────
+Note: The error output may include a DEEP DIAGNOSIS section with a comprehensive
+root cause analysis and fix plan from a separate debugging agent. If present,
+follow the fix plan steps carefully — they are based on analysis of the full
+project context and repair history.
+
 {error_message}
 
 CURRENT FILES:
