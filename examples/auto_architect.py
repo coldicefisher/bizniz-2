@@ -1,24 +1,18 @@
 """
 Example: Auto Architect
 
-Decomposes a problem statement into a service-based architecture,
+Decomposes a problem into a service-based architecture,
 creates workspaces, generates Dockerfiles and docker-compose.yml,
 and dispatches AutoEngineer instances for application services.
 
-Usage:
-    python examples/auto_architect.py
-
-Requires:
-    OPENAI_API_KEY environment variable (or .env in examples/)
+Requirements:
+    - OPENAI_API_KEY environment variable set (or .env file)
 """
-
-import os
-import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv()
 
 from bizniz.autocoder.autocoder import Autocoder
 from bizniz.autodebugger.autodebugger import Autodebugger
@@ -90,19 +84,16 @@ def _make_engineer(config, workspace):
     )
 
 
-def main():
-    config = BiznizConfig()
+if __name__ == "__main__":
+
+    config = BiznizConfig.find_and_load()
     architect_client = config.make_client(model="gpt-4o")
 
     project_name = "Pet Groomer"
     workspace_parent = Path.home() / "bizniz_projects"
     workspace_parent.mkdir(parents=True, exist_ok=True)
 
-    # Create a root workspace for the architect
     root_workspace = LocalWorkspace.from_name(project_name, parent=workspace_parent)
-
-    def status(msg):
-        print(f"  {msg}")
 
     architect = AutoArchitect(
         client=architect_client,
@@ -110,7 +101,7 @@ def main():
         workspace=root_workspace,
         engineer_factory=lambda ws: _make_engineer(config, ws),
         workspace_parent=str(workspace_parent),
-        on_status_message=status,
+        on_status_message=lambda msg: print(f"  {msg}"),
     )
 
     print(f"\n{'='*60}")
@@ -130,7 +121,3 @@ def main():
         status_str = "PASS" if sr.success else "FAIL"
         print(f"  {sr.service_name}: {status_str} ({sr.issues_passed}/{sr.issues_total} issues)")
     print()
-
-
-if __name__ == "__main__":
-    main()

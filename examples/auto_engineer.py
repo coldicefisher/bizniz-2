@@ -1,28 +1,21 @@
 """
-Example: AutoEngineer
+Example: AutoEngineer — full pipeline
 
-Decomposes a problem statement into structured engineering artifacts
-(business requirements, use cases, functional/non-functional requirements,
-architecture plan, and coding issues), persists them to a workspace SQLite
-database, then dispatches a CodingOrchestrator for each issue.
+Decomposes a problem statement into engineering artifacts (requirements,
+architecture, issues), then dispatches a CodingOrchestrator per issue.
 
-The full pipeline:
-1. analyze() — AI produces requirements, use cases, architecture plan, and issues
-2. Package structure is created (pyproject.toml, namespaces, __init__.py files)
-3. dispatch() per issue — orchestrator generates code + tests across multiple files
-4. Governance loop — if autocoder creates unplanned files, the engineer reviews
-   the drift and approves, rejects, or modifies the architecture plan
+This example uses the most complex problem: an inventory management system
+with multiple domain models, business logic, and cross-module dependencies.
 
 Requirements:
-    - OPENAI_API_KEY environment variable set
+    - OPENAI_API_KEY environment variable set (or .env file)
 """
 import os
 import shutil
 
 from dotenv import load_dotenv
 
-load_dotenv()  # automatically finds .env in current directory or parents
-
+load_dotenv()
 
 from bizniz.autocoder.autocoder import Autocoder
 from bizniz.autodebugger.autodebugger import Autodebugger
@@ -35,16 +28,37 @@ from bizniz.environment.python_environment import PythonSandboxExecutionEnvironm
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
 from bizniz.environment.pytest_environment import PytestEnvironment
 from bizniz.workspace.local_workspace import LocalWorkspace
-from bizniz.logging.pipeline_logger import PipelineLogger
 
 
-def make_orchestrator(client, workspace, config, suggested_model=None):
+PROBLEM_STATEMENT = (
+    "Build a Python inventory management system for a small warehouse. "
+    "\n\n"
+    "Domain models:\n"
+    "- Product: has name (str), sku (str, unique), price (float), category (str)\n"
+    "- StockEntry: tracks product_sku (str), quantity (int), and "
+    "  timestamp (datetime) for each stock-in or stock-out event\n"
+    "\n"
+    "Core service (InventoryManager):\n"
+    "- register_product(name, sku, price, category) — add a new product, "
+    "  raise ValueError if SKU already exists\n"
+    "- stock_in(sku, quantity) — record incoming stock for a product\n"
+    "- stock_out(sku, quantity) — record outgoing stock, raise ValueError "
+    "  if insufficient stock\n"
+    "- get_stock_level(sku) — return current quantity (sum of all stock entries)\n"
+    "- get_products_by_category(category) — return list of products in a category\n"
+    "- get_low_stock_products(threshold) — return products with stock below threshold\n"
+    "- get_inventory_value() — return total value (price * quantity) across all products\n"
+    "\n"
+    "Use in-memory storage (lists/dicts). No database or file I/O."
+)
+
+
+def _make_orchestrator(config, workspace, suggested_model=None):
     """Factory: returns a fresh CodingOrchestrator per issue."""
     sandbox = DockerExecutionEnvironment()
     pytest_env = PytestEnvironment(workspace_root=workspace.root)
 
     def debugger_factory():
-        """Create an AgenticDebugger with its own fresh client instance."""
         fresh_client = config.make_client()
         return AgenticDebugger(
             client=fresh_client,
@@ -54,28 +68,14 @@ def make_orchestrator(client, workspace, config, suggested_model=None):
         )
 
     def client_factory(model_name):
-        """Create a fresh client for a specific model (used on escalation)."""
         return config.make_client(model=model_name)
 
-    # Use suggested_model for this issue's starting client
-    issue_client = config.make_client(model=suggested_model) if suggested_model else client
+    issue_client = config.make_client(model=suggested_model) if suggested_model else config.make_client()
 
     return CodingOrchestrator(
-        autocoder=Autocoder(
-            client=issue_client,
-            environment=sandbox,
-            workspace=workspace,
-        ),
-        autotester=Autotester(
-            client=issue_client,
-            environment=sandbox,
-            workspace=workspace,
-        ),
-        autodebugger=Autodebugger(
-            client=issue_client,
-            environment=sandbox,
-            workspace=workspace,
-        ),
+        autocoder=Autocoder(client=issue_client, environment=sandbox, workspace=workspace),
+        autotester=Autotester(client=issue_client, environment=sandbox, workspace=workspace),
+        autodebugger=Autodebugger(client=issue_client, environment=sandbox, workspace=workspace),
         test_environment=pytest_env,
         workspace=workspace,
         client=issue_client,
@@ -90,59 +90,44 @@ def make_orchestrator(client, workspace, config, suggested_model=None):
 if __name__ == "__main__":
 
     config = BiznizConfig.find_and_load()
-
-    # Engineer uses the best available model for analysis + planning
     engineer_client = config.make_engineer_client()
 
     # Clean workspace on every run for a fresh start
     workspace_path = os.path.expanduser("~/auto_engineer_workspace")
     if os.path.exists(workspace_path):
-        # Fix permissions before rmtree — Docker may create read-only files
         for root, dirs, files in os.walk(workspace_path):
             for f in files:
-                fp = os.path.join(root, f)
                 try:
-                    os.chmod(fp, 0o666)
+                    os.chmod(os.path.join(root, f), 0o666)
                 except OSError:
                     pass
             for d in dirs:
-                dp = os.path.join(root, d)
                 try:
-                    os.chmod(dp, 0o777)
+                    os.chmod(os.path.join(root, d), 0o777)
                 except OSError:
                     pass
         shutil.rmtree(workspace_path)
 
     workspace = LocalWorkspace(root=workspace_path)
 
-    # Set up structured logging
-    log_dir = os.path.join(workspace_path, ".bizniz", "logs")
-    logger = PipelineLogger(log_dir=log_dir)
-
-    # ── Step 1: Analyze (requirements + architecture + issues) ────────
+    # ── Step 1: Analyze ───────────────────────────────────────────────
     print("=== Analyzing problem statement ===\n")
-
-    problem_statement = (
-        "Build a command-line expense tracker that lets users add expenses "
-        "with a category and amount, list all expenses, and show totals by category."
-    )
-    logger.log_run_start(problem_statement)
 
     with AutoEngineer(
         client=engineer_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
-        orchestrator_factory=lambda suggested_model=None: make_orchestrator(
-            engineer_client, workspace, config, suggested_model=suggested_model,
+        orchestrator_factory=lambda suggested_model=None: _make_orchestrator(
+            config, workspace, suggested_model=suggested_model,
         ),
         on_status_message=lambda msg: print(f"  [engineer] {msg}"),
     ) as engineer:
 
-        analysis = engineer.analyze(problem_statement)
+        analysis = engineer.analyze(PROBLEM_STATEMENT)
 
-        print(f"\nProblem ID: {analysis.problem_id}")
+        print(f"Problem ID: {analysis.problem_id}")
 
-        # ── Architecture Plan ─────────────────────────────────────────
+        # Architecture
         if analysis.architecture:
             arch = analysis.architecture
             print(f"\nArchitecture Plan:")
@@ -155,78 +140,46 @@ if __name__ == "__main__":
                 for dm in arch.domain_models:
                     fields = ", ".join(f"{f.name}: {f.type_hint}" for f in dm.fields)
                     print(f"    - {dm.class_name} ({dm.filepath}): {fields}")
-            if arch.modules:
-                print(f"  Modules:")
-                for mod in arch.modules:
-                    name = mod.class_name or "(module-level)"
-                    methods = ", ".join(m.name for m in mod.methods)
-                    print(f"    - {name} ({mod.filepath}): {methods}")
-            if arch.dependencies:
-                print(f"  Dependencies:")
-                for dep in arch.dependencies:
-                    symbols = ", ".join(dep.import_symbols)
-                    print(f"    - {dep.source_filepath} → {dep.target_filepath} [{symbols}]")
 
-        # ── Requirements ──────────────────────────────────────────────
-        print("\nBusiness Requirements:")
+        # Requirements
+        print("\nRequirements:")
         for req in analysis.requirements:
-            if req.type == "business":
-                print(f"  - {req.text}")
+            print(f"  [{req.type}] {req.text}")
 
-        print("\nUse Cases:")
-        for uc in analysis.use_cases:
-            print(f"  - {uc.title}: {uc.description}")
-
-        print("\nFunctional Requirements:")
-        for req in analysis.requirements:
-            if req.type == "functional":
-                print(f"  - {req.text}")
-
-        print("\nNon-Functional Requirements:")
-        for req in analysis.requirements:
-            if req.type == "nonfunctional":
-                print(f"  - {req.text}")
-
-        # ── Issues ────────────────────────────────────────────────────
-        print("\nIssues:")
+        # Issues
+        print(f"\nIssues ({len(analysis.issues)}):")
         for issue in analysis.issues:
-            model_tag = f" [model: {issue.suggested_model}]" if issue.suggested_model else ""
-            print(f"  #{issue.db_id}: {issue.title}{model_tag}")
+            model_tag = f" [{issue.suggested_model}]" if issue.suggested_model else ""
             targets = ", ".join(tf.filepath for tf in issue.target_files)
             tests = ", ".join(issue.test_files)
+            print(f"  #{issue.db_id}: {issue.title}{model_tag}")
             print(f"         target: {targets}  tests: {tests}")
 
-        # ── Step 2: Dispatch all analyzed issues ──────────────────────
+        # ── Step 2: Dispatch all issues ───────────────────────────────
         print(f"\n=== Dispatching {len(analysis.issues)} issue(s) ===\n")
-        resolved = 0
-        failed = 0
+
+        results = []
         for issue in analysis.issues:
-            print(f"  Dispatching issue #{issue.db_id}: {issue.title}")
-            logger.log_issue_start(issue.db_id, issue.title, issue.suggested_model)
+            print(f"  Dispatching #{issue.db_id}: {issue.title}")
             result = engineer.dispatch(issue.db_id)
-            logger.log_issue_end(issue.db_id, result.success, result.iterations)
-            print(f"    Success: {result.success}, Iterations: {result.iterations}")
-            if result.success:
-                resolved += 1
-            else:
-                failed += 1
-                logger.log_error(issue.db_id, "issue_failed", f"Issue #{issue.db_id} failed after {result.iterations} iterations")
+            results.append(result)
+            status = "PASS" if result.success else "FAIL"
+            print(f"    {status} ({result.iterations} iterations)")
             if result.architecture_drift_detected:
                 print(f"    Drift detected: {result.drift_files}")
 
-    logger.log_run_end(
-        success=failed == 0,
-        total_issues=len(analysis.issues),
-        resolved=resolved,
-        failed=failed,
-    )
+    # ── Summary ───────────────────────────────────────────────────────
+    successes = [r for r in results if r.success]
+    total_iters = sum(r.iterations for r in results)
 
-    summary = logger.get_summary()
-    print(f"\n=== Run Summary ===")
-    print(f"  Run ID: {summary['run_id']}")
-    print(f"  Issues: {summary['total_issues']} total, {summary['resolved']} resolved, {summary['failed']} failed")
-    print(f"  Total iterations: {summary['total_iterations']}")
-    print(f"  Escalations: {summary['escalations']}, Stalls: {summary['stalls']}")
-    print(f"  Log: {summary['log_path']}")
+    print(f"\n=== Results ===")
+    print(f"  {len(successes)}/{len(results)} issues resolved")
+    print(f"  {total_iters} total iterations")
+
+    files = [str(f) for f in workspace.list_relative_files()]
+    py_source = [f for f in files if f.endswith(".py") and not f.startswith("tests/") and not f.startswith(".")]
+    py_tests = [f for f in files if f.endswith(".py") and f.startswith("tests/")]
+    print(f"  Source files: {py_source}")
+    print(f"  Test files: {py_tests}")
 
     print(f"\nWorkspace files: {workspace.tree()}")

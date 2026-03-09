@@ -13,7 +13,6 @@ import shutil
 import argparse
 import datetime
 import json
-import traceback
 
 from dotenv import load_dotenv
 
@@ -21,6 +20,7 @@ load_dotenv()
 
 from bizniz.autocoder.autocoder import Autocoder
 from bizniz.autodebugger.autodebugger import Autodebugger
+from bizniz.agentic_debugger.agentic_debugger import AgenticDebugger
 from bizniz.autotester.autotester import Autotester
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.engineer.auto_engineer import AutoEngineer
@@ -33,19 +33,42 @@ from bizniz.logging.pipeline_logger import PipelineLogger
 
 
 PROBLEM_STATEMENT = (
-    "Build a command-line expense tracker that lets users add expenses "
-    "with a category and amount, list all expenses, and show totals by category."
+    "Build a Python inventory management system for a small warehouse. "
+    "\n\n"
+    "Domain models:\n"
+    "- Product: has name (str), sku (str, unique), price (float), category (str)\n"
+    "- StockEntry: tracks product_sku (str), quantity (int), and "
+    "  timestamp (datetime) for each stock-in or stock-out event\n"
+    "\n"
+    "Core service (InventoryManager):\n"
+    "- register_product(name, sku, price, category) — add a new product, "
+    "  raise ValueError if SKU already exists\n"
+    "- stock_in(sku, quantity) — record incoming stock for a product\n"
+    "- stock_out(sku, quantity) — record outgoing stock, raise ValueError "
+    "  if insufficient stock\n"
+    "- get_stock_level(sku) — return current quantity (sum of all stock entries)\n"
+    "- get_products_by_category(category) — return list of products in a category\n"
+    "- get_low_stock_products(threshold) — return products with stock below threshold\n"
+    "- get_inventory_value() — return total value (price * quantity) across all products\n"
+    "\n"
+    "Use in-memory storage (lists/dicts). No database or file I/O."
 )
 
 
-def make_orchestrator(client, workspace, config, suggested_model=None):
+def _make_orchestrator(config, workspace, suggested_model=None):
     sandbox = DockerExecutionEnvironment()
     pytest_env = PytestEnvironment(workspace_root=workspace.root)
+
+    def debugger_factory():
+        fresh_client = config.make_client()
+        return AgenticDebugger(
+            client=fresh_client, workspace=workspace, environment=pytest_env,
+        )
 
     def client_factory(model_name):
         return config.make_client(model=model_name)
 
-    issue_client = config.make_client(model=suggested_model) if suggested_model else client
+    issue_client = config.make_client(model=suggested_model) if suggested_model else config.make_client()
 
     return CodingOrchestrator(
         autocoder=Autocoder(client=issue_client, environment=sandbox, workspace=workspace),
@@ -55,6 +78,7 @@ def make_orchestrator(client, workspace, config, suggested_model=None):
         workspace=workspace,
         client=issue_client,
         client_factory=client_factory,
+        debugger_factory=debugger_factory,
         model_progression=config.make_model_progression(),
         max_iterations=config.max_iterations,
         on_status_message=lambda msg: print(f"      [orchestrator] {msg}"),
@@ -90,8 +114,8 @@ def run_once(run_number: int, config: BiznizConfig) -> dict:
             client=engineer_client,
             environment=PythonSandboxExecutionEnvironment(),
             workspace=workspace,
-            orchestrator_factory=lambda suggested_model=None: make_orchestrator(
-                engineer_client, workspace, config, suggested_model=suggested_model,
+            orchestrator_factory=lambda suggested_model=None: _make_orchestrator(
+                config, workspace, suggested_model=suggested_model,
             ),
             on_status_message=lambda msg: print(f"    [engineer] {msg}"),
         ) as engineer:

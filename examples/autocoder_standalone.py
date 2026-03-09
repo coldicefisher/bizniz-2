@@ -1,37 +1,27 @@
 """
 Example: Autocoder standalone usage
 
-Generates Python code from a prompt, executes it in a sandboxed environment,
-and iteratively repairs it until it runs error-free.
+Generates Python code from a prompt using the AI code generation pipeline.
 
 Requirements:
-    - OPENAI_API_KEY environment variable set
+    - OPENAI_API_KEY environment variable set (or .env file)
 """
-
-import os
-import shutil
-
 from dotenv import load_dotenv
 
-load_dotenv()  # automatically finds .env in current directory or parents
-
-
+load_dotenv()
 
 from bizniz.autocoder.autocoder import Autocoder
-from bizniz.clients.chatgpt.chatgpt_client import ChatGPTClient, ChatGPTClientConfig
-from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
+from bizniz.config.bizniz_config import BiznizConfig
+from bizniz.environment.docker_environment import DockerExecutionEnvironment
 from bizniz.workspace.temp_workspace import TempWorkspace
 
 
 if __name__ == "__main__":
 
-    # 1. Set up dependencies
-    client = ChatGPTClient(
-        config=ChatGPTClientConfig(default_model="gpt-4o-mini"),
-        api_key=None,  # reads from OPENAI_API_KEY env var
-    )
-
-    environment = PythonSandboxExecutionEnvironment()
+    # 1. Set up dependencies via config
+    config = BiznizConfig.find_and_load()
+    client = config.make_client()
+    environment = DockerExecutionEnvironment()
     workspace = TempWorkspace()
 
     # 2. Create the Autocoder
@@ -39,28 +29,36 @@ if __name__ == "__main__":
         client=client,
         environment=environment,
         workspace=workspace,
-        max_retries=5,
         on_status_message=lambda msg: print(f"  [status] {msg}"),
     )
 
-    # 3. Generate code from a prompt
-    result = autocoder.generate(
-        prompt="Write a function called fibonacci(n) that returns the nth Fibonacci number.",
-        filename="fibonacci.py",
+    # ── Single file generation ────────────────────────────────────────
+    print("=== Single File Generation ===")
+    result = autocoder.generate_only(
+        prompt="Write a Python function called 'add' that takes two numbers and returns their sum.",
+        filename="math_utils.py",
     )
 
-    print("\n=== Generated Code ===")
-    print(result.code)
-    print(f"\n=== Output: {result.output} ===")
+    print(f"\nGenerated {len(result.changes)} file(s):")
+    for change in result.changes:
+        print(f"  {change.filepath} ({change.action})")
+        print(change.code)
 
-    # 4. You can also repair existing code
-    repair_result = autocoder.repair(
-        previous_code="def fibonacci(n):\n    return n * 2  # wrong!",
-        error_message="AssertionError: fibonacci(10) should be 55, got 20",
-        filename="fibonacci.py",
+    # ── Multi-file generation ─────────────────────────────────────────
+    print("\n=== Multi-File Generation ===")
+    target_files = [
+        {"filepath": "calculator/ops.py", "description": "Basic arithmetic operations"},
+    ]
+
+    result = autocoder.generate_multi(
+        issue_description="Create a calculator module with add, subtract, multiply, divide functions.",
+        target_files=target_files,
+        architecture_context="Simple calculator package.",
     )
 
-    print("\n=== Repaired Code ===")
-    print(repair_result.code)
+    print(f"\nGenerated {len(result.changes)} file(s):")
+    for change in result.changes:
+        print(f"  {change.filepath} ({change.action})")
+        print(change.code)
 
     print(f"\nWorkspace files: {workspace.tree()}")

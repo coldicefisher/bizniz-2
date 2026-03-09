@@ -1,37 +1,26 @@
 """
 Example: Autotester standalone usage
 
-Three modes for generating pytest test suites:
-  1. From existing code (reads metadata for problem statement)
-  2. From a prompt only (contract tests before code exists)
-  3. Review & strengthen existing tests
+Generates pytest test suites from prompts or existing code.
 
 Requirements:
-    - OPENAI_API_KEY environment variable set
+    - OPENAI_API_KEY environment variable set (or .env file)
 """
-import os
-import shutil
-
 from dotenv import load_dotenv
 
-load_dotenv()  # automatically finds .env in current directory or parents
-
-
+load_dotenv()
 
 from bizniz.autotester.autotester import Autotester
-from bizniz.clients.chatgpt.chatgpt_client import ChatGPTClient, ChatGPTClientConfig
-from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
+from bizniz.config.bizniz_config import BiznizConfig
+from bizniz.environment.docker_environment import DockerExecutionEnvironment
 from bizniz.workspace.temp_workspace import TempWorkspace
-from bizniz.utils.code_metadata import build_metadata_block
 
 
 if __name__ == "__main__":
 
-    client = ChatGPTClient(
-        config=ChatGPTClientConfig(default_model="gpt-4o-mini"),
-        api_key=None,
-    )
-    environment = PythonSandboxExecutionEnvironment()
+    config = BiznizConfig.find_and_load()
+    client = config.make_client()
+    environment = DockerExecutionEnvironment()
     workspace = TempWorkspace()
 
     autotester = Autotester(
@@ -41,43 +30,36 @@ if __name__ == "__main__":
         on_status_message=lambda msg: print(f"  [status] {msg}"),
     )
 
-    # ── Mode 2: Generate tests from a prompt (no code yet) ──────────────
-    print("=== Mode 2: Tests from prompt ===")
+    # ── Generate tests from a prompt ──────────────────────────────────
+    print("=== Tests from Prompt ===")
     result = autotester.process_from_prompt(
-        prompt="A function called is_palindrome(s) that returns True if the string is a palindrome.",
-        output_path="test_palindrome.py",
-        code_filename="palindrome.py",
+        prompt="Write a calculator module with add and subtract functions.",
+        output_path="tests/test_calculator.py",
+        code_filename="calculator.py",
     )
-    print(result.tests)
+    print(result.test_files[0].tests)
 
-    # ── Mode 1: Generate tests from existing code ───────────────────────
-    print("\n=== Mode 1: Tests from code ===")
+    # ── Generate multi-file tests ─────────────────────────────────────
+    print("\n=== Multi-File Tests ===")
 
-    # First, write a code file with embedded metadata
-    code_with_meta = (
-        build_metadata_block({"problem_statement": "Check if a string is a palindrome."})
-        + "\n\n"
-        + "def is_palindrome(s: str) -> bool:\n"
-        + "    return s == s[::-1]\n"
+    # First write some source code to test against
+    workspace.write_file(
+        "calculator.py",
+        "def add(a, b):\n    return a + b\n\ndef subtract(a, b):\n    return a - b\n",
     )
-    workspace.write_file("palindrome.py", code_with_meta)
 
-    result = autotester.process_from_code(
-        code_path="palindrome.py",
-        output_path="test_palindrome_from_code.py",
+    source_code = {"calculator.py": workspace.read_file("calculator.py")}
+
+    result = autotester.generate_multi(
+        problem_statement="A calculator module with add and subtract.",
+        test_files=["tests/test_calculator.py"],
+        source_code=source_code,
+        architecture_context="Simple calculator.",
     )
-    print(result.tests)
 
-    # ── Mode 3: Review and strengthen existing tests ────────────────────
-    print("\n=== Mode 3: Review tests ===")
-
-    workspace.write_file("test_basic.py", "def test_basic():\n    assert is_palindrome('aba') is True\n")
-
-    result = autotester.review_tests(
-        code_path="palindrome.py",
-        test_path="test_basic.py",
-        output_path="test_palindrome_strengthened.py",
-    )
-    print(result.tests)
+    print(f"Generated {len(result.test_files)} test file(s):")
+    for tf in result.test_files:
+        print(f"  {tf.filepath}")
+        print(tf.tests)
 
     print(f"\nWorkspace files: {workspace.tree()}")
