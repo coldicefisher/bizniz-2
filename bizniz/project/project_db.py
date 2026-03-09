@@ -31,12 +31,22 @@ class ProjectDB:
         db_dir = project.root / ".bizniz"
         db_dir.mkdir(parents=True, exist_ok=True)
         self._db_path = db_dir / "project.db"
-        self._conn = sqlite3.connect(str(self._db_path))
+        self._db_dir = db_dir
+        self._conn = sqlite3.connect(str(self._db_path), timeout=30)
         self._conn.row_factory = sqlite3.Row
         self._create_tables()
+        self._ensure_writable()
+
+    def _ensure_writable(self):
+        """Ensure DB file and directory are writable (Docker may change permissions)."""
         try:
             import os
+            os.chmod(str(self._db_dir), 0o777)
             os.chmod(str(self._db_path), 0o666)
+            for suffix in ["-journal", "-wal", "-shm"]:
+                journal = self._db_path.with_suffix(self._db_path.suffix + suffix)
+                if journal.exists():
+                    os.chmod(str(journal), 0o666)
         except OSError:
             pass
 
@@ -319,6 +329,10 @@ class ProjectDB:
     # ── Lifecycle ───────────────────────────────────────────────────────────────
 
     def close(self):
+        try:
+            self._conn.commit()
+        except Exception:
+            pass
         self._conn.close()
 
     def __enter__(self):

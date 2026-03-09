@@ -342,6 +342,7 @@ class AutoArchitect(BaseAIAgent):
             workspace,
             on_status_message=self._on_status_message,
             image_name=service.image_name,
+            language=service.language,
         ) as engineer:
             analysis = engineer.analyze(service_prompt)
 
@@ -456,30 +457,15 @@ class AutoArchitect(BaseAIAgent):
                 f'CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "{service.port or 8000}"]\n'
             )
         elif service.language == "typescript":
-            if service.service_type == "frontend":
-                return (
-                    "FROM node:20 AS build\n"
-                    "WORKDIR /app\n"
-                    "COPY package*.json .\n"
-                    "RUN npm ci\n"
-                    "COPY . .\n"
-                    "RUN npm run build\n"
-                    "\n"
-                    "FROM nginx:alpine\n"
-                    "COPY --from=build /app/dist/ /usr/share/nginx/html/\n"
-                    "EXPOSE 80\n"
-                    'CMD ["nginx", "-g", "daemon off;"]\n'
-                )
-            else:
-                return (
-                    "FROM node:20-slim\n"
-                    "WORKDIR /app\n"
-                    "COPY package*.json .\n"
-                    "RUN npm ci\n"
-                    "COPY . .\n"
-                    "RUN npm run build\n"
-                    f'CMD ["node", "dist/main.js"]\n'
-                )
+            # Dev image: Node + test deps, workspace mounted at runtime.
+            # No COPY of source — files are bind-mounted by DockerJestEnvironment.
+            return (
+                "FROM node:20-slim\n"
+                "WORKDIR /workspace\n"
+                "COPY package*.json ./\n"
+                "RUN npm install\n"
+                'CMD ["npx", "jest"]\n'
+            )
         else:
             return (
                 f"# Dockerfile for {service.name} ({service.framework})\n"
@@ -513,6 +499,14 @@ class AutoArchitect(BaseAIAgent):
     @staticmethod
     def _generate_package_json(service: ServiceDefinition, project_slug: str) -> str:
         """Generate a minimal package.json for a TypeScript service."""
+        jest_config = {
+            "preset": "ts-jest",
+            "roots": ["<rootDir>/src", "<rootDir>/tests"],
+            "testMatch": ["**/*.test.ts", "**/*.test.tsx"],
+        }
+        if service.service_type == "frontend":
+            jest_config["testEnvironment"] = "jest-environment-jsdom"
+
         pkg = {
             "name": f"{project_slug}-{service.name}",
             "version": "0.1.0",
@@ -522,7 +516,24 @@ class AutoArchitect(BaseAIAgent):
                 "dev": "vite" if service.service_type == "frontend" else "ts-node src/main.ts",
                 "test": "jest",
             },
+            "devDependencies": {
+                "jest": "^29.7.0",
+                "ts-jest": "^29.1.0",
+                "typescript": "^5.3.0",
+                "@types/jest": "^29.5.0",
+            },
+            "jest": jest_config,
         }
+        if service.service_type == "frontend":
+            pkg["devDependencies"].update({
+                "@testing-library/jest-dom": "^6.1.0",
+                "@testing-library/react": "^14.1.0",
+                "react": "^18.2.0",
+                "react-dom": "^18.2.0",
+                "@types/react": "^18.2.0",
+                "@types/react-dom": "^18.2.0",
+                "jest-environment-jsdom": "^29.7.0",
+            })
         return json.dumps(pkg, indent=2) + "\n"
 
     @staticmethod

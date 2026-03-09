@@ -8,7 +8,11 @@ from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.clients.errors import AIInsufficientFunds
 from bizniz.autocoder.prompts.generate_prompts import GENERATE_SYSTEM_INSTRUCTIONS_PROMPT, GENERATE_RETURN_FORMAT_PROMPT
 from bizniz.autocoder.prompts.repair_prompt import REPAIR_PROMPT
-from bizniz.autocoder.prompts.generate_multi_prompt import GENERATE_MULTI_SYSTEM_PROMPT, GENERATE_MULTI_USER_PROMPT_TEMPLATE
+from bizniz.autocoder.prompts.generate_multi_prompt import (
+    GENERATE_MULTI_SYSTEM_PROMPT,
+    GENERATE_MULTI_USER_PROMPT_TEMPLATE,
+    get_generate_multi_system_prompt,
+)
 from bizniz.autocoder.prompts.repair_multi_prompt import REPAIR_MULTI_PROMPT_TEMPLATE
 from bizniz.autocoder.prompts.prompt_schemas import GeneratePromptSchema, RepairPromptSchema
 from bizniz.autocoder.types import (

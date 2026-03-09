@@ -40,9 +40,9 @@ from bizniz.engineer.types import (
     GovernanceDecision,
     AutoEngineerBadAIResponseError,
 )
-from bizniz.engineer.prompts.system_prompt import AUTO_ENGINEER_SYSTEM_PROMPT
-from bizniz.engineer.prompts.analyze_prompt import ANALYZE_PROMPT_TEMPLATE
-from bizniz.engineer.prompts.plan_prompt import ARCHITECTURE_PLAN_PROMPT_TEMPLATE
+from bizniz.engineer.prompts.system_prompt import AUTO_ENGINEER_SYSTEM_PROMPT, get_engineer_system_prompt
+from bizniz.engineer.prompts.analyze_prompt import ANALYZE_PROMPT_TEMPLATE, get_analyze_prompt
+from bizniz.engineer.prompts.plan_prompt import ARCHITECTURE_PLAN_PROMPT_TEMPLATE, get_architecture_plan_prompt
 from bizniz.engineer.prompts.governance_prompt import GOVERNANCE_PROMPT_TEMPLATE
 from bizniz.engineer.prompts.schema import (
     AutoEngineerSchema,
@@ -82,7 +82,9 @@ class AutoEngineer(BaseAIAgent):
         max_retries: Optional[int] = 3,
         on_event: Optional[Callable] = None,
         on_status_message: Optional[Callable[[str], None]] = None,
+        language: str = "python",
     ):
+        self._language = language  # Must be set before super().__init__ reads _process_system_prompt
         super().__init__(
             client=client,
             environment=environment,
@@ -97,7 +99,7 @@ class AutoEngineer(BaseAIAgent):
 
     @property
     def _process_system_prompt(self) -> str:
-        return AUTO_ENGINEER_SYSTEM_PROMPT
+        return get_engineer_system_prompt(self._language)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -117,7 +119,7 @@ class AutoEngineer(BaseAIAgent):
 
         # Step 1: Initial analysis (requirements, use cases, issues)
         log("AutoEngineer: calling AI for engineering analysis...")
-        user_prompt = ANALYZE_PROMPT_TEMPLATE.format(
+        user_prompt = get_analyze_prompt(self._language).format(
             problem_statement=problem_statement,
             architecture_context="",
         )
@@ -135,7 +137,7 @@ class AutoEngineer(BaseAIAgent):
         arch_context = self.format_architecture_context(plan)
         log("AutoEngineer: refining issues with architecture context...")
         self.clear_message_history()
-        refined_prompt = ANALYZE_PROMPT_TEMPLATE.format(
+        refined_prompt = get_analyze_prompt(self._language).format(
             problem_statement=problem_statement,
             architecture_context=f"ARCHITECTURE PLAN:\n{arch_context}",
         )
@@ -165,8 +167,11 @@ class AutoEngineer(BaseAIAgent):
             ))
 
         # Step 4: Create the workspace package structure
-        log("AutoEngineer: creating package structure...")
-        self.create_package_structure(plan)
+        if self._language == "typescript":
+            log("AutoEngineer: skipping Python package structure for TypeScript project")
+        else:
+            log("AutoEngineer: creating package structure...")
+            self.create_package_structure(plan)
 
         log(
             f"AutoEngineer: analysis complete — "
@@ -501,7 +506,7 @@ class AutoEngineer(BaseAIAgent):
         problem_row = self._workspace.db.get_problem(problem_id)
         problem_statement = problem_row["statement"] if problem_row else "(unknown)"
 
-        user_prompt = ARCHITECTURE_PLAN_PROMPT_TEMPLATE.format(
+        user_prompt = get_architecture_plan_prompt(self._language).format(
             problem_statement=problem_statement,
             requirements_text=requirements_text,
             use_cases_text=use_cases_text,

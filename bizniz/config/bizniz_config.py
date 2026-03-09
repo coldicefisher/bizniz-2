@@ -29,6 +29,7 @@ class BiznizConfig(BaseModel):
     is_azure: bool = False
     api_base: Optional[str] = None
     max_iterations: int = 20
+    database_url: Optional[str] = None
 
     @classmethod
     def from_yaml(cls, path: str) -> "BiznizConfig":
@@ -67,6 +68,14 @@ class BiznizConfig(BaseModel):
 
     def make_model_progression(self) -> ModelProgression:
         return ModelProgression(models=self.models)
+
+    def make_db(self) -> "BiznizDB":
+        """Create a BiznizDB from the configured database_url."""
+        from bizniz.db.bizniz_db import BiznizDB
+        url = self.database_url or os.environ.get("BIZNIZ_DATABASE_URL")
+        if not url:
+            return None
+        return BiznizDB(url)
 
     def _make_openai_client(self, model: str) -> ChatGPTClient:
         api_key = self.api_key or os.environ.get("OPENAI_API_KEY")

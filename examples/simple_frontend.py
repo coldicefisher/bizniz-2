@@ -1,18 +1,8 @@
 """
-Example: Auto Architect
+Example: Simple Frontend App
 
-Decomposes a problem into a service-based architecture,
-creates project structure with Dockerfiles and docker-compose.yml,
-builds Docker images, and dispatches AutoEngineer instances.
-
-Output structure:
-    project_root/
-    └── dockerfiles/
-        └── development/
-            ├── docker-compose.yml
-            ├── .env
-            ├── backend/
-            └── frontend/
+Creates a single-service TypeScript/React frontend app using the AutoArchitect
+pipeline. Used for testing and debugging TypeScript support end-to-end.
 
 Requirements:
     - OPENAI_API_KEY environment variable set (or .env file)
@@ -24,7 +14,6 @@ import time
 import subprocess
 from pathlib import Path
 
-# Force unbuffered output so progress is visible in real time
 os.environ["PYTHONUNBUFFERED"] = "1"
 
 from dotenv import load_dotenv
@@ -47,15 +36,15 @@ from bizniz.workspace.local_workspace import LocalWorkspace
 
 
 PROBLEM_STATEMENT = (
-    "Build a web application for a pet grooming salon. "
-    "The website should allow customers to: "
-    "1) View available grooming services (bath, haircut, nail trim, etc.) with prices, "
-    "2) Book an appointment by selecting a service, date, and time slot, "
-    "3) View and cancel their existing appointments. "
+    "Build a simple single-page counter app using TypeScript. "
+    "The app should have: "
+    "1) A counter display showing the current count (starting at 0), "
+    "2) An increment button that adds 1 to the counter, "
+    "3) A decrement button that subtracts 1 from the counter, "
+    "4) A reset button that sets the counter back to 0. "
     "\n\n"
-    "The backend should be a REST API with endpoints for services, appointments, "
-    "and basic validation (no double-booking the same time slot). "
-    "Use in-memory storage for now (no database required)."
+    "This is a simple TypeScript app with pure DOM manipulation (no React). "
+    "Use a single TypeScript file for the logic."
 )
 
 
@@ -63,40 +52,34 @@ _start_time = time.time()
 
 
 def log(msg: str):
-    """Timestamped, flush-safe logging."""
     elapsed = time.time() - _start_time
     print(f"  [{elapsed:6.1f}s] {msg}", flush=True)
 
 
 def preflight_checks():
-    """Validate prerequisites before running the pipeline."""
     errors = []
-
-    # Check API key
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
-        errors.append("OPENAI_API_KEY environment variable is not set. Add it to .env or export it.")
+        errors.append("OPENAI_API_KEY environment variable is not set.")
 
-    # Check Docker daemon
     try:
         result = subprocess.run(
             ["docker", "info"], capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
-            errors.append("Docker daemon is not running. Start Docker and try again.")
+            errors.append("Docker daemon is not running.")
     except FileNotFoundError:
-        errors.append("Docker is not installed. Install Docker and try again.")
+        errors.append("Docker is not installed.")
     except subprocess.TimeoutExpired:
-        errors.append("Docker daemon is not responding (timed out).")
+        errors.append("Docker daemon is not responding.")
 
     if errors:
         print("\n  PREFLIGHT FAILED:", flush=True)
         for err in errors:
             print(f"    - {err}", flush=True)
-        print(flush=True)
         sys.exit(1)
 
-    log("Preflight OK (API key set, Docker running)")
+    log("Preflight OK")
 
 
 def _make_orchestrator(config, workspace, on_status_message=None, suggested_model=None, image_name=None, language="python"):
@@ -166,21 +149,19 @@ def _make_engineer(config, workspace, on_status_message=None, image_name=None, l
 if __name__ == "__main__":
 
     print(f"\n{'='*60}", flush=True)
-    print(f"  Auto Architect", flush=True)
+    print(f"  Simple Frontend App (TypeScript pipeline test)", flush=True)
     print(f"{'='*60}\n", flush=True)
 
     preflight_checks()
 
     log("Loading config...")
     config = BiznizConfig.find_and_load()
-    log(f"Config: default_model={config.default_model}, engineer_model={config.engineer_model}, max_iterations={config.max_iterations}")
-    log(f"Model progression: {config.models}")
+    log(f"Config: default_model={config.default_model}, max_iterations={config.max_iterations}")
 
     log("Creating architect client...")
     architect_client = config.make_client(model="gpt-4o")
-    log("Architect client ready")
 
-    project_name = "Pet Groomer"
+    project_name = "Simple Counter"
     project_parent = Path.home() / "bizniz_projects"
     project_parent.mkdir(parents=True, exist_ok=True)
 

@@ -7,6 +7,7 @@ from typing import List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bizniz.workspace.workspace_db import WorkspaceDB
+    from bizniz.db.bizniz_db import BiznizDB
 
 
 class BaseWorkspace:
@@ -19,13 +20,24 @@ class BaseWorkspace:
     the workspace itself never executes code.
 
     The workspace database is lazily created on first access via
-    the ``db`` property and lives at ``{root}/.bizniz/bizniz.db``.
+    the ``db`` property.  When ``bizniz_db`` is provided, returns
+    a WorkspaceScope backed by the unified MySQL/SQLite database.
+    Otherwise falls back to a per-workspace SQLite file.
     """
 
-    def __init__(self, root: str | Path):
+    def __init__(
+        self,
+        root: str | Path,
+        bizniz_db: Optional["BiznizDB"] = None,
+        project_id: Optional[str] = None,
+        service_name: Optional[str] = None,
+    ):
         self._root = Path(root).resolve()
         self._root.mkdir(parents=True, exist_ok=True)
-        self._db: Optional["WorkspaceDB"] = None
+        self._db = None
+        self._bizniz_db = bizniz_db
+        self._project_id = project_id
+        self._service_name = service_name
 
     # ------------------------------------------------------------------
     # Properties
@@ -37,17 +49,22 @@ class BaseWorkspace:
         return self._root
 
     @property
-    def db(self) -> "WorkspaceDB":
+    def db(self):
         """
-        Lazily create and return the workspace SQLite database.
+        Lazily create and return the workspace database.
 
-        The DB is the source of truth for problem statements, requirements,
-        use cases, and issues.  It lives at ``{root}/.bizniz/bizniz.db``
-        and is auto-created on first access.
+        When a unified BiznizDB is provided, returns a WorkspaceScope
+        backed by the shared database.  Otherwise falls back to a
+        per-workspace SQLite file at ``{root}/.bizniz/bizniz.db``.
         """
         if self._db is None:
-            from bizniz.workspace.workspace_db import WorkspaceDB
-            self._db = WorkspaceDB(self)
+            if self._bizniz_db is not None:
+                self._db = self._bizniz_db.for_workspace(
+                    self._project_id, self._service_name,
+                )
+            else:
+                from bizniz.workspace.workspace_db import WorkspaceDB
+                self._db = WorkspaceDB(self)
         return self._db
 
     # ------------------------------------------------------------------

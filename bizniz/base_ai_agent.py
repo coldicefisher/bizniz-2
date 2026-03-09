@@ -75,6 +75,7 @@ class BaseAIAgent(ABC):
         
         # ///////////////////////////////////////////////////////////////////////////
         # Setup messages history.
+        self._system_prompt_override: Optional[str] = None
         self._message_history: List[dict] = []
         # Append the system prompt to the front of the messages history for context. This is important for the AI to understand the instructions and requirements.
         self.add_messages_to_history([{
@@ -90,7 +91,17 @@ class BaseAIAgent(ABC):
         self._message_history = []
         self.add_messages_to_history([{
             "role": "system",
-            "content": self._process_system_prompt
+            "content": self._system_prompt_override or self._process_system_prompt
+        }])
+
+    def set_system_prompt_override(self, prompt: str):
+        """Override the system prompt (used for language-conditional prompts)."""
+        self._system_prompt_override = prompt
+        # Re-initialize message history with the new system prompt
+        self._message_history = []
+        self.add_messages_to_history([{
+            "role": "system",
+            "content": prompt
         }])
 
     # ATTRIBUTES AND PROPERTIES ////////////////////////////////////////////////////////////////////////////

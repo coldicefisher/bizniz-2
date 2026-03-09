@@ -23,10 +23,11 @@ from bizniz.workspace.local_workspace import LocalWorkspace
 
 class Project:
 
-    def __init__(self, root: str | Path, project_name: str):
+    def __init__(self, root: str | Path, project_name: str, bizniz_db=None):
         self._root = Path(root).resolve()
         self._root.mkdir(parents=True, exist_ok=True)
         self._project_name = project_name
+        self._bizniz_db = bizniz_db
         self._db = None
 
     @property
@@ -43,11 +44,19 @@ class Project:
         return self._root / "dockerfiles" / "development"
 
     @property
-    def db(self) -> "ProjectDB":
-        """Lazily create and return the project-level SQLite database."""
+    def db(self):
+        """Lazily create and return the project-level database.
+
+        When a unified BiznizDB is provided, returns a ProjectScope
+        backed by the shared database.  Otherwise falls back to a
+        per-project SQLite file.
+        """
         if self._db is None:
-            from bizniz.project.project_db import ProjectDB
-            self._db = ProjectDB(self)
+            if self._bizniz_db is not None:
+                self._db = self._bizniz_db.for_project(self._project_name)
+            else:
+                from bizniz.project.project_db import ProjectDB
+                self._db = ProjectDB(self)
         return self._db
 
     def create_structure(self):
@@ -57,7 +66,12 @@ class Project:
     def get_service_workspace(self, service_name: str) -> LocalWorkspace:
         """Returns a LocalWorkspace at dev_root / service_name"""
         ws_path = self.dev_root / service_name
-        return LocalWorkspace(root=str(ws_path))
+        return LocalWorkspace(
+            root=str(ws_path),
+            bizniz_db=self._bizniz_db,
+            project_id=self._project_name,
+            service_name=service_name,
+        )
 
     def write_docker_compose(self, content: str):
         """Write docker-compose.yml to dev_root"""
@@ -84,12 +98,12 @@ class Project:
         return self.db.get_services()
 
     @classmethod
-    def from_name(cls, project_name: str, parent: str | Path = "~") -> "Project":
+    def from_name(cls, project_name: str, parent: str | Path = "~", bizniz_db=None) -> "Project":
         """Create a project from a human-readable name."""
         from bizniz.workspace.naming import slugify
         slug = slugify(project_name)
         root = Path(parent).expanduser() / slug
-        return cls(root=root, project_name=project_name)
+        return cls(root=root, project_name=project_name, bizniz_db=bizniz_db)
 
     def __repr__(self) -> str:
         return f"<Project name={self._project_name!r} root={self._root}>"

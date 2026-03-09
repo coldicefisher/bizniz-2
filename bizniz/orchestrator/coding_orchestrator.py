@@ -94,6 +94,7 @@ class CodingOrchestrator:
         model_progression: Optional[ModelProgression] = None,
         max_iterations: int = 20,
         on_status_message: Optional[Callable[[str], None]] = None,
+        language: str = "python",
     ):
         self._autocoder = autocoder
         self._autotester = autotester
@@ -106,8 +107,72 @@ class CodingOrchestrator:
         self._model_progression = model_progression
         self._max_iterations = max_iterations
         self._on_status_message = on_status_message
+        self._language = language
         self._stall_detector = StallDetector()
         self._stall_cycle_count = 0
+
+        # Override system prompts for non-Python languages
+        if language == "typescript":
+            self._apply_typescript_system_prompts()
+
+    def _apply_typescript_system_prompts(self):
+        """Override autocoder/autotester system prompts for TypeScript."""
+        from bizniz.autocoder.prompts.generate_multi_prompt import get_generate_multi_system_prompt as get_autocoder_prompt
+        from bizniz.autotester.prompts.generate_multi_prompt import get_generate_multi_system_prompt as get_autotester_prompt
+
+        autocoder_prompt = get_autocoder_prompt("typescript")
+        if hasattr(self._test_environment, 'describe'):
+            autocoder_prompt = autocoder_prompt.format(evaluation_environment=self._test_environment.describe())
+        self._autocoder.set_system_prompt_override(autocoder_prompt)
+
+        autotester_prompt = get_autotester_prompt("typescript")
+        self._autotester.set_system_prompt_override(autotester_prompt)
+
+    # ── Language helpers ──────────────────────────────────────────────────────
+
+    @property
+    def _test_symbol(self) -> str:
+        return "jest" if self._language == "typescript" else "pytest"
+
+    @property
+    def _code_fence_lang(self) -> str:
+        return "typescript" if self._language == "typescript" else "python"
+
+    @property
+    def _language_prefix(self) -> str:
+        if self._language == "typescript":
+            return (
+                "IMPORTANT: This is a TypeScript project. "
+                "All source files must use .ts or .tsx extensions. "
+                "All test files must end in .test.ts or .test.tsx (Jest convention). "
+                "Use ES module imports. Do NOT generate Python code.\n\n"
+            )
+        return ""
+
+    def _is_test_file(self, filepath: str) -> bool:
+        if self._language == "typescript":
+            return (
+                not filepath.startswith("node_modules/")
+                and (
+                    filepath.endswith(".test.ts")
+                    or filepath.endswith(".test.tsx")
+                    or filepath.endswith(".spec.ts")
+                    or filepath.endswith(".spec.tsx")
+                )
+            )
+        return (
+            filepath.startswith("tests/")
+            and filepath.endswith(".py")
+            and filepath != "tests/__init__.py"
+        )
+
+    def _strip_extension(self, filepath: str) -> str:
+        if self._language == "typescript":
+            for ext in (".test.tsx", ".test.ts", ".spec.tsx", ".spec.ts", ".tsx", ".ts"):
+                if filepath.endswith(ext):
+                    return filepath[:-len(ext)]
+            return filepath
+        return filepath.replace(".py", "")
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -174,7 +239,7 @@ class CodingOrchestrator:
             log(f"Orchestrator: running tests (iteration {iteration}/{self._max_iterations})...")
 
             test_abs_path = str(self._workspace.path(test_filename))
-            call_spec = ExecutionCallSpec(symbol="pytest", args=[test_abs_path])
+            call_spec = ExecutionCallSpec(symbol=self._test_symbol, args=[test_abs_path])
             eval_result = self._test_environment.execute(code="", call_spec=call_spec)
 
             if eval_result.success:
@@ -362,7 +427,7 @@ class CodingOrchestrator:
         if workspace_context:
             ctx_parts = []
             for fp, content in workspace_context.items():
-                ctx_parts.append(f"── {fp} ──\n```python\n{content}\n```")
+                ctx_parts.append(f"── {fp} ──\n```{self._code_fence_lang}\n{content}\n```")
             extra_context = (
                 "\n\nEXISTING CODEBASE (from previously resolved issues):\n"
                 + "\n\n".join(ctx_parts) + "\n"
@@ -386,7 +451,7 @@ class CodingOrchestrator:
             test_abs_paths = [
                 str(self._workspace.path(tf)) for tf in current_test_files.keys()
             ]
-            call_spec = ExecutionCallSpec(symbol="pytest", args=test_abs_paths)
+            call_spec = ExecutionCallSpec(symbol=self._test_symbol, args=test_abs_paths)
             t0 = time.time()
             eval_result = self._test_environment.execute(code="", call_spec=call_spec)
             test_elapsed = time.time() - t0
@@ -605,7 +670,7 @@ class CodingOrchestrator:
                 enriched_prompt = (
                     f"{prompt}\n\n"
                     f"CURRENT CODE:\n"
-                    + "\n".join(f"── {fp} ──\n```python\n{code}\n```" for fp, code in current_files.items())
+                    + "\n".join(f"── {fp} ──\n```{self._code_fence_lang}\n{code}\n```" for fp, code in current_files.items())
                     + f"\n\nThe previous tests had collection errors:\n{error_detail}\n"
                     f"Fix the imports and test structure."
                 )
@@ -660,7 +725,7 @@ class CodingOrchestrator:
         # Step 1: Generate tests from the spec only (no source code)
         log(f"Orchestrator [TDD]: generating {len(test_files)} test file(s) from spec...")
         t0 = time.time()
-        test_prompt = prompt + extra_context
+        test_prompt = self._language_prefix + prompt + extra_context
         test_result = self._autotester.generate_multi(
             problem_statement=test_prompt,
             test_files=test_files,
@@ -673,11 +738,11 @@ class CodingOrchestrator:
         # Step 2: Generate code to pass the tests
         log(f"Orchestrator [TDD]: generating code for {len(target_files)} file(s) to pass tests...")
         test_context = "\n\n".join(
-            f"── {fp} ──\n```python\n{tests}\n```"
+            f"── {fp} ──\n```{self._code_fence_lang}\n{tests}\n```"
             for fp, tests in current_test_files.items()
         )
         code_prompt = (
-            f"{prompt}{extra_context}\n\n"
+            f"{self._language_prefix}{prompt}{extra_context}\n\n"
             f"YOUR CODE MUST PASS THESE TESTS:\n{test_context}"
         )
         t0 = time.time()
@@ -700,7 +765,7 @@ class CodingOrchestrator:
         log(f"Orchestrator [CODE_FIRST]: generating code for {len(target_files)} file(s)...")
         t0 = time.time()
         code_result = self._autocoder.generate_multi(
-            issue_description=prompt + extra_context,
+            issue_description=self._language_prefix + prompt + extra_context,
             target_files=target_files,
             architecture_context=architecture_context,
             existing_code=existing_code,
@@ -712,7 +777,7 @@ class CodingOrchestrator:
         log(f"Orchestrator [CODE_FIRST]: generating {len(test_files)} test file(s)...")
         t0 = time.time()
         test_result = self._autotester.generate_multi(
-            problem_statement=prompt + extra_context,
+            problem_statement=self._language_prefix + prompt + extra_context,
             test_files=test_files,
             source_code=current_files,
             architecture_context=architecture_context,
@@ -840,7 +905,7 @@ class CodingOrchestrator:
                 new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
                 # Regenerate code to pass the new tests
                 test_context = "\n\n".join(
-                    f"── {fp} ──\n```python\n{t}\n```" for fp, t in new_test_files.items()
+                    f"── {fp} ──\n```{self._code_fence_lang}\n{t}\n```" for fp, t in new_test_files.items()
                 )
                 code_result = self._autocoder.generate_multi(
                     issue_description=(
@@ -976,7 +1041,7 @@ class CodingOrchestrator:
                     issue_description=(
                         f"{prompt}\n\n"
                         f"YOUR CODE MUST PASS THESE TESTS:\n"
-                        + "\n".join(f"── {fp} ──\n```python\n{t}\n```" for fp, t in current_test_files.items())
+                        + "\n".join(f"── {fp} ──\n```{self._code_fence_lang}\n{t}\n```" for fp, t in current_test_files.items())
                         + f"\n\nPrevious failures:\n{failure_output}\n"
                         f"Generate a COMPLETELY FRESH implementation."
                     ),
@@ -1063,7 +1128,7 @@ class CodingOrchestrator:
         try:
             test_paths = [
                 str(f) for f in self._workspace.list_relative_files()
-                if str(f).startswith("tests/") and str(f).endswith(".py") and str(f) != "tests/__init__.py"
+                if self._is_test_file(str(f))
             ]
             if not test_paths:
                 return set()
@@ -1075,7 +1140,7 @@ class CodingOrchestrator:
 
             passing = set()
             for test_path in existing_paths:
-                call_spec = ExecutionCallSpec(symbol="pytest", args=[test_path])
+                call_spec = ExecutionCallSpec(symbol=self._test_symbol, args=[test_path])
                 result = self._test_environment.execute(code="", call_spec=call_spec)
                 if result.success:
                     # Store relative path
@@ -1100,7 +1165,7 @@ class CodingOrchestrator:
             abs_path = str(self._workspace.path(rel_path))
             if not Path(abs_path).exists():
                 continue
-            call_spec = ExecutionCallSpec(symbol="pytest", args=[abs_path])
+            call_spec = ExecutionCallSpec(symbol=self._test_symbol, args=[abs_path])
             result = self._test_environment.execute(code="", call_spec=call_spec)
             if not result.success:
                 regressions.append(rel_path)
@@ -1513,6 +1578,14 @@ def _build_failure_message_multi(eval_result, test_files: dict) -> str:
     return "\n".join(parts) or "Tests failed with no additional output."
 
 
+def _strip_source_ext(path: str) -> str:
+    """Strip common source file extensions for fuzzy module matching."""
+    for ext in (".test.tsx", ".test.ts", ".spec.tsx", ".spec.ts", ".tsx", ".ts", ".py"):
+        if path.endswith(ext):
+            return path[:-len(ext)]
+    return path
+
+
 def _extract_relevant_files(
     failure_output: str,
     current_files: dict,
@@ -1532,7 +1605,7 @@ def _extract_relevant_files(
         if path in failure_output:
             mentioned.add(path)
         # Also check module-style references (e.g., "pet_groomer.models" for "pet_groomer/models.py")
-        module_path = path.replace("/", ".").replace(".py", "")
+        module_path = _strip_source_ext(path.replace("/", "."))
         if module_path in failure_output:
             mentioned.add(path)
 
@@ -1549,7 +1622,7 @@ def _extract_relevant_files(
             test_content = current_test_files[test_fp]
             # Find imports from the test file that reference our code files
             for code_fp in current_files:
-                module_name = code_fp.replace("/", ".").replace(".py", "")
+                module_name = _strip_source_ext(code_fp.replace("/", "."))
                 # Check if the test file imports from this module
                 base_name = module_name.split(".")[-1]
                 if base_name in test_content:
@@ -1558,7 +1631,7 @@ def _extract_relevant_files(
     # For each mentioned code file, include the test files that test it
     for code_fp in list(mentioned):
         if code_fp in current_files:
-            base_name = code_fp.replace("/", ".").replace(".py", "").split(".")[-1]
+            base_name = _strip_source_ext(code_fp.replace("/", ".")).split(".")[-1]
             for test_fp, test_content in current_test_files.items():
                 if base_name in test_content:
                     mentioned.add(test_fp)

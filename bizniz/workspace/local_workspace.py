@@ -1,7 +1,7 @@
 # bizniz/workspace/local_workspace.py
 
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 from bizniz.workspace.base_workspace import BaseWorkspace
 
@@ -20,6 +20,9 @@ class LocalWorkspace(BaseWorkspace):
         root: Union[str, Path],
         *,
         create: bool = True,
+        bizniz_db=None,
+        project_id: Optional[str] = None,
+        service_name: Optional[str] = None,
     ):
         root_path = Path(root).expanduser().resolve()
 
@@ -32,7 +35,12 @@ class LocalWorkspace(BaseWorkspace):
             else:
                 raise FileNotFoundError(f"Workspace directory does not exist: {root_path}")
 
-        super().__init__(root_path)
+        super().__init__(
+            root_path,
+            bizniz_db=bizniz_db,
+            project_id=project_id,
+            service_name=service_name,
+        )
 
     @classmethod
     def from_name(cls, name: str, parent: str | Path = "~", **kwargs) -> "LocalWorkspace":

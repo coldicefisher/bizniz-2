@@ -21,7 +21,12 @@ from bizniz.autotester.prompts.system_prompt import AUTOTESTER_SYSTEM_PROMPT
 from bizniz.autotester.prompts.from_code_prompt import FROM_CODE_PROMPT_TEMPLATE
 from bizniz.autotester.prompts.from_prompt_prompt import FROM_PROMPT_PROMPT_TEMPLATE
 from bizniz.autotester.prompts.review_prompt import REVIEW_PROMPT_TEMPLATE
-from bizniz.autotester.prompts.generate_multi_prompt import GENERATE_MULTI_SYSTEM_PROMPT, GENERATE_MULTI_USER_PROMPT_TEMPLATE
+from bizniz.autotester.prompts.generate_multi_prompt import (
+    GENERATE_MULTI_SYSTEM_PROMPT,
+    GENERATE_MULTI_USER_PROMPT_TEMPLATE,
+    get_generate_multi_system_prompt,
+    get_generate_multi_user_prompt,
+)
 from bizniz.autotester.prompts.schema import AutotesterSchema
 
 
@@ -289,7 +294,11 @@ class Autotester(BaseAIAgent):
         # Build test files description
         test_desc = "\n".join(f"- {tf}" for tf in test_files)
 
-        user_prompt = GENERATE_MULTI_USER_PROMPT_TEMPLATE.format(
+        # Detect language from test file extensions
+        has_ts = any(tf.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx")) for tf in test_files)
+        lang = "typescript" if has_ts else "python"
+
+        user_prompt = get_generate_multi_user_prompt(lang).format(
             problem_statement=problem_statement,
             architecture_context=architecture_context or "(none)",
             source_code=source_str,

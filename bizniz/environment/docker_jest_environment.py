@@ -1,22 +1,21 @@
 """
-DockerPytestEnvironment
+DockerJestEnvironment
 
-Runs pytest inside a Docker container with the workspace mounted, so that
-third-party dependencies (e.g. ``fastapi``, ``pydantic``) are available at
-import time.
+Runs Jest inside a Docker container with the workspace mounted, so that
+Node.js/TypeScript dependencies are available at import time.
 
 Usage in the orchestrator::
 
-    env = DockerPytestEnvironment(
+    env = DockerJestEnvironment(
         workspace_root=workspace.root,
-        image="bizniz-service-abc:latest",
+        image="bizniz-service-frontend:latest",
     )
-    call_spec = ExecutionCallSpec(symbol="pytest", args=["/abs/path/to/test_file.py"])
+    call_spec = ExecutionCallSpec(symbol="jest", args=["tests/App.test.tsx"])
     result = env.execute(code="", call_spec=call_spec)
 
 The ``code`` argument is intentionally unused — the test file is already on disk.
 The workspace root is bind-mounted at ``/workspace`` inside the container and
-``PYTHONPATH=/workspace`` is set so plain ``import module_name`` works.
+tests run with ``npx jest``.
 """
 
 import os
@@ -34,29 +33,29 @@ from bizniz.environment.types import (
 )
 
 
-class DockerPytestEnvironment(BaseExecutionEnvironment):
+class DockerJestEnvironment(BaseExecutionEnvironment):
     """
-    Runs pytest inside a Docker container with the workspace mounted.
+    Runs Jest inside a Docker container with the workspace mounted.
 
     Each service workspace has its own Docker image with the correct
     dependencies installed. Tests run inside that container so imports
-    like ``fastapi``, ``pydantic``, etc. work correctly.
+    of npm packages work correctly.
     """
 
-    name: str = "docker-pytest-environment"
+    name: str = "docker-jest-environment"
 
     def __init__(
         self,
         workspace_root: Union[Path, str],
         image: str,
         timeout: int = 120,
-        extra_pytest_args: Optional[List[str]] = None,
+        extra_jest_args: Optional[List[str]] = None,
         network_enabled: bool = False,
     ):
         super().__init__(timeout=timeout)
         self._workspace_root = Path(workspace_root).resolve()
         self._image = image
-        self._extra_pytest_args = extra_pytest_args or []
+        self._extra_jest_args = extra_jest_args or []
         self._network_enabled = network_enabled
         self._installed_packages: List[str] = []
 
@@ -72,12 +71,11 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
         call_spec: ExecutionCallSpec,
     ) -> ExecutionEnvironmentResult:
         """
-        Run pytest inside the Docker container.
+        Run Jest inside the Docker container.
 
         1. Mount workspace_root at /workspace inside the container
-        2. Set PYTHONPATH=/workspace
-        3. Run: python3 -m pytest <test_paths> -v --tb=long
-        4. Parse exit code and output
+        2. Run: npx jest <test_paths> --verbose --no-cache
+        3. Parse exit code and output
 
         call_spec.args should contain test file paths (relative to workspace root).
         These get converted to /workspace/<relative_path> inside the container.
@@ -99,7 +97,6 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
         for arg in call_spec.args:
             if arg.startswith("-"):
                 break
-            # Convert to path relative to workspace, then to /workspace/<relative>
             p = Path(arg).resolve()
             try:
                 relative = p.relative_to(self._workspace_root)
@@ -111,7 +108,6 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
             "docker", "run", "--rm",
             "-v", f"{self._workspace_root}:/workspace",
             "-w", "/workspace",
-            "-e", "PYTHONPATH=/workspace",
         ]
 
         if not self._network_enabled:
@@ -119,10 +115,11 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
 
         cmd += [
             self._image,
-            "python3", "-m", "pytest",
+            "npx", "jest",
             *test_paths_container,
-            "-v", "--tb=long", "--no-header",
-            *self._extra_pytest_args,
+            "--verbose", "--no-cache",
+            "--passWithNoTests",
+            *self._extra_jest_args,
         ]
 
         try:
@@ -139,7 +136,7 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
                 error=ExecutionEnvironmentErrorDetails(
                     stage="timeout",
                     type="TimeoutError",
-                    message=f"pytest timed out after {self.timeout} seconds.",
+                    message=f"jest timed out after {self.timeout} seconds.",
                 ),
                 stdout=e.stdout,
                 stderr=e.stderr,
@@ -158,10 +155,13 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
 
         self._fix_permissions()
 
+        # Jest outputs test results to stderr, combine both
+        combined_output = (proc.stdout or "") + (proc.stderr or "")
+
         if proc.returncode == 0:
             return ExecutionEnvironmentResult(
                 success=True,
-                result=proc.stdout,
+                result=combined_output,
                 stdout=proc.stdout,
                 stderr=proc.stderr,
             )
@@ -171,8 +171,8 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
             error=ExecutionEnvironmentErrorDetails(
                 stage="test_execution",
                 type="TestFailure",
-                message=f"pytest exited with code {proc.returncode}",
-                traceback=proc.stdout,
+                message=f"jest exited with code {proc.returncode}",
+                traceback=combined_output,
             ),
             stdout=proc.stdout,
             stderr=proc.stderr,
@@ -182,25 +182,25 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
 
     def install_packages(self, packages: List[str]) -> None:
         """
-        Install packages into the Docker image and update requirements.txt.
+        Install npm packages into the Docker image and update package.json.
 
         Strategy:
-        1. Run ``pip install <packages>`` inside a container based on current image
+        1. Run ``npm install <packages>`` inside a container based on current image
         2. Commit that container as a new image layer
         3. Update self._image to point to the new image
-        4. Append packages to requirements.txt in the workspace
         """
         new_packages = [p for p in packages if p not in self._installed_packages]
         if not new_packages:
             return
 
-        # Run pip install in a temporary container
-        container_name = f"bizniz-pip-{hash(tuple(new_packages)) & 0xFFFFFFFF:08x}"
+        container_name = f"bizniz-npm-{hash(tuple(new_packages)) & 0xFFFFFFFF:08x}"
         install_cmd = [
             "docker", "run",
             "--name", container_name,
+            "-v", f"{self._workspace_root}:/workspace",
+            "-w", "/workspace",
             self._image,
-            "pip", "install", "--no-cache-dir", *new_packages,
+            "npm", "install", "--save-dev", *new_packages,
         ]
 
         try:
@@ -208,7 +208,6 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
                 install_cmd, capture_output=True, text=True, timeout=120,
             )
             if proc.returncode != 0:
-                # Clean up container on failure
                 subprocess.run(
                     ["docker", "rm", container_name], capture_output=True,
                 )
@@ -224,24 +223,9 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
             self._installed_packages.extend(new_packages)
 
         finally:
-            # Clean up the temporary container
             subprocess.run(
                 ["docker", "rm", container_name], capture_output=True,
             )
-
-        # Update requirements.txt in the workspace
-        req_path = self._workspace_root / "requirements.txt"
-        existing = req_path.read_text() if req_path.exists() else ""
-        existing_pkgs = {
-            line.strip().split("==")[0].split(">=")[0].lower()
-            for line in existing.splitlines()
-            if line.strip() and not line.startswith("#")
-        }
-
-        with open(req_path, "a") as f:
-            for pkg in new_packages:
-                if pkg.lower() not in existing_pkgs:
-                    f.write(f"{pkg}\n")
 
     def rebuild_image(self, dockerfile_path: str = "Dockerfile") -> bool:
         """Rebuild the Docker image from the service's Dockerfile."""
@@ -286,7 +270,7 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
 
     def describe(self) -> str:
         return (
-            f"DockerPytestEnvironment\n"
+            f"DockerJestEnvironment\n"
             f"Image: {self._image}\n"
             f"Workspace root: {self._workspace_root}\n"
             f"Timeout: {self.timeout}s\n"

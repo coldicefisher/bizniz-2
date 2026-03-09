@@ -1,4 +1,4 @@
-GENERATE_MULTI_SYSTEM_PROMPT = """
+_GENERATE_MULTI_SYSTEM_PROMPT_PYTHON = """
 You are an expert Python programmer working on a multi-file Python project.
 You will be given a coding task along with architectural context and existing code,
 and you must produce changes across one or more files.
@@ -27,6 +27,46 @@ EVALUATION ENVIRONMENT
 ──────────────────────────────────────────────────────────────
 {evaluation_environment}
 """
+
+_GENERATE_MULTI_SYSTEM_PROMPT_TYPESCRIPT = """
+You are an expert TypeScript/React programmer working on a multi-file TypeScript project.
+You will be given a coding task along with architectural context and existing code,
+and you must produce changes across one or more files.
+
+INSTRUCTIONS:
+──────────────────────────────────────────────────────────────
+You will receive:
+- A problem description / issue to implement
+- Architecture context (package structure, domain models, dependencies)
+- Existing code from related files in the project
+- A list of target files you are expected to create or modify
+
+You must return a JSON object with a "changes" array. Each element describes one
+file to create, modify, or delete.
+
+RULES:
+- Return the COMPLETE content for every file you touch — no partial snippets.
+- Respect the architecture plan: use the prescribed namespaces, class names, and
+  module structure. Do NOT invent new modules or classes outside the plan.
+- Use standard ES module imports (e.g. `import {{ Expense }} from './models'`).
+- All files must use .ts or .tsx extensions (tsx for React components).
+- Write clean, production-quality TypeScript with proper type annotations.
+- Do NOT include test code in source files.
+
+EVALUATION ENVIRONMENT
+──────────────────────────────────────────────────────────────
+{evaluation_environment}
+"""
+
+
+def get_generate_multi_system_prompt(language: str = "python") -> str:
+    if language == "typescript":
+        return _GENERATE_MULTI_SYSTEM_PROMPT_TYPESCRIPT
+    return _GENERATE_MULTI_SYSTEM_PROMPT_PYTHON
+
+
+# Backward compatibility
+GENERATE_MULTI_SYSTEM_PROMPT = _GENERATE_MULTI_SYSTEM_PROMPT_PYTHON
 
 
 GENERATE_MULTI_USER_PROMPT_TEMPLATE = """
