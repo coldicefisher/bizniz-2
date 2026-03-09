@@ -75,6 +75,7 @@ class WorkspaceDB:
                 target_files_json     TEXT    NOT NULL DEFAULT '[]',
                 test_files_json       TEXT    NOT NULL DEFAULT '[]',
                 depends_on_json       TEXT    NOT NULL DEFAULT '[]',
+                suggested_model       TEXT,
                 created_at            TEXT    NOT NULL,
                 closed_at             TEXT
             );
@@ -225,16 +226,18 @@ class WorkspaceDB:
         target_files: List[dict],
         test_files: List[str],
         depends_on: Optional[List[int]] = None,
+        suggested_model: Optional[str] = None,
     ) -> int:
         cur = self._conn.execute(
             """INSERT INTO issues
-               (problem_id, title, description, target_files_json, test_files_json, depends_on_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (problem_id, title, description, target_files_json, test_files_json, depends_on_json, suggested_model, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 problem_id, title, description,
                 json.dumps(target_files),
                 json.dumps(test_files),
                 json.dumps(depends_on or []),
+                suggested_model,
                 _now(),
             ),
         )

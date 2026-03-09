@@ -23,6 +23,7 @@ from bizniz.clients.chatgpt.types.response_format import ResponseFormat
 from .errors import (
     OpenAIClientError,
     OpenAIRateLimit,
+    OpenAIInsufficientFunds,
     OpenAIAuthError,
     OpenAIInvalidRequest
 )
@@ -378,6 +379,13 @@ class BaseChatGPTClient(BaseAIClient):
             raise OpenAIAuthError(str(e))
 
         except RateLimitError as e:
+            error_msg = str(e).lower()
+            if any(phrase in error_msg for phrase in [
+                "insufficient_quota", "exceeded your current quota",
+                "billing_hard_limit_reached", "billing hard limit",
+                "you have insufficient funds", "account is not active",
+            ]):
+                raise OpenAIInsufficientFunds(str(e))
             raise OpenAIRateLimit(str(e))
 
         except BadRequestError as e:

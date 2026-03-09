@@ -26,6 +26,7 @@ VALID_ANALYSIS_RESPONSE = {
             "target_files": [{"filepath": "task_manager/storage.py", "action": "create"}],
             "test_files": ["tests/test_storage.py"],
             "depends_on": [],
+            "suggested_model": "gpt-4o-mini",
         }
     ],
 }
@@ -98,6 +99,6 @@ def engineer(mock_client, mock_environment, mock_workspace, mock_orchestrator):
         client=mock_client,
         environment=mock_environment,
         workspace=mock_workspace,
-        orchestrator_factory=lambda: mock_orchestrator,
+        orchestrator_factory=lambda **kwargs: mock_orchestrator,
         max_retries=3,
     )

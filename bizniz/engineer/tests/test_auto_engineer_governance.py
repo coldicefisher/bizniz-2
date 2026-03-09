@@ -48,7 +48,7 @@ def _setup_engineer_with_plan(tmp_path, mock_env, orchestrator_result, governanc
         client=client,
         environment=mock_env,
         workspace=ws,
-        orchestrator_factory=lambda: orc,
+        orchestrator_factory=lambda **kwargs: orc,
         max_retries=3,
     )
 

@@ -36,6 +36,7 @@ from typing import Optional, Callable, List
 
 from bizniz.autocoder.autocoder import Autocoder
 from bizniz.autodebugger.autodebugger import Autodebugger
+from bizniz.agentic_debugger.agentic_debugger import AgenticDebugger
 from bizniz.autotester.autotester import Autotester
 from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.deep_debugger.deep_debugger import DeepDebugger
@@ -45,6 +46,7 @@ from bizniz.orchestrator.model_progression import ModelProgression
 from bizniz.orchestrator.stall_detector import StallDetector
 from bizniz.workspace.base_workspace import BaseWorkspace
 
+from bizniz.clients.chatgpt.errors import OpenAIInsufficientFunds
 from bizniz.autocoder.types import FileChange
 from bizniz.autotester.types import GeneratedTestFile
 from bizniz.orchestrator.types import (
@@ -88,7 +90,9 @@ class CodingOrchestrator:
         workspace: BaseWorkspace,
         autodebugger: Optional[Autodebugger] = None,
         client: Optional[BaseAIClient] = None,
+        client_factory: Optional[Callable[[str], BaseAIClient]] = None,
         deep_debugger_factory: Optional[Callable[[], DeepDebugger]] = None,
+        debugger_factory: Optional[Callable[[], AgenticDebugger]] = None,
         model_progression: Optional[ModelProgression] = None,
         max_iterations: int = 20,
         on_status_message: Optional[Callable[[str], None]] = None,
@@ -99,11 +103,14 @@ class CodingOrchestrator:
         self._test_environment = test_environment
         self._workspace = workspace
         self._client = client
+        self._client_factory = client_factory
         self._deep_debugger_factory = deep_debugger_factory
+        self._debugger_factory = debugger_factory
         self._model_progression = model_progression
         self._max_iterations = max_iterations
         self._on_status_message = on_status_message
         self._stall_detector = StallDetector()
+        self._deep_diagnosis_count = 0
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -248,6 +255,8 @@ class CodingOrchestrator:
                         log=log,
                     )
                 )
+            except OpenAIInsufficientFunds:
+                raise
             except Exception as e:
                 log(f"Orchestrator: repair failed ({type(e).__name__}: {e}), retrying...")
 
@@ -263,6 +272,7 @@ class CodingOrchestrator:
         target_files: List[dict],
         test_files: List[str],
         architecture_context: str = "",
+        initial_model: Optional[str] = None,
     ) -> OrchestratorResult:
         """
         Run the full iterative coding + testing loop for a multi-file issue.
@@ -283,10 +293,30 @@ class CodingOrchestrator:
             if self._on_status_message:
                 self._on_status_message(msg)
 
+        # Set starting model if suggested by the engineer
+        if initial_model and self._model_progression and self._client:
+            self._model_progression.set_start(initial_model)
+            current = self._model_progression.current_model
+            if self._client_factory:
+                fresh_client = self._client_factory(current)
+                self._client = fresh_client
+                self._autocoder._client = fresh_client
+                self._autotester._client = fresh_client
+                if self._autodebugger:
+                    self._autodebugger._client = fresh_client
+            else:
+                self._client.set_model(current)
+            log(f"Orchestrator: starting with suggested model {current}")
+
         self._sync_environment_packages(log)
 
         stale_count = 0
         previous_code_hash: Optional[str] = None
+        collection_error_count = 0
+        total_collection_errors = 0
+        regression_count = 0
+        max_regression_retries = 3
+        self._deep_diagnosis_count = 0
 
         # ── Load existing code for files being modified ──────────────────────
         existing_code = {}
@@ -335,26 +365,62 @@ class CodingOrchestrator:
                 drift = self._detect_drift(target_files, code_result.changes)
 
                 if regressions:
+                    regression_count += 1
                     log(f"Orchestrator: {len(regressions)} regression(s) detected: {regressions}")
+
+                    # After max regression retries, accept the result — issue's own tests pass
+                    if regression_count > max_regression_retries:
+                        log(f"Orchestrator: accepting result after {max_regression_retries} regression repair attempts "
+                            f"(issue tests pass, {len(regressions)} regression(s) remain)")
+                        return OrchestratorResult(
+                            success=True,
+                            changes=[
+                                FileChange(filepath=fp, code=code, action="create")
+                                for fp, code in current_files.items()
+                            ],
+                            test_files=[
+                                GeneratedTestFile(filepath=fp, tests=tests)
+                                for fp, tests in current_test_files.items()
+                            ],
+                            iterations=iteration,
+                            architecture_drift_detected=bool(drift),
+                            drift_files=drift,
+                        )
+
+                    # Include regressing test content so LLM knows what must still pass
+                    regression_details = []
+                    for reg_path in regressions:
+                        try:
+                            content = self._workspace.read_file(path=reg_path)
+                            regression_details.append(f"── {reg_path} ──\n{content}")
+                        except Exception:
+                            regression_details.append(f"── {reg_path} ── (could not read)")
+
                     failure_output = (
                         f"Tests passed but REGRESSIONS detected in: {', '.join(regressions)}\n"
                         f"These tests were passing before your changes and now fail.\n"
-                        f"Fix the code to make all tests pass without breaking existing functionality."
+                        f"Fix the code to make all tests pass without breaking existing functionality.\n\n"
+                        f"REGRESSING TEST FILES:\n" + "\n\n".join(regression_details)
                     )
-                    current_files, current_test_files, stale_count, previous_code_hash = (
-                        self._handle_multi_failure(
-                            prompt=prompt,
-                            failure_output=failure_output,
-                            current_files=current_files,
-                            current_test_files=current_test_files,
-                            target_files=target_files,
-                            test_files=list(current_test_files.keys()),
-                            architecture_context=architecture_context,
-                            stale_count=stale_count,
-                            previous_code_hash=previous_code_hash,
-                            log=log,
+                    try:
+                        current_files, current_test_files, stale_count, previous_code_hash = (
+                            self._handle_multi_failure(
+                                prompt=prompt,
+                                failure_output=failure_output,
+                                current_files=current_files,
+                                current_test_files=current_test_files,
+                                target_files=target_files,
+                                test_files=list(current_test_files.keys()),
+                                architecture_context=architecture_context,
+                                stale_count=stale_count,
+                                previous_code_hash=previous_code_hash,
+                                log=log,
+                            )
                         )
-                    )
+                    except OpenAIInsufficientFunds:
+                        raise
+                    except Exception as e:
+                        log(f"Orchestrator: regression repair failed ({type(e).__name__}: {e}), retrying...")
                     continue
 
                 log(f"Orchestrator: all tests passed after {iteration} iteration(s).")
@@ -399,13 +465,117 @@ class CodingOrchestrator:
                 and "exited with code 2" in eval_result.error.message
             )
             if is_collection_error:
-                log("Orchestrator: test collection error — regenerating tests...")
+                collection_error_count += 1
+                total_collection_errors += 1
+
                 error_detail = ""
                 if eval_result.error and eval_result.error.traceback:
                     error_detail = eval_result.error.traceback
                 elif eval_result.stdout:
                     error_detail = eval_result.stdout
 
+                # After 3 consecutive collection errors, escalate model and clear history
+                if collection_error_count >= 3:
+                    escalated = self._try_escalate_model(log)
+                    if escalated:
+                        log("Orchestrator: repeated collection errors — escalating model...")
+                    collection_error_count = 0
+
+                    # If escalation failed (models exhausted) AND we've had many total
+                    # collection errors, use debugger to diagnose the structural issue
+                    # and regenerate code from scratch
+                    has_debugger = self._debugger_factory is not None or self._deep_debugger_factory is not None
+                    if not escalated and total_collection_errors >= 6 and has_debugger:
+                        try:
+                            log("Orchestrator: persistent collection errors — running diagnosis...")
+                            self._autocoder.clear_message_history()
+                            self._autotester.clear_message_history()
+
+                            diag_text = ""
+                            diag_fix_plan = []
+                            diag_approach = ""
+                            diag_code_fixes = []
+
+                            if self._debugger_factory is not None:
+                                debugger = self._debugger_factory()
+                                ad = debugger.diagnose(
+                                    error_output=error_detail,
+                                    source_files=current_files,
+                                    test_files=current_test_files,
+                                    architecture_context=architecture_context,
+                                )
+                                log(f"Orchestrator: agentic diagnosis — {ad.root_cause_category}, "
+                                    f"fix_target={ad.fix_target}")
+                                diag_text = ad.diagnosis
+                                diag_fix_plan = ad.fix_plan
+                                diag_approach = ad.suggested_approach
+                                diag_code_fixes = ad.code_fixes
+                            elif self._deep_debugger_factory is not None:
+                                deep_debugger = self._deep_debugger_factory()
+                                dd = deep_debugger.diagnose(
+                                    error_output=error_detail,
+                                    source_files=current_files,
+                                    test_files=current_test_files,
+                                    architecture_context=architecture_context,
+                                    repair_history=[],
+                                )
+                                log(f"Orchestrator: deep diagnosis — {dd.root_cause_category}, "
+                                    f"fix_target={dd.fix_target}")
+                                diag_text = dd.root_cause
+                                diag_fix_plan = dd.fix_plan
+                                diag_approach = dd.suggested_approach
+
+                            # If agentic debugger produced direct fixes, apply them
+                            if diag_code_fixes:
+                                log(f"Orchestrator: applying {len(diag_code_fixes)} direct fix(es) for collection errors...")
+                                for fix in diag_code_fixes:
+                                    if fix.filepath in current_test_files:
+                                        current_test_files[fix.filepath] = fix.new_content
+                                    else:
+                                        current_files[fix.filepath] = fix.new_content
+                                        self._workspace.write_file(path=fix.filepath, content=fix.new_content)
+                                total_collection_errors = 0
+                                stale_count = 0
+                                previous_code_hash = None
+                                continue
+
+                            # Regenerate code with diagnosis context, then fresh tests
+                            log("Orchestrator: regenerating code and tests from scratch with diagnosis...")
+                            enriched_code_prompt = (
+                                f"{prompt}\n\n"
+                                f"DIAGNOSIS OF PERSISTENT FAILURE:\n{diag_text}\n\n"
+                                f"FIX PLAN:\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(diag_fix_plan)) + "\n\n"
+                                f"APPROACH: {diag_approach}\n\n"
+                                f"The previous code produced tests that could not even be collected by pytest.\n"
+                                f"Collection error:\n{error_detail}\n"
+                            )
+                            code_result = self._autocoder.generate_multi(
+                                issue_description=enriched_code_prompt,
+                                target_files=target_files,
+                                architecture_context=architecture_context,
+                                existing_code=existing_code,
+                            )
+                            current_files = {ch.filepath: ch.code for ch in code_result.changes}
+                            test_result = self._autotester.generate_multi(
+                                problem_statement=prompt,
+                                test_files=list(current_test_files.keys()),
+                                source_code=current_files,
+                                architecture_context=architecture_context,
+                            )
+                            current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+                            total_collection_errors = 0  # reset after full regeneration
+                            stale_count = 0
+                            previous_code_hash = None
+                            continue
+                        except OpenAIInsufficientFunds:
+                            raise
+                        except Exception as e:
+                            log(f"Orchestrator: diagnosis regeneration failed ({type(e).__name__}: {e}), continuing...")
+
+                # Clear autotester history to prevent token bloat
+                self._autotester.clear_message_history()
+
+                log("Orchestrator: test collection error — regenerating tests...")
                 enriched_prompt = (
                     f"{prompt}\n\n"
                     f"CURRENT CODE:\n"
@@ -413,13 +583,18 @@ class CodingOrchestrator:
                     + f"\n\nThe previous tests had collection errors:\n{error_detail}\n"
                     f"Fix the imports and test structure."
                 )
-                test_result = self._autotester.generate_multi(
-                    problem_statement=enriched_prompt,
-                    test_files=list(current_test_files.keys()),
-                    source_code=current_files,
-                    architecture_context=architecture_context,
-                )
-                current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+                try:
+                    test_result = self._autotester.generate_multi(
+                        problem_statement=enriched_prompt,
+                        test_files=list(current_test_files.keys()),
+                        source_code=current_files,
+                        architecture_context=architecture_context,
+                    )
+                    current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+                except OpenAIInsufficientFunds:
+                    raise
+                except Exception as e:
+                    log(f"Orchestrator: test regeneration failed ({type(e).__name__}: {e}), retrying...")
                 stale_count = 0
                 previous_code_hash = None
                 continue
@@ -440,6 +615,8 @@ class CodingOrchestrator:
                         log=log,
                     )
                 )
+            except OpenAIInsufficientFunds:
+                raise
             except Exception as e:
                 log(f"Orchestrator: repair failed ({type(e).__name__}: {e}), retrying...")
 
@@ -477,10 +654,30 @@ class CodingOrchestrator:
 
         if self._stall_detector.is_stalled:
             log(f"Orchestrator: stall detected — {self._stall_detector.stall_reason}")
+            self._deep_diagnosis_count += 1
 
-            # Deep diagnosis before escalation
+            # Agentic or deep diagnosis before escalation
             deep_diagnosis = None
-            if self._deep_debugger_factory is not None:
+            agentic_diagnosis = None
+            if self._debugger_factory is not None:
+                try:
+                    log("Orchestrator: running agentic debugger...")
+                    debugger = self._debugger_factory()
+                    agentic_diagnosis = debugger.diagnose(
+                        error_output=failure_output,
+                        source_files=current_files,
+                        test_files=current_test_files,
+                        architecture_context=architecture_context,
+                        repair_history=self._stall_detector.repair_history,
+                    )
+                    log(f"Orchestrator: agentic diagnosis — {agentic_diagnosis.root_cause_category}, "
+                        f"fix_target={agentic_diagnosis.fix_target} "
+                        f"(confidence: {agentic_diagnosis.confidence})")
+                except OpenAIInsufficientFunds:
+                    raise
+                except Exception as e:
+                    log(f"Orchestrator: agentic debugger failed ({type(e).__name__}: {e}), proceeding...")
+            elif self._deep_debugger_factory is not None:
                 try:
                     log("Orchestrator: running deep diagnosis with fresh LLM instance...")
                     deep_debugger = self._deep_debugger_factory()
@@ -493,13 +690,38 @@ class CodingOrchestrator:
                     )
                     log(f"Orchestrator: deep diagnosis — {deep_diagnosis.root_cause_category}, "
                         f"fix_target={deep_diagnosis.fix_target}")
+                except OpenAIInsufficientFunds:
+                    raise
                 except Exception as e:
                     log(f"Orchestrator: deep diagnosis failed ({e}), proceeding with escalation...")
 
+            # Normalize diagnosis into a unified view
+            diagnosis = agentic_diagnosis or deep_diagnosis
+            diagnosis_text = ""
+            missing_packages = []
+            fix_target = None
+            fix_plan = []
+            suggested_approach = ""
+            code_fixes = []
+
+            if agentic_diagnosis:
+                diagnosis_text = agentic_diagnosis.diagnosis
+                missing_packages = agentic_diagnosis.missing_packages
+                fix_target = agentic_diagnosis.fix_target
+                fix_plan = agentic_diagnosis.fix_plan
+                suggested_approach = agentic_diagnosis.suggested_approach
+                code_fixes = agentic_diagnosis.code_fixes
+            elif deep_diagnosis:
+                diagnosis_text = deep_diagnosis.root_cause
+                missing_packages = deep_diagnosis.missing_packages
+                fix_target = deep_diagnosis.fix_target
+                fix_plan = deep_diagnosis.fix_plan
+                suggested_approach = deep_diagnosis.suggested_approach
+
             # Install missing packages if identified
-            if deep_diagnosis and deep_diagnosis.missing_packages:
-                for pkg in deep_diagnosis.missing_packages:
-                    log(f"Orchestrator: deep diagnosis identified missing package '{pkg}', installing...")
+            if missing_packages:
+                for pkg in missing_packages:
+                    log(f"Orchestrator: diagnosis identified missing package '{pkg}', installing...")
                     self._install_package(pkg, log)
 
             # Escalate model
@@ -507,20 +729,70 @@ class CodingOrchestrator:
             self._stall_detector.reset_counters()
 
             # If the issue was purely a dependency problem, re-run without repair
-            if (deep_diagnosis
-                    and deep_diagnosis.root_cause_category == "dependency_issue"
-                    and deep_diagnosis.missing_packages):
+            if (diagnosis
+                    and diagnosis.root_cause_category == "dependency_issue"
+                    and missing_packages):
                 log("Orchestrator: dependency issue resolved — retrying tests...")
                 return current_files, current_test_files, 0, None
 
-            # Act on deep diagnosis fix_target
-            if deep_diagnosis and deep_diagnosis.fix_target in ("tests", "both"):
-                log("Orchestrator: deep diagnosis recommends fixing tests — regenerating...")
+            # Clear message histories to prevent token bloat after escalation
+            self._autocoder.clear_message_history()
+            self._autotester.clear_message_history()
+
+            # After multiple stall cycles without progress, do a full regeneration
+            if self._deep_diagnosis_count >= 3:
+                log(f"Orchestrator: {self._deep_diagnosis_count} stall cycles — regenerating code and tests from scratch...")
+                self._deep_diagnosis_count = 0
+                diagnosis_context = ""
+                if diagnosis_text:
+                    diagnosis_context = (
+                        f"\n\nDIAGNOSIS OF PERSISTENT FAILURE:\n{diagnosis_text}\n\n"
+                        f"FIX PLAN:\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(fix_plan)) + "\n\n"
+                        f"APPROACH: {suggested_approach}\n"
+                    )
+                enriched_code_prompt = (
+                    f"{prompt}{diagnosis_context}\n\n"
+                    f"Previous failures after multiple diagnosis rounds:\n{failure_output}\n"
+                    f"Generate a COMPLETELY FRESH implementation — do NOT repeat the same approach."
+                )
+                code_result = self._autocoder.generate_multi(
+                    issue_description=enriched_code_prompt,
+                    target_files=target_files,
+                    architecture_context=architecture_context,
+                    existing_code={},
+                )
+                new_files = {ch.filepath: ch.code for ch in code_result.changes}
+                test_result = self._autotester.generate_multi(
+                    problem_statement=prompt,
+                    test_files=test_files,
+                    source_code=new_files,
+                    architecture_context=architecture_context,
+                )
+                new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+                return new_files, new_test_files, 0, None
+
+            # If agentic debugger produced direct code fixes, apply them
+            if code_fixes:
+                log(f"Orchestrator: applying {len(code_fixes)} direct code fix(es) from agentic debugger...")
+                new_files = dict(current_files)
+                new_test_files = dict(current_test_files)
+                for fix in code_fixes:
+                    if fix.filepath in new_test_files:
+                        new_test_files[fix.filepath] = fix.new_content
+                    else:
+                        new_files[fix.filepath] = fix.new_content
+                        self._workspace.write_file(path=fix.filepath, content=fix.new_content)
+                new_hash = _hash("".join(sorted(f"{k}:{v}" for k, v in new_files.items())))
+                return new_files, new_test_files, 0, new_hash
+
+            # Act on diagnosis fix_target
+            if diagnosis and fix_target in ("tests", "both"):
+                log("Orchestrator: diagnosis recommends fixing tests — regenerating...")
                 enriched_prompt = (
                     f"{prompt}\n\n"
-                    f"DEEP DIAGNOSIS:\n{deep_diagnosis.root_cause}\n\n"
-                    f"FIX PLAN:\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(deep_diagnosis.fix_plan)) + "\n\n"
-                    f"APPROACH: {deep_diagnosis.suggested_approach}\n\n"
+                    f"DIAGNOSIS:\n{diagnosis_text}\n\n"
+                    f"FIX PLAN:\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(fix_plan)) + "\n\n"
+                    f"APPROACH: {suggested_approach}\n\n"
                     f"Previous failures:\n{failure_output}"
                 )
                 test_result = self._autotester.generate_multi(
@@ -531,9 +803,12 @@ class CodingOrchestrator:
                 )
                 new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
 
-                if deep_diagnosis.fix_target == "both":
+                if fix_target == "both":
                     # Also repair code with diagnosis context
-                    enriched_error = self._build_deep_diagnosis_context(deep_diagnosis, failure_output)
+                    enriched_error = self._build_diagnosis_context(
+                        diagnosis_text, diagnosis, fix_plan, suggested_approach,
+                        deep_diagnosis, failure_output,
+                    )
                     all_files = {**current_files}
                     for fp, tests in new_test_files.items():
                         all_files[fp] = tests
@@ -553,10 +828,12 @@ class CodingOrchestrator:
 
                 return current_files, new_test_files, 0, None
 
-            if deep_diagnosis and deep_diagnosis.fix_target == "code":
-                # Repair code with deep diagnosis context
-                log("Orchestrator: deep diagnosis recommends fixing code — repairing with diagnosis...")
-                enriched_error = self._build_deep_diagnosis_context(deep_diagnosis, failure_output)
+            if diagnosis and fix_target == "code":
+                log("Orchestrator: diagnosis recommends fixing code — repairing with diagnosis...")
+                enriched_error = self._build_diagnosis_context(
+                    diagnosis_text, diagnosis, fix_plan, suggested_approach,
+                    deep_diagnosis, failure_output,
+                )
                 all_files = {**current_files}
                 for fp, tests in current_test_files.items():
                     all_files[fp] = tests
@@ -571,7 +848,7 @@ class CodingOrchestrator:
                 new_hash = _hash("".join(sorted(f"{k}:{v}" for k, v in new_files.items())))
                 return new_files, new_test_files, 0, new_hash
 
-            # No deep diagnosis available — just regenerate tests
+            # No diagnosis available — just regenerate tests
             log("Orchestrator: regenerating tests after stall...")
             test_result = self._autotester.generate_multi(
                 problem_statement=prompt + f"\n\nPrevious failures:\n{failure_output}",
@@ -613,16 +890,25 @@ class CodingOrchestrator:
         return new_files, new_test_files
 
     @staticmethod
-    def _build_deep_diagnosis_context(deep_diagnosis, failure_output: str) -> str:
-        """Build an enriched error message that includes deep diagnosis context."""
+    def _build_diagnosis_context(
+        diagnosis_text, diagnosis, fix_plan, suggested_approach,
+        deep_diagnosis, failure_output: str,
+    ) -> str:
+        """Build an enriched error message from either agentic or deep diagnosis."""
+        affected = getattr(diagnosis, "affected_files", []) if diagnosis else []
+        category = getattr(diagnosis, "root_cause_category", "unknown") if diagnosis else "unknown"
+        repair_analysis = ""
+        if deep_diagnosis and hasattr(deep_diagnosis, "repair_history_analysis"):
+            repair_analysis = f"Previous repair analysis: {deep_diagnosis.repair_history_analysis}\n"
+
         return (
-            f"DEEP DIAGNOSIS (from comprehensive full-project analysis):\n"
-            f"Root cause: {deep_diagnosis.root_cause}\n"
-            f"Category: {deep_diagnosis.root_cause_category}\n"
-            f"Affected files: {', '.join(deep_diagnosis.affected_files)}\n"
-            f"Fix plan:\n" + "\n".join(f"  {i+1}. {step}" for i, step in enumerate(deep_diagnosis.fix_plan)) + "\n"
-            f"Approach: {deep_diagnosis.suggested_approach}\n"
-            f"Previous repair analysis: {deep_diagnosis.repair_history_analysis}\n\n"
+            f"DIAGNOSIS (from comprehensive analysis):\n"
+            f"Root cause: {diagnosis_text}\n"
+            f"Category: {category}\n"
+            f"Affected files: {', '.join(affected)}\n"
+            f"Fix plan:\n" + "\n".join(f"  {i+1}. {step}" for i, step in enumerate(fix_plan)) + "\n"
+            f"Approach: {suggested_approach}\n"
+            f"{repair_analysis}\n"
             f"ORIGINAL ERROR:\n{failure_output}"
         )
 
@@ -703,6 +989,8 @@ class CodingOrchestrator:
     def _try_escalate_model(self, log: Callable) -> bool:
         """
         Attempt to escalate to the next model in the progression.
+        When a client_factory is available, creates a fresh client (clean message
+        history) instead of just switching the model on the existing client.
         Returns True if escalation happened, False if already at max or not configured.
         """
         if not self._model_progression or not self._client:
@@ -712,8 +1000,17 @@ class CodingOrchestrator:
 
         new_model = self._model_progression.escalate()
         if new_model:
-            self._client.set_model(new_model)
-            log(f"Orchestrator: escalated to model {new_model}")
+            if self._client_factory:
+                fresh_client = self._client_factory(new_model)
+                self._client = fresh_client
+                self._autocoder._client = fresh_client
+                self._autotester._client = fresh_client
+                if self._autodebugger:
+                    self._autodebugger._client = fresh_client
+                log(f"Orchestrator: escalated to model {new_model} (fresh client)")
+            else:
+                self._client.set_model(new_model)
+                log(f"Orchestrator: escalated to model {new_model}")
             return True
         return False
 
@@ -787,6 +1084,8 @@ class CodingOrchestrator:
                 test_code=current_tests,
                 test_filename=test_filename,
             )
+        except OpenAIInsufficientFunds:
+            raise
         except Exception as e:
             log(f"Orchestrator: autodebugger failed ({e}), falling back to code repair...")
             new_code, new_stale, new_hash = self._repair_code(

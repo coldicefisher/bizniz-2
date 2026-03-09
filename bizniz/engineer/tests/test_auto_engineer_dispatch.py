@@ -58,7 +58,7 @@ def test_dispatch_closes_issue_on_success(mock_client, mock_environment, tmp_pat
         client=mock_client,
         environment=mock_environment,
         workspace=ws,
-        orchestrator_factory=lambda: orc,
+        orchestrator_factory=lambda **kwargs: orc,
         max_retries=3,
     )
 
@@ -90,7 +90,7 @@ def test_dispatch_resets_status_on_failure(mock_environment, tmp_path):
         client=client,
         environment=mock_environment,
         workspace=ws,
-        orchestrator_factory=lambda: failing_orc,
+        orchestrator_factory=lambda **kwargs: failing_orc,
         max_retries=3,
     )
 

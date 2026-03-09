@@ -46,5 +46,13 @@ class ModelProgression:
         """Reset to the first (cheapest) model."""
         self._index = 0
 
+    def set_start(self, model_name: str):
+        """Set the starting position to a specific model in the progression.
+        If model_name is not in the list, does nothing."""
+        try:
+            self._index = self._models.index(model_name)
+        except ValueError:
+            pass
+
     def __repr__(self) -> str:
         return f"ModelProgression({self._models}, current={self.current_model})"

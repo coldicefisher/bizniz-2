@@ -17,7 +17,8 @@ from bizniz.clients.chatgpt.types.response_format import ResponseFormat
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-from bizniz.orchestrator.types import OrchestratorResult
+from bizniz.clients.chatgpt.errors import OpenAIInsufficientFunds
+from bizniz.orchestrator.types import OrchestratorResult, OrchestratorMaxIterationsError
 
 from bizniz.engineer.types import (
     EngineeringAnalysis,
@@ -75,7 +76,7 @@ class AutoEngineer(BaseAIAgent):
         client: BaseAIClient,
         environment: BaseExecutionEnvironment,
         workspace: BaseWorkspace,
-        orchestrator_factory: Callable[[], CodingOrchestrator],
+        orchestrator_factory: Callable[..., CodingOrchestrator],
         max_retries: Optional[int] = 3,
         on_event: Optional[Callable] = None,
         on_status_message: Optional[Callable[[str], None]] = None,
@@ -143,12 +144,14 @@ class AutoEngineer(BaseAIAgent):
         for issue in refined_raw.get("issues", []):
             target_files = issue.get("target_files", [])
             test_files = issue.get("test_files", [])
+            suggested_model = issue.get("suggested_model")
             db_id = self._workspace.db.save_issue(
                 problem_id=problem_id,
                 title=issue["title"],
                 description=issue["description"],
                 target_files=target_files,
                 test_files=test_files,
+                suggested_model=suggested_model,
             )
             analysis.issues.append(EngineeringIssue(
                 db_id=db_id,
@@ -156,6 +159,7 @@ class AutoEngineer(BaseAIAgent):
                 description=issue["description"],
                 target_files=[TargetFile(**tf) for tf in target_files],
                 test_files=test_files,
+                suggested_model=suggested_model,
             ))
 
         # Step 4: Create the workspace package structure
@@ -194,6 +198,7 @@ class AutoEngineer(BaseAIAgent):
 
         target_files = json.loads(row["target_files_json"]) if row["target_files_json"] else []
         test_files = json.loads(row["test_files_json"]) if row["test_files_json"] else []
+        suggested_model = row["suggested_model"] if "suggested_model" in row.keys() else None
 
         # Load architecture context if available
         arch_context = ""
@@ -206,14 +211,35 @@ class AutoEngineer(BaseAIAgent):
             except Exception:
                 pass
 
-        orchestrator = self._orchestrator_factory()
+        orchestrator = self._orchestrator_factory(suggested_model=suggested_model)
 
-        result = orchestrator.run_multi(
-            prompt=row["description"],
-            target_files=target_files,
-            test_files=test_files,
-            architecture_context=arch_context,
-        )
+        try:
+            result = orchestrator.run_multi(
+                prompt=row["description"],
+                target_files=target_files,
+                test_files=test_files,
+                architecture_context=arch_context,
+                initial_model=suggested_model,
+            )
+        except OrchestratorMaxIterationsError:
+            log(f"AutoEngineer: issue #{issue_id} hit max iterations — marking as failed.")
+            result = OrchestratorResult(
+                success=False,
+                changes=[],
+                test_files=[],
+                iterations=orchestrator._max_iterations,
+            )
+        except OpenAIInsufficientFunds as e:
+            log(f"AutoEngineer: API account has insufficient funds — stopping all processing.")
+            raise
+        except Exception as e:
+            log(f"AutoEngineer: issue #{issue_id} crashed ({type(e).__name__}: {e}) — marking as failed.")
+            result = OrchestratorResult(
+                success=False,
+                changes=[],
+                test_files=[],
+                iterations=0,
+            )
 
         # Handle drift detection via governance loop
         if result.architecture_drift_detected and plan_row and result.drift_files:
@@ -698,6 +724,7 @@ class AutoEngineer(BaseAIAgent):
             target_files = issue.get("target_files", [])
             test_files = issue.get("test_files", [])
             depends_on = issue.get("depends_on", [])
+            suggested_model = issue.get("suggested_model")
 
             db_id = self._workspace.db.save_issue(
                 problem_id=problem_id,
@@ -705,6 +732,7 @@ class AutoEngineer(BaseAIAgent):
                 description=issue["description"],
                 target_files=target_files,
                 test_files=test_files,
+                suggested_model=suggested_model,
             )
             issues.append(EngineeringIssue(
                 db_id=db_id,
@@ -712,6 +740,7 @@ class AutoEngineer(BaseAIAgent):
                 description=issue["description"],
                 target_files=[TargetFile(**tf) for tf in target_files],
                 test_files=test_files,
+                suggested_model=suggested_model,
             ))
 
         return EngineeringAnalysis(

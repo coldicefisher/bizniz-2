@@ -1,4 +1,6 @@
 import os
+import re
+import time
 import yaml
 import uuid
 import json
@@ -11,7 +13,7 @@ from openai import AzureOpenAI, OpenAI
 
 from .models import OpenAIModel
 from .errors import (
-    OpenAIClientError, OpenAIRateLimit, OpenAIAuthError, OpenAIInvalidRequest
+    OpenAIClientError, OpenAIRateLimit, OpenAIInsufficientFunds, OpenAIAuthError, OpenAIInvalidRequest
 )
 from bizniz.clients.chatgpt.types.response_format import ResponseFormat, parse_response_format
 # from python_core.data_connectors.mysql_connector import MySQLConnector
@@ -351,7 +353,9 @@ class ChatGPTClient(BaseAIClient):
             message_with_history = instruction_messages + messages
 
 
-        try:
+        max_rate_limit_retries = 3
+        for _rate_attempt in range(1, max_rate_limit_retries + 1):
+          try:
             _response_format = parse_response_format(response_format, schema)
             response_text = None
 
@@ -423,13 +427,30 @@ class ChatGPTClient(BaseAIClient):
             return response_text, job_id, output_messages
 
 
-        except AuthenticationError as e:
+          except AuthenticationError as e:
             raise OpenAIAuthError(str(e))
-        except RateLimitError as e:
+          except RateLimitError as e:
+            error_msg = str(e).lower()
+            # Detect billing/quota exhaustion — retrying won't help
+            if any(phrase in error_msg for phrase in [
+                "insufficient_quota", "exceeded your current quota",
+                "billing_hard_limit_reached", "billing hard limit",
+                "you have insufficient funds", "account is not active",
+            ]):
+                raise OpenAIInsufficientFunds(str(e))
+            if _rate_attempt < max_rate_limit_retries:
+                # Parse retry-after hint from error message
+                wait_seconds = 5.0
+                match = re.search(r'try again in (\d+\.?\d*)s', str(e), re.IGNORECASE)
+                if match:
+                    wait_seconds = max(float(match.group(1)) + 0.5, 2.0)
+                wait_seconds = min(wait_seconds, 30.0)
+                time.sleep(wait_seconds)
+                continue
             raise OpenAIRateLimit(str(e))
-        except BadRequestError as e:
+          except BadRequestError as e:
             raise OpenAIInvalidRequest(str(e))
-        except Exception as e:
+          except Exception as e:
             raise OpenAIClientError(f"Unknown error: {e}")
         
     # else:

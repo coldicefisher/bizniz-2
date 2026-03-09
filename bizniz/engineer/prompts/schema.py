@@ -59,9 +59,13 @@ AutoEngineerSchema = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Titles of issues this depends on"
+                        },
+                        "suggested_model": {
+                            "type": "string",
+                            "description": "Suggested starting AI model for this issue based on complexity. Use cheaper models (gpt-4o-mini) for simple tasks like data classes, enums, simple CRUD. Use stronger models (gpt-4o) for complex logic, multi-dependency modules, CLI parsing. Use the strongest (gpt-5) only for highly complex architectural work."
                         }
                     },
-                    "required": ["title", "description", "target_files", "test_files", "depends_on"],
+                    "required": ["title", "description", "target_files", "test_files", "depends_on", "suggested_model"],
                     "additionalProperties": False
                 }
             }

@@ -25,6 +25,7 @@ MULTI_ISSUE_RESPONSE = {
             "target_files": [{"filepath": "task_manager/one.py", "action": "create"}],
             "test_files": ["tests/test_one.py"],
             "depends_on": [],
+            "suggested_model": "gpt-4o-mini",
         },
         {
             "title": "Issue two",
@@ -32,6 +33,7 @@ MULTI_ISSUE_RESPONSE = {
             "target_files": [{"filepath": "task_manager/two.py", "action": "create"}],
             "test_files": ["tests/test_two.py"],
             "depends_on": ["Issue one"],
+            "suggested_model": "gpt-4o",
         },
     ],
 }
@@ -58,7 +60,7 @@ def test_run_returns_list_of_results(mock_environment, tmp_path):
         client=client,
         environment=mock_environment,
         workspace=ws,
-        orchestrator_factory=lambda: orc,
+        orchestrator_factory=lambda **kwargs: orc,
         max_retries=3,
     )
 
@@ -84,7 +86,7 @@ def test_run_dispatches_each_issue(mock_environment, tmp_path):
 
     orchestrators = []
 
-    def factory():
+    def factory(**kwargs):
         orc = MagicMock(spec=CodingOrchestrator)
         orc.run_multi.return_value = OrchestratorResult(success=True, changes=[FileChange(filepath="out.py", code="x", action="create")], test_files=[GeneratedTestFile(filepath="test_out.py", tests="y")], iterations=1)
         orchestrators.append(orc)

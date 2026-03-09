@@ -104,6 +104,7 @@ class EngineeringIssue(BaseModel):
     target_files: List[TargetFile] = []
     test_files: List[str] = []
     depends_on_issues: List[int] = []
+    suggested_model: Optional[str] = None
 
 
 class EngineeringAnalysis(BaseModel):

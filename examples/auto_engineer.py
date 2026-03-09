@@ -26,6 +26,7 @@ load_dotenv()  # automatically finds .env in current directory or parents
 
 from bizniz.autocoder.autocoder import Autocoder
 from bizniz.autodebugger.autodebugger import Autodebugger
+from bizniz.agentic_debugger.agentic_debugger import AgenticDebugger
 from bizniz.autotester.autotester import Autotester
 from bizniz.deep_debugger.deep_debugger import DeepDebugger
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
@@ -35,12 +36,23 @@ from bizniz.environment.python_environment import PythonSandboxExecutionEnvironm
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
 from bizniz.environment.pytest_environment import PytestEnvironment
 from bizniz.workspace.local_workspace import LocalWorkspace
+from bizniz.logging.pipeline_logger import PipelineLogger
 
 
-def make_orchestrator(client, workspace, config):
+def make_orchestrator(client, workspace, config, suggested_model=None):
     """Factory: returns a fresh CodingOrchestrator per issue."""
     sandbox = DockerExecutionEnvironment()
     pytest_env = PytestEnvironment(workspace_root=workspace.root)
+
+    def debugger_factory():
+        """Create an AgenticDebugger with its own fresh client instance."""
+        fresh_client = config.make_client()
+        return AgenticDebugger(
+            client=fresh_client,
+            workspace=workspace,
+            environment=pytest_env,
+            on_status_message=lambda msg: print(f"    [debugger] {msg}"),
+        )
 
     def deep_debugger_factory():
         """Create a DeepDebugger with its own fresh client instance."""
@@ -50,25 +62,34 @@ def make_orchestrator(client, workspace, config):
             on_status_message=lambda msg: print(f"    [deep-debugger] {msg}"),
         )
 
+    def client_factory(model_name):
+        """Create a fresh client for a specific model (used on escalation)."""
+        return config.make_client(model=model_name)
+
+    # Use suggested_model for this issue's starting client
+    issue_client = config.make_client(model=suggested_model) if suggested_model else client
+
     return CodingOrchestrator(
         autocoder=Autocoder(
-            client=client,
+            client=issue_client,
             environment=sandbox,
             workspace=workspace,
         ),
         autotester=Autotester(
-            client=client,
+            client=issue_client,
             environment=sandbox,
             workspace=workspace,
         ),
         autodebugger=Autodebugger(
-            client=client,
+            client=issue_client,
             environment=sandbox,
             workspace=workspace,
         ),
         test_environment=pytest_env,
         workspace=workspace,
-        client=client,
+        client=issue_client,
+        client_factory=client_factory,
+        debugger_factory=debugger_factory,
         deep_debugger_factory=deep_debugger_factory,
         model_progression=config.make_model_progression(),
         max_iterations=config.max_iterations,
@@ -79,7 +100,9 @@ def make_orchestrator(client, workspace, config):
 if __name__ == "__main__":
 
     config = BiznizConfig.find_and_load()
-    client = config.make_client()
+
+    # Engineer uses the best available model for analysis + planning
+    engineer_client = config.make_engineer_client()
 
     # Clean workspace on every run for a fresh start
     workspace_path = os.path.expanduser("~/auto_engineer_workspace")
@@ -88,21 +111,30 @@ if __name__ == "__main__":
 
     workspace = LocalWorkspace(root=workspace_path)
 
+    # Set up structured logging
+    log_dir = os.path.join(workspace_path, ".bizniz", "logs")
+    logger = PipelineLogger(log_dir=log_dir)
+
     # ── Step 1: Analyze (requirements + architecture + issues) ────────
     print("=== Analyzing problem statement ===\n")
 
+    problem_statement = (
+        "Build a command-line expense tracker that lets users add expenses "
+        "with a category and amount, list all expenses, and show totals by category."
+    )
+    logger.log_run_start(problem_statement)
+
     with AutoEngineer(
-        client=client,
+        client=engineer_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
-        orchestrator_factory=lambda: make_orchestrator(client, workspace, config),
+        orchestrator_factory=lambda suggested_model=None: make_orchestrator(
+            engineer_client, workspace, config, suggested_model=suggested_model,
+        ),
         on_status_message=lambda msg: print(f"  [engineer] {msg}"),
     ) as engineer:
 
-        analysis = engineer.analyze(
-            "Build a command-line expense tracker that lets users add expenses "
-            "with a category and amount, list all expenses, and show totals by category."
-        )
+        analysis = engineer.analyze(problem_statement)
 
         print(f"\nProblem ID: {analysis.problem_id}")
 
@@ -154,18 +186,43 @@ if __name__ == "__main__":
         # ── Issues ────────────────────────────────────────────────────
         print("\nIssues:")
         for issue in analysis.issues:
-            print(f"  #{issue.db_id}: {issue.title}")
+            model_tag = f" [model: {issue.suggested_model}]" if issue.suggested_model else ""
+            print(f"  #{issue.db_id}: {issue.title}{model_tag}")
             targets = ", ".join(tf.filepath for tf in issue.target_files)
             tests = ", ".join(issue.test_files)
             print(f"         target: {targets}  tests: {tests}")
 
         # ── Step 2: Dispatch all analyzed issues ──────────────────────
         print(f"\n=== Dispatching {len(analysis.issues)} issue(s) ===\n")
+        resolved = 0
+        failed = 0
         for issue in analysis.issues:
             print(f"  Dispatching issue #{issue.db_id}: {issue.title}")
+            logger.log_issue_start(issue.db_id, issue.title, issue.suggested_model)
             result = engineer.dispatch(issue.db_id)
+            logger.log_issue_end(issue.db_id, result.success, result.iterations)
             print(f"    Success: {result.success}, Iterations: {result.iterations}")
+            if result.success:
+                resolved += 1
+            else:
+                failed += 1
+                logger.log_error(issue.db_id, "issue_failed", f"Issue #{issue.db_id} failed after {result.iterations} iterations")
             if result.architecture_drift_detected:
                 print(f"    Drift detected: {result.drift_files}")
+
+    logger.log_run_end(
+        success=failed == 0,
+        total_issues=len(analysis.issues),
+        resolved=resolved,
+        failed=failed,
+    )
+
+    summary = logger.get_summary()
+    print(f"\n=== Run Summary ===")
+    print(f"  Run ID: {summary['run_id']}")
+    print(f"  Issues: {summary['total_issues']} total, {summary['resolved']} resolved, {summary['failed']} failed")
+    print(f"  Total iterations: {summary['total_iterations']}")
+    print(f"  Escalations: {summary['escalations']}, Stalls: {summary['stalls']}")
+    print(f"  Log: {summary['log_path']}")
 
     print(f"\nWorkspace files: {workspace.tree()}")
