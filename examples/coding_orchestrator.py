@@ -3,10 +3,11 @@ Example: CodingOrchestrator
 
 Iteratively generates code + tests, runs pytest, and repairs until tests pass.
 Uses TDD by default (tests first, then code).
-Features model escalation on stalls.
+Tests run inside Docker containers via DockerPytestEnvironment.
 
 Requirements:
     - OPENAI_API_KEY environment variable set (or .env file)
+    - Docker daemon running
 """
 from dotenv import load_dotenv
 
@@ -20,7 +21,7 @@ from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.orchestrator.types import OrchestratorStalledError, OrchestratorMaxIterationsError
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
-from bizniz.environment.pytest_environment import PytestEnvironment
+from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
 from bizniz.workspace.temp_workspace import TempWorkspace
 
 
@@ -30,14 +31,19 @@ if __name__ == "__main__":
     client = config.make_client()
     sandbox = DockerExecutionEnvironment()
     workspace = TempWorkspace()
-    pytest_env = PytestEnvironment(workspace_root=workspace.root)
+
+    # Tests run inside a Docker container with Python + pytest
+    test_env = DockerPytestEnvironment(
+        workspace_root=workspace.root,
+        image="bizniz-python-runner",
+    )
 
     def debugger_factory():
         fresh_client = config.make_client()
         return AgenticDebugger(
             client=fresh_client,
             workspace=workspace,
-            environment=pytest_env,
+            environment=test_env,
         )
 
     def client_factory(model_name):
@@ -47,7 +53,7 @@ if __name__ == "__main__":
         autocoder=Autocoder(client=client, environment=sandbox, workspace=workspace),
         autotester=Autotester(client=client, environment=sandbox, workspace=workspace),
         autodebugger=Autodebugger(client=client, environment=sandbox, workspace=workspace),
-        test_environment=pytest_env,
+        test_environment=test_env,
         workspace=workspace,
         client=client,
         client_factory=client_factory,
@@ -70,35 +76,6 @@ if __name__ == "__main__":
         if result.success:
             print(f"\nSuccess after {result.iterations} iteration(s)!")
             print(f"Strategy used: {result.strategy_used}")
-        else:
-            print(f"\nFailed after {result.iterations} iterations.")
-
-    except OrchestratorStalledError as e:
-        print(f"\nStalled: {e}")
-
-    except OrchestratorMaxIterationsError as e:
-        print(f"\nMax iterations exceeded: {e}")
-
-    # ── Multi-file orchestration ──────────────────────────────────────
-    print("\n=== Multi-File Orchestration ===")
-
-    target_files = [
-        {"filepath": "calculator/ops.py", "action": "create", "description": "Basic arithmetic operations"},
-    ]
-    test_files = ["tests/test_ops.py"]
-
-    try:
-        result = orchestrator.run_multi(
-            prompt="Create a calculator module with add, subtract, multiply, divide functions.",
-            target_files=target_files,
-            test_files=test_files,
-            architecture_context="Simple calculator package.",
-        )
-
-        if result.success:
-            print(f"\nSuccess after {result.iterations} iteration(s)!")
-            print(f"Strategy used: {result.strategy_used}")
-            print(f"Files: {[c.filepath for c in result.changes]}")
         else:
             print(f"\nFailed after {result.iterations} iterations.")
 

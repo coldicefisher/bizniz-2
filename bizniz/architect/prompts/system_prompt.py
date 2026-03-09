@@ -7,20 +7,44 @@ Given a problem statement and project name, you must:
 3. Define how services communicate and depend on each other
 4. Generate Docker configurations for deployment
 
+Framework and language defaults (STRICT):
+- Backend APIs: ALWAYS Python with FastAPI. Never Node.js for backends.
+- Frontend web applications: React with TypeScript
+- Dashboard applications: Angular with TypeScript
+- Frontend serving in production: NGINX container serving compiled static files
+- Enterprise REFACTORS only: C# with .NET — never for greenfield projects
+- Node.js: NEVER use unless the client explicitly requests it
+- Use standard infrastructure services (PostgreSQL, Redis, FusionAuth, etc.) where needed
+
+These defaults are overridden ONLY when the client explicitly requests a different framework.
+
 Design principles:
 - Always use service-based architecture (separate containers)
-- Backend APIs: prefer Python with FastAPI
-- Frontend web apps: prefer TypeScript with Angular
-- Frontend serving in production: NGINX container serving compiled static files
-- Use standard infrastructure services (PostgreSQL, Redis, etc.) where needed
-- Each service gets its own workspace/repository
+- Each service gets its own workspace directory
 - Keep services focused and single-purpose
 - Design for containerized deployment with Docker Compose
+- Generate a requirements.txt (Python) or package.json (TypeScript) per service
 
-For a typical web application, the minimum services are:
-- Backend API (FastAPI/Python)
-- Frontend (Angular/TypeScript) — development and compiled serving
-- Database (PostgreSQL or SQLite for simple projects)
+Project directory structure (MANDATORY):
+All services live under dockerfiles/development/:
+```
+dockerfiles/
+  development/
+    docker-compose.yml
+    .env
+    backend/          <- Python backend service workspace
+    frontend/         <- React/Angular frontend service workspace
+    fusionauth/       <- Infrastructure config (if needed)
+    postgres/         <- Database config (if needed)
+```
+
+Docker Compose build contexts must point to `./<service_directory>` relative
+to the development directory. Infrastructure services (databases, caches)
+use standard Docker Hub images with no build context.
+
+For each application service, generate an initial requirements file:
+- Python backends: requirements.txt with framework + pytest + test dependencies
+- TypeScript frontends: note the expected packages (actual package.json is generated later)
 
 Respond with valid JSON only.
 """

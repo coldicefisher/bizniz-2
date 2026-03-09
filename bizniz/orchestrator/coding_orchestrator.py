@@ -15,7 +15,7 @@ Iteration flow (TDD)
 ---------------------
 1.  Autotester.generate_multi(prompt) → contract tests (no source code)
 2.  Autocoder.generate_multi(prompt + test_code) → generate code to pass tests
-3.  PytestEnvironment.execute(test_file) → run tests
+3.  DockerPytestEnvironment.execute(test_file) → run tests inside Docker
 4.  If tests pass → done
 5.  If tests fail → repair code (tests are the spec, not modified)
 6.  Repeat 3-5 until success or safeguards fire
@@ -1140,25 +1140,41 @@ class CodingOrchestrator:
     # ── Environment / package management ──────────────────────────────────────
 
     def _sync_environment_packages(self, log: Callable):
-        """Load persisted packages from workspace DB and install into Docker env."""
+        """Load persisted packages from workspace DB and install into test env."""
         try:
             rows = self._workspace.db.get_packages()
             if rows:
                 packages = [row["package"] for row in rows]
-                # Install into Docker environment if it supports it
-                docker_env = self._find_docker_environment()
-                if docker_env:
-                    docker_env.install_packages(packages)
+                env = self._find_installable_environment()
+                if env:
+                    env.install_packages(packages)
                     log(f"Orchestrator: synced {len(packages)} package(s) from workspace DB")
         except Exception:
             pass  # DB may not exist yet for fresh workspaces
 
     def _install_package(self, package: str, log: Callable):
-        """Install a package into the Docker environment and persist to DB."""
-        docker_env = self._find_docker_environment()
-        if docker_env:
-            docker_env.install_packages([package])
-            log(f"Orchestrator: installed package '{package}' into Docker image")
+        """Install a package into the test environment and persist to DB."""
+        env = self._find_installable_environment()
+        if env:
+            env.install_packages([package])
+            log(f"Orchestrator: installed package '{package}'")
+        else:
+            log(f"Orchestrator: WARNING — no installable environment found for '{package}'")
+
+        # Update requirements.txt in workspace
+        try:
+            req_path = self._workspace.path("requirements.txt")
+            existing = req_path.read_text() if req_path.exists() else ""
+            existing_pkgs = {
+                line.strip().split("==")[0].split(">=")[0].lower()
+                for line in existing.splitlines()
+                if line.strip() and not line.startswith("#")
+            }
+            if package.lower() not in existing_pkgs:
+                with open(req_path, "a") as f:
+                    f.write(f"{package}\n")
+        except Exception:
+            pass
 
         # Persist to workspace DB
         try:
@@ -1166,13 +1182,11 @@ class CodingOrchestrator:
         except Exception:
             pass
 
-    def _find_docker_environment(self):
-        """Find a DockerExecutionEnvironment among the environments we have."""
-        from bizniz.environment.docker_environment import DockerExecutionEnvironment
-        # Check if test_environment or autocoder's environment is Docker
-        if isinstance(self._test_environment, DockerExecutionEnvironment):
+    def _find_installable_environment(self):
+        """Find an environment that supports package installation (duck typing)."""
+        if hasattr(self._test_environment, 'install_packages'):
             return self._test_environment
-        if hasattr(self._autocoder, '_environment') and isinstance(self._autocoder._environment, DockerExecutionEnvironment):
+        if hasattr(self._autocoder, '_environment') and hasattr(self._autocoder._environment, 'install_packages'):
             return self._autocoder._environment
         return None
 

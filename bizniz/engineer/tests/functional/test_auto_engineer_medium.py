@@ -15,20 +15,23 @@ from bizniz.autotester.autotester import Autotester
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
-from bizniz.environment.pytest_environment import PytestEnvironment
+from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.engineer.auto_engineer import AutoEngineer
 from bizniz.workspace.local_workspace import LocalWorkspace
 
 
-def _make_orchestrator(config, workspace, suggested_model=None):
+def _make_orchestrator(config, workspace, suggested_model=None, image_name=None):
     sandbox = DockerExecutionEnvironment()
-    pytest_env = PytestEnvironment(workspace_root=workspace.root)
+    test_env = DockerPytestEnvironment(
+        workspace_root=workspace.root,
+        image=image_name or "bizniz-python-runner",
+    )
 
     def debugger_factory():
         fresh_client = config.make_client()
         return AgenticDebugger(
-            client=fresh_client, workspace=workspace, environment=pytest_env,
+            client=fresh_client, workspace=workspace, environment=test_env,
         )
 
     def client_factory(model_name):
@@ -40,7 +43,7 @@ def _make_orchestrator(config, workspace, suggested_model=None):
         autocoder=Autocoder(client=issue_client, environment=sandbox, workspace=workspace),
         autotester=Autotester(client=issue_client, environment=sandbox, workspace=workspace),
         autodebugger=Autodebugger(client=issue_client, environment=sandbox, workspace=workspace),
-        test_environment=pytest_env,
+        test_environment=test_env,
         workspace=workspace,
         client=issue_client,
         client_factory=client_factory,
@@ -77,8 +80,8 @@ def test_contact_book_full_pipeline(api_key, workspace_path):
         client=engineer_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
-        orchestrator_factory=lambda suggested_model=None: _make_orchestrator(
-            config, workspace, suggested_model=suggested_model,
+        orchestrator_factory=lambda suggested_model=None, image_name=None: _make_orchestrator(
+            config, workspace, suggested_model=suggested_model, image_name=image_name,
         ),
         on_status_message=lambda msg: status_messages.append(msg),
     ) as engineer:

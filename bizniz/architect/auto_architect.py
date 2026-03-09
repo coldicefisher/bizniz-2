@@ -2,12 +2,28 @@
 AutoArchitect
 
 Takes a problem statement and project name, decomposes the system into
-containerized services, creates workspaces and Dockerfiles for each,
-generates a docker-compose.yml, and dispatches AutoEngineer instances
-for application services (backend, frontend).
+containerized services, creates the project directory structure, generates
+Dockerfiles and docker-compose.yml, builds Docker images, and dispatches
+AutoEngineer instances for application services.
+
+Project structure:
+    project_root/
+    ├── .bizniz/project.db
+    └── dockerfiles/
+        └── development/
+            ├── docker-compose.yml
+            ├── .env
+            ├── backend/          (service workspace)
+            │   ├── Dockerfile
+            │   ├── requirements.txt
+            │   └── src/...
+            └── frontend/         (service workspace)
+                ├── Dockerfile
+                └── src/...
 """
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Optional, Callable, List
 
@@ -18,7 +34,6 @@ from bizniz.clients.chatgpt.types.response_format import ResponseFormat
 from bizniz.clients.errors import AIInsufficientFunds
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.workspace.base_workspace import BaseWorkspace
-from bizniz.workspace.local_workspace import LocalWorkspace
 from bizniz.workspace.naming import slugify
 
 from bizniz.architect.types import (
@@ -33,6 +48,13 @@ from bizniz.architect.prompts.decompose_prompt import DECOMPOSE_PROMPT_TEMPLATE
 from bizniz.architect.prompts.schema import AutoArchitectSchema
 
 
+# Service types that are application code (need workspaces + engineers)
+_APPLICATION_TYPES = {"backend", "frontend", "worker"}
+
+# Service types that are infrastructure (use standard images, no workspace)
+_INFRASTRUCTURE_TYPES = {"database", "cache", "proxy", "auth"}
+
+
 class AutoArchitect(BaseAIAgent):
     """
     System architect agent.
@@ -41,16 +63,15 @@ class AutoArchitect(BaseAIAgent):
         AI decomposes the problem into services/containers.
 
     build(problem_statement, project_name) → ArchitectResult
-        Full pipeline: decompose → create workspaces → generate Docker
-        configs → dispatch engineers for each application service.
+        Full pipeline: decompose → create project structure → generate Docker
+        configs → build images → dispatch engineers for each application service.
 
     Parameters
     ----------
     engineer_factory:
-        Callable(workspace, suggested_model) → AutoEngineer context manager.
-        Used to create an engineer for each application service.
-    workspace_parent:
-        Parent directory where service workspaces are created.
+        Callable(workspace, on_status_message, image_name) → AutoEngineer context manager.
+    project_parent:
+        Parent directory where the project root is created.
     """
 
     def __init__(
@@ -59,7 +80,7 @@ class AutoArchitect(BaseAIAgent):
         environment: BaseExecutionEnvironment,
         workspace: BaseWorkspace,
         engineer_factory: Callable,
-        workspace_parent: Optional[str] = None,
+        project_parent: Optional[str] = None,
         max_retries: Optional[int] = 3,
         on_event: Optional[Callable] = None,
         on_status_message: Optional[Callable[[str], None]] = None,
@@ -73,7 +94,7 @@ class AutoArchitect(BaseAIAgent):
             on_status_message=on_status_message,
         )
         self._engineer_factory = engineer_factory
-        self._workspace_parent = workspace_parent
+        self._project_parent = project_parent
 
     @property
     def _process_system_prompt(self) -> str:
@@ -127,10 +148,12 @@ class AutoArchitect(BaseAIAgent):
         """
         Full pipeline:
         1. Decompose problem into services
-        2. Create workspaces for each application service
-        3. Generate Dockerfiles and docker-compose.yml
-        4. Dispatch AutoEngineer for each application service
+        2. Create project structure (dockerfiles/development/...)
+        3. Generate Dockerfiles, requirements.txt, docker-compose.yml, .env
+        4. Build Docker images for application services
+        5. Dispatch AutoEngineer for each application service
         """
+        from bizniz.project.project import Project
 
         def log(msg: str):
             if self._on_status_message:
@@ -139,35 +162,78 @@ class AutoArchitect(BaseAIAgent):
         # Step 1: Decompose
         architecture = self.decompose(problem_statement, project_name)
 
-        # Step 2: Determine workspace parent
-        parent = Path(self._workspace_parent) if self._workspace_parent else self._workspace.root.parent
+        # Step 2: Create project structure
+        parent = Path(self._project_parent) if self._project_parent else self._workspace.root.parent
+        project = Project(root=parent / architecture.project_slug, project_name=project_name)
+        project.create_structure()
+        log(f"AutoArchitect: created project at {project.root}")
 
-        # Step 3: Create workspaces and Dockerfiles
-        log("AutoArchitect: creating service workspaces and Dockerfiles...")
+        # Save architecture snapshot
+        project.db.save_architecture_snapshot(
+            architecture.json(),
+            description=f"Initial decomposition: {len(architecture.services)} services",
+        )
+
+        # Step 3: Create service workspaces, Dockerfiles, and requirements
+        log("AutoArchitect: creating service workspaces and Docker configs...")
         service_workspaces = {}
         for service in architecture.services:
-            if service.service_type in ("database", "cache", "proxy"):
-                # Infrastructure services use standard images, no workspace needed
+            if service.service_type in _INFRASTRUCTURE_TYPES:
                 continue
 
-            ws_path = parent / service.workspace_name
-            workspace = LocalWorkspace(root=str(ws_path))
+            workspace = project.get_service_workspace(service.workspace_name)
             service_workspaces[service.name] = workspace
 
             # Generate Dockerfile
             dockerfile_content = self._generate_dockerfile(service)
             workspace.write_file("Dockerfile", dockerfile_content)
 
+            # Generate requirements file
+            if service.language == "python":
+                req_content = self._generate_requirements_txt(service)
+                workspace.write_file("requirements.txt", req_content)
+            elif service.language == "typescript":
+                pkg_json = self._generate_package_json(service, architecture.project_slug)
+                workspace.write_file("package.json", pkg_json)
+
+            # Register service in project DB
+            project.db.save_service(
+                name=service.name,
+                service_type=service.service_type,
+                framework=service.framework,
+                language=service.language,
+                workspace_path=str(workspace.root),
+            )
+
             log(f"AutoArchitect: created workspace '{service.workspace_name}' with Dockerfile")
 
-        # Step 4: Write docker-compose.yml to the project root
-        project_root = parent / architecture.project_slug
-        project_root.mkdir(parents=True, exist_ok=True)
-        compose_path = project_root / "docker-compose.yml"
-        compose_path.write_text(architecture.docker_compose)
-        log(f"AutoArchitect: wrote docker-compose.yml to {compose_path}")
+        # Step 4: Write docker-compose.yml and .env
+        project.write_docker_compose(architecture.docker_compose)
+        project.write_env_file(self._generate_env_file(architecture))
+        log(f"AutoArchitect: wrote docker-compose.yml and .env")
 
-        # Step 5: Dispatch engineers for application services
+        # Step 5: Build Docker images for application services
+        log("AutoArchitect: building Docker images...")
+        for service in architecture.services:
+            if service.name not in service_workspaces:
+                continue
+
+            workspace = service_workspaces[service.name]
+            image_tag = f"{architecture.project_slug}-{service.name}:dev"
+
+            try:
+                self._build_docker_image(service, workspace, image_tag)
+                service.image_name = image_tag
+                project.db.update_service_image(service.name, image_tag)
+                project.db.update_service_status(service.name, "ready")
+                project.db.log_build_event(service.name, "image_build", True, f"Built {image_tag}")
+                log(f"AutoArchitect: built image '{image_tag}'")
+            except Exception as e:
+                project.db.update_service_status(service.name, "failed")
+                project.db.log_build_event(service.name, "image_build", False, str(e))
+                log(f"AutoArchitect: image build failed for '{service.name}': {e}")
+
+        # Step 6: Dispatch engineers for application services
         log("AutoArchitect: dispatching engineers for application services...")
         service_results = []
 
@@ -187,6 +253,7 @@ class AutoArchitect(BaseAIAgent):
                     workspace=workspace,
                     service=service,
                     service_prompt=service_prompt,
+                    project=project,
                 )
                 service_results.append(result)
                 status = "PASS" if result.success else "FAIL"
@@ -206,11 +273,13 @@ class AutoArchitect(BaseAIAgent):
                     error=str(e),
                 ))
 
+        compose_path = str(project.dev_root / "docker-compose.yml")
         return ArchitectResult(
             project_name=project_name,
             architecture=architecture,
             service_results=service_results,
-            docker_compose_path=str(compose_path),
+            docker_compose_path=compose_path,
+            project_root=str(project.root),
         )
 
     # ── Private helpers ────────────────────────────────────────────────────────
@@ -252,25 +321,49 @@ class AutoArchitect(BaseAIAgent):
 
     def _dispatch_engineer(
         self,
-        workspace: LocalWorkspace,
+        workspace,
         service: ServiceDefinition,
         service_prompt: str,
+        project=None,
     ) -> ServiceResult:
         """Dispatch an AutoEngineer for a single service."""
-        with self._engineer_factory(workspace, on_status_message=self._on_status_message) as engineer:
+        with self._engineer_factory(
+            workspace,
+            on_status_message=self._on_status_message,
+            image_name=service.image_name,
+        ) as engineer:
             analysis = engineer.analyze(service_prompt)
 
             results = []
             for issue in analysis.issues:
+                # Log issue to project DB
+                issue_db_id = None
+                if project:
+                    issue_db_id = project.db.log_issue(
+                        service_name=service.name,
+                        title=issue.title,
+                        description=issue.description,
+                    )
+
                 try:
                     result = engineer.dispatch(issue.db_id)
                     results.append(result)
+
+                    if project and issue_db_id:
+                        status = "closed" if result.success else "failed"
+                        project.db.update_issue(
+                            issue_db_id, status,
+                            strategy_used=getattr(result, 'strategy_used', None),
+                            iterations=result.iterations,
+                        )
                 except AIInsufficientFunds:
                     raise
                 except Exception as e:
                     results.append(type('R', (), {
                         'success': False, 'iterations': 0,
                     })())
+                    if project and issue_db_id:
+                        project.db.update_issue(issue_db_id, "failed")
 
         successes = sum(1 for r in results if r.success)
         return ServiceResult(
@@ -280,6 +373,21 @@ class AutoArchitect(BaseAIAgent):
             issues_total=len(results),
             issues_passed=successes,
         )
+
+    def _build_docker_image(self, service: ServiceDefinition, workspace, image_tag: str):
+        """Build the Docker image for a service."""
+        dockerfile_path = workspace.path("Dockerfile")
+        if not dockerfile_path.exists():
+            raise FileNotFoundError(f"Dockerfile not found at {dockerfile_path}")
+
+        proc = subprocess.run(
+            ["docker", "build", "-t", image_tag, "-f", str(dockerfile_path), str(workspace.root)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"Docker build failed: {proc.stderr[:500]}")
 
     @staticmethod
     def _build_service_prompt(
@@ -321,6 +429,7 @@ class AutoArchitect(BaseAIAgent):
                 "COPY requirements.txt .\n"
                 "RUN pip install --no-cache-dir -r requirements.txt\n"
                 "COPY . .\n"
+                "ENV PYTHONPATH=/app\n"
                 f'CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "{service.port or 8000}"]\n'
             )
         elif service.language == "typescript":
@@ -353,3 +462,70 @@ class AutoArchitect(BaseAIAgent):
                 f"# Dockerfile for {service.name} ({service.framework})\n"
                 f"# TODO: Configure for {service.language}\n"
             )
+
+    @staticmethod
+    def _generate_requirements_txt(service: ServiceDefinition) -> str:
+        """Generate requirements.txt for a Python service."""
+        # Start with service-specified requirements
+        packages = list(service.requirements) if service.requirements else []
+
+        # Ensure pytest is always included for testing
+        base_test_packages = ["pytest"]
+        for pkg in base_test_packages:
+            if pkg not in packages:
+                packages.append(pkg)
+
+        # Add framework defaults if not already specified
+        framework_defaults = {
+            "fastapi": ["fastapi", "uvicorn", "pydantic"],
+            "flask": ["flask"],
+            "django": ["django"],
+        }
+        for pkg in framework_defaults.get(service.framework, []):
+            if pkg not in packages:
+                packages.insert(0, pkg)
+
+        return "\n".join(packages) + "\n"
+
+    @staticmethod
+    def _generate_package_json(service: ServiceDefinition, project_slug: str) -> str:
+        """Generate a minimal package.json for a TypeScript service."""
+        pkg = {
+            "name": f"{project_slug}-{service.name}",
+            "version": "0.1.0",
+            "private": True,
+            "scripts": {
+                "build": "tsc" if service.service_type != "frontend" else "vite build",
+                "dev": "vite" if service.service_type == "frontend" else "ts-node src/main.ts",
+                "test": "jest",
+            },
+        }
+        return json.dumps(pkg, indent=2) + "\n"
+
+    @staticmethod
+    def _generate_env_file(architecture: SystemArchitecture) -> str:
+        """Generate a .env file with service connection defaults."""
+        lines = [
+            f"# {architecture.project_name} — development environment",
+            f"PROJECT_NAME={architecture.project_slug}",
+            "",
+        ]
+
+        for service in architecture.services:
+            if service.service_type == "database" and service.framework == "postgres":
+                lines.extend([
+                    "# PostgreSQL",
+                    "POSTGRES_USER=dev",
+                    "POSTGRES_PASSWORD=dev",
+                    f"POSTGRES_DB={architecture.project_slug}",
+                    f"DATABASE_URL=postgresql://dev:dev@db:5432/{architecture.project_slug}",
+                    "",
+                ])
+            elif service.service_type == "cache" and service.framework == "redis":
+                lines.extend([
+                    "# Redis",
+                    "REDIS_URL=redis://redis:6379/0",
+                    "",
+                ])
+
+        return "\n".join(lines) + "\n"

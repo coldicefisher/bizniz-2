@@ -2,11 +2,21 @@
 Example: Auto Architect
 
 Decomposes a problem into a service-based architecture,
-creates workspaces, generates Dockerfiles and docker-compose.yml,
-and dispatches AutoEngineer instances for application services.
+creates project structure with Dockerfiles and docker-compose.yml,
+builds Docker images, and dispatches AutoEngineer instances.
+
+Output structure:
+    project_root/
+    └── dockerfiles/
+        └── development/
+            ├── docker-compose.yml
+            ├── .env
+            ├── backend/
+            └── frontend/
 
 Requirements:
     - OPENAI_API_KEY environment variable set (or .env file)
+    - Docker daemon running
 """
 from pathlib import Path
 
@@ -21,7 +31,7 @@ from bizniz.autotester.autotester import Autotester
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
-from bizniz.environment.pytest_environment import PytestEnvironment
+from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.engineer.auto_engineer import AutoEngineer
 from bizniz.architect.auto_architect import AutoArchitect
@@ -41,14 +51,17 @@ PROBLEM_STATEMENT = (
 )
 
 
-def _make_orchestrator(config, workspace, on_status_message=None, suggested_model=None):
+def _make_orchestrator(config, workspace, on_status_message=None, suggested_model=None, image_name=None):
     sandbox = DockerExecutionEnvironment()
-    pytest_env = PytestEnvironment(workspace_root=workspace.root)
+    test_env = DockerPytestEnvironment(
+        workspace_root=workspace.root,
+        image=image_name or "bizniz-python-runner",
+    )
 
     def debugger_factory():
         fresh_client = config.make_client()
         return AgenticDebugger(
-            client=fresh_client, workspace=workspace, environment=pytest_env,
+            client=fresh_client, workspace=workspace, environment=test_env,
             on_status_message=on_status_message,
         )
 
@@ -61,7 +74,7 @@ def _make_orchestrator(config, workspace, on_status_message=None, suggested_mode
         autocoder=Autocoder(client=issue_client, environment=sandbox, workspace=workspace),
         autotester=Autotester(client=issue_client, environment=sandbox, workspace=workspace),
         autodebugger=Autodebugger(client=issue_client, environment=sandbox, workspace=workspace),
-        test_environment=pytest_env,
+        test_environment=test_env,
         workspace=workspace,
         client=issue_client,
         client_factory=client_factory,
@@ -72,12 +85,13 @@ def _make_orchestrator(config, workspace, on_status_message=None, suggested_mode
     )
 
 
-def _make_engineer(config, workspace, on_status_message=None):
+def _make_engineer(config, workspace, on_status_message=None, image_name=None):
     def orchestrator_factory(suggested_model=None):
         return _make_orchestrator(
             config, workspace,
             on_status_message=on_status_message,
             suggested_model=suggested_model,
+            image_name=image_name,
         )
 
     engineer_client = config.make_engineer_client()
@@ -97,19 +111,20 @@ if __name__ == "__main__":
     architect_client = config.make_client(model="gpt-4o")
 
     project_name = "Pet Groomer"
-    workspace_parent = Path.home() / "bizniz_projects"
-    workspace_parent.mkdir(parents=True, exist_ok=True)
+    project_parent = Path.home() / "bizniz_projects"
+    project_parent.mkdir(parents=True, exist_ok=True)
 
-    root_workspace = LocalWorkspace.from_name(project_name, parent=workspace_parent)
+    # Root workspace for the architect (temporary, used for AI calls)
+    root_workspace = LocalWorkspace.from_name(project_name, parent=project_parent)
 
     architect = AutoArchitect(
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=root_workspace,
-        engineer_factory=lambda ws, on_status_message=None: _make_engineer(
-            config, ws, on_status_message=on_status_message,
+        engineer_factory=lambda ws, on_status_message=None, image_name=None: _make_engineer(
+            config, ws, on_status_message=on_status_message, image_name=image_name,
         ),
-        workspace_parent=str(workspace_parent),
+        project_parent=str(project_parent),
         on_status_message=lambda msg: print(f"  {msg}"),
     )
 
@@ -123,6 +138,7 @@ if __name__ == "__main__":
     print(f"  Results")
     print(f"{'='*60}")
     print(f"  Project: {result.project_name}")
+    print(f"  Project root: {result.project_root}")
     print(f"  Services: {len(result.architecture.services)}")
     print(f"  Docker compose: {result.docker_compose_path}")
     print()

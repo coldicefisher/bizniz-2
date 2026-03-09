@@ -9,6 +9,7 @@ with multiple domain models, business logic, and cross-module dependencies.
 
 Requirements:
     - OPENAI_API_KEY environment variable set (or .env file)
+    - Docker daemon running
 """
 import os
 import shutil
@@ -26,7 +27,7 @@ from bizniz.engineer.auto_engineer import AutoEngineer
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
-from bizniz.environment.pytest_environment import PytestEnvironment
+from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
 from bizniz.workspace.local_workspace import LocalWorkspace
 
 
@@ -52,19 +53,25 @@ PROBLEM_STATEMENT = (
     "Use in-memory storage (lists/dicts). No database or file I/O."
 )
 
+# Default Docker image for running tests (has Python + pytest)
+DEFAULT_IMAGE = "bizniz-python-runner"
 
-def _make_orchestrator(config, workspace, suggested_model=None):
+
+def _make_orchestrator(config, workspace, on_status_message=None, suggested_model=None, image_name=None):
     """Factory: returns a fresh CodingOrchestrator per issue."""
     sandbox = DockerExecutionEnvironment()
-    pytest_env = PytestEnvironment(workspace_root=workspace.root)
+    test_env = DockerPytestEnvironment(
+        workspace_root=workspace.root,
+        image=image_name or DEFAULT_IMAGE,
+    )
 
     def debugger_factory():
         fresh_client = config.make_client()
         return AgenticDebugger(
             client=fresh_client,
             workspace=workspace,
-            environment=pytest_env,
-            on_status_message=lambda msg: print(f"    [debugger] {msg}"),
+            environment=test_env,
+            on_status_message=on_status_message,
         )
 
     def client_factory(model_name):
@@ -76,14 +83,14 @@ def _make_orchestrator(config, workspace, suggested_model=None):
         autocoder=Autocoder(client=issue_client, environment=sandbox, workspace=workspace),
         autotester=Autotester(client=issue_client, environment=sandbox, workspace=workspace),
         autodebugger=Autodebugger(client=issue_client, environment=sandbox, workspace=workspace),
-        test_environment=pytest_env,
+        test_environment=test_env,
         workspace=workspace,
         client=issue_client,
         client_factory=client_factory,
         debugger_factory=debugger_factory,
         model_progression=config.make_model_progression(),
         max_iterations=config.max_iterations,
-        on_status_message=lambda msg: print(f"    [orchestrator] {msg}"),
+        on_status_message=on_status_message,
     )
 
 
@@ -117,8 +124,11 @@ if __name__ == "__main__":
         client=engineer_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
-        orchestrator_factory=lambda suggested_model=None: _make_orchestrator(
-            config, workspace, suggested_model=suggested_model,
+        orchestrator_factory=lambda suggested_model=None, on_status_message=None, image_name=None: _make_orchestrator(
+            config, workspace,
+            on_status_message=on_status_message,
+            suggested_model=suggested_model,
+            image_name=image_name,
         ),
         on_status_message=lambda msg: print(f"  [engineer] {msg}"),
     ) as engineer:
@@ -141,11 +151,6 @@ if __name__ == "__main__":
                     fields = ", ".join(f"{f.name}: {f.type_hint}" for f in dm.fields)
                     print(f"    - {dm.class_name} ({dm.filepath}): {fields}")
 
-        # Requirements
-        print("\nRequirements:")
-        for req in analysis.requirements:
-            print(f"  [{req.type}] {req.text}")
-
         # Issues
         print(f"\nIssues ({len(analysis.issues)}):")
         for issue in analysis.issues:
@@ -165,8 +170,6 @@ if __name__ == "__main__":
             results.append(result)
             status = "PASS" if result.success else "FAIL"
             print(f"    {status} ({result.iterations} iterations)")
-            if result.architecture_drift_detected:
-                print(f"    Drift detected: {result.drift_files}")
 
     # ── Summary ───────────────────────────────────────────────────────
     successes = [r for r in results if r.success]
@@ -175,11 +178,4 @@ if __name__ == "__main__":
     print(f"\n=== Results ===")
     print(f"  {len(successes)}/{len(results)} issues resolved")
     print(f"  {total_iters} total iterations")
-
-    files = [str(f) for f in workspace.list_relative_files()]
-    py_source = [f for f in files if f.endswith(".py") and not f.startswith("tests/") and not f.startswith(".")]
-    py_tests = [f for f in files if f.endswith(".py") and f.startswith("tests/")]
-    print(f"  Source files: {py_source}")
-    print(f"  Test files: {py_tests}")
-
     print(f"\nWorkspace files: {workspace.tree()}")

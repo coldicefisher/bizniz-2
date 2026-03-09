@@ -2,26 +2,28 @@
 Auto Architect types.
 """
 
-from typing import List, Optional, Dict
+from typing import List, Optional
 from pydantic import BaseModel
 
 
 class ServiceDefinition(BaseModel):
     """A single service/container in the system architecture."""
     name: str
-    service_type: str  # "backend", "frontend", "database", "cache", "proxy", etc.
-    framework: str  # "fastapi", "angular", "nginx", "redis", "postgres", etc.
+    service_type: str  # "backend", "frontend", "database", "cache", "proxy", "auth", etc.
+    framework: str  # "fastapi", "react", "angular", "nginx", "redis", "postgres", etc.
     language: str  # "python", "typescript", "yaml", etc.
     description: str
-    workspace_name: str  # slug like "dog_breeder_backend"
+    workspace_name: str  # directory name under dockerfiles/development/
     port: Optional[int] = None
     depends_on: List[str] = []
+    requirements: List[str] = []  # pip/npm packages
+    image_name: Optional[str] = None  # Docker image tag, set after build
 
 
 class SystemArchitecture(BaseModel):
     """Full system architecture produced by the architect."""
     project_name: str
-    project_slug: str  # e.g. "dog_breeder"
+    project_slug: str  # e.g. "pet_groomer"
     services: List[ServiceDefinition]
     docker_compose: str  # generated docker-compose.yml content
     description: str
@@ -43,6 +45,7 @@ class ArchitectResult(BaseModel):
     architecture: SystemArchitecture
     service_results: List[ServiceResult]
     docker_compose_path: Optional[str] = None
+    project_root: Optional[str] = None
 
 
 class AutoArchitectError(Exception):

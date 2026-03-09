@@ -17,7 +17,7 @@ AutoArchitectSchema = {
             },
             "project_slug": {
                 "type": "string",
-                "description": "Slugified project name (e.g. dog_breeder)",
+                "description": "Slugified project name (e.g. pet_groomer)",
             },
             "description": {
                 "type": "string",
@@ -36,6 +36,7 @@ AutoArchitectSchema = {
                         "workspace_name",
                         "port",
                         "depends_on",
+                        "requirements",
                     ],
                     "properties": {
                         "name": {"type": "string"},
@@ -43,7 +44,7 @@ AutoArchitectSchema = {
                             "type": "string",
                             "enum": [
                                 "backend", "frontend", "database",
-                                "cache", "proxy", "worker",
+                                "cache", "proxy", "worker", "auth",
                             ],
                         },
                         "framework": {"type": "string"},
@@ -54,6 +55,11 @@ AutoArchitectSchema = {
                         "depends_on": {
                             "type": "array",
                             "items": {"type": "string"},
+                        },
+                        "requirements": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of packages to install (pip for Python, npm for TypeScript)",
                         },
                     },
                     "additionalProperties": False,

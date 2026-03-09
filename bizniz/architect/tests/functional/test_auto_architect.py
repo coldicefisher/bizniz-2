@@ -2,8 +2,7 @@
 Functional test: Auto Architect — website decomposition and engineering.
 
 Tests that the architect can decompose a problem into services,
-create workspaces, generate Dockerfiles and docker-compose.yml,
-and dispatch engineers for application services.
+create project structure, build Docker images, and dispatch engineers.
 
 Run with:
     pytest bizniz/architect/tests/functional/test_auto_architect.py -m functional -v
@@ -18,21 +17,24 @@ from bizniz.autotester.autotester import Autotester
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
-from bizniz.environment.pytest_environment import PytestEnvironment
+from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.engineer.auto_engineer import AutoEngineer
 from bizniz.architect.auto_architect import AutoArchitect
 from bizniz.workspace.local_workspace import LocalWorkspace
 
 
-def _make_orchestrator(config, workspace, suggested_model=None):
+def _make_orchestrator(config, workspace, suggested_model=None, image_name=None):
     sandbox = DockerExecutionEnvironment()
-    pytest_env = PytestEnvironment(workspace_root=workspace.root)
+    test_env = DockerPytestEnvironment(
+        workspace_root=workspace.root,
+        image=image_name or "bizniz-python-runner",
+    )
 
     def debugger_factory():
         fresh_client = config.make_client()
         return AgenticDebugger(
-            client=fresh_client, workspace=workspace, environment=pytest_env,
+            client=fresh_client, workspace=workspace, environment=test_env,
         )
 
     def client_factory(model_name):
@@ -44,7 +46,7 @@ def _make_orchestrator(config, workspace, suggested_model=None):
         autocoder=Autocoder(client=issue_client, environment=sandbox, workspace=workspace),
         autotester=Autotester(client=issue_client, environment=sandbox, workspace=workspace),
         autodebugger=Autodebugger(client=issue_client, environment=sandbox, workspace=workspace),
-        test_environment=pytest_env,
+        test_environment=test_env,
         workspace=workspace,
         client=issue_client,
         client_factory=client_factory,
@@ -54,11 +56,13 @@ def _make_orchestrator(config, workspace, suggested_model=None):
     )
 
 
-def _make_engineer(config, workspace, on_status_message=None):
+def _make_engineer(config, workspace, on_status_message=None, image_name=None):
     """Create an AutoEngineer context manager for a service workspace."""
 
     def orchestrator_factory(suggested_model=None):
-        return _make_orchestrator(config, workspace, suggested_model=suggested_model)
+        return _make_orchestrator(
+            config, workspace, suggested_model=suggested_model, image_name=image_name,
+        )
 
     engineer_client = config.make_engineer_client()
 
@@ -97,10 +101,10 @@ def test_architect_decompose(api_key, workspace_path):
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
-        engineer_factory=lambda ws, on_status_message=None: _make_engineer(
-            config, ws, on_status_message=on_status_message,
+        engineer_factory=lambda ws, on_status_message=None, image_name=None: _make_engineer(
+            config, ws, on_status_message=on_status_message, image_name=image_name,
         ),
-        workspace_parent=str(workspace_path),
+        project_parent=str(workspace_path),
         on_status_message=lambda msg: status_messages.append(msg),
     )
 
@@ -134,10 +138,7 @@ def test_architect_decompose(api_key, workspace_path):
 
 @pytest.mark.functional
 def test_architect_build_backend_only(api_key, workspace_path):
-    """Test full pipeline: decompose + dispatch engineer for backend service only.
-
-    We limit to backend only to keep test runtime reasonable.
-    """
+    """Test full pipeline: decompose + build project structure + dispatch engineer."""
     config = BiznizConfig(api_key=api_key)
     architect_client = config.make_client(model="gpt-4o")
     workspace = LocalWorkspace(root=str(workspace_path))
@@ -153,15 +154,14 @@ def test_architect_build_backend_only(api_key, workspace_path):
         "Use FastAPI."
     )
 
-    def engineer_factory(ws, on_status_message=None):
-        return _make_engineer(config, ws, on_status_message=on_status_message)
-
     architect = AutoArchitect(
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
-        engineer_factory=engineer_factory,
-        workspace_parent=str(workspace_path),
+        engineer_factory=lambda ws, on_status_message=None, image_name=None: _make_engineer(
+            config, ws, on_status_message=on_status_message, image_name=image_name,
+        ),
+        project_parent=str(workspace_path),
         on_status_message=lambda msg: status_messages.append(msg),
     )
 
@@ -171,15 +171,21 @@ def test_architect_build_backend_only(api_key, workspace_path):
     assert result.architecture is not None
     assert len(result.architecture.services) >= 1
     assert result.docker_compose_path is not None
+    assert result.project_root is not None
 
-    # Check docker-compose.yml was written
+    # Check project structure
     from pathlib import Path
-    assert Path(result.docker_compose_path).exists()
+    project_root = Path(result.project_root)
+    dev_root = project_root / "dockerfiles" / "development"
+    assert dev_root.exists(), f"Development directory should exist at {dev_root}"
+    assert (dev_root / "docker-compose.yml").exists()
+    assert (dev_root / ".env").exists()
 
     # At least one service should have been dispatched
     assert len(result.service_results) >= 1
 
     print(f"\n  Build result: {result.project_name}")
+    print(f"  Project root: {result.project_root}")
     print(f"  Services dispatched: {len(result.service_results)}")
     for sr in result.service_results:
         status = "PASS" if sr.success else "FAIL"
