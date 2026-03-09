@@ -107,6 +107,20 @@ if __name__ == "__main__":
     # Clean workspace on every run for a fresh start
     workspace_path = os.path.expanduser("~/auto_engineer_workspace")
     if os.path.exists(workspace_path):
+        # Fix permissions before rmtree — Docker may create read-only files
+        for root, dirs, files in os.walk(workspace_path):
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    os.chmod(fp, 0o666)
+                except OSError:
+                    pass
+            for d in dirs:
+                dp = os.path.join(root, d)
+                try:
+                    os.chmod(dp, 0o777)
+                except OSError:
+                    pass
         shutil.rmtree(workspace_path)
 
     workspace = LocalWorkspace(root=workspace_path)

@@ -38,6 +38,12 @@ class WorkspaceDB:
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.row_factory = sqlite3.Row
         self._create_tables()
+        # Ensure DB file is writable (Docker may change permissions)
+        try:
+            import os
+            os.chmod(str(self._db_path), 0o666)
+        except OSError:
+            pass
 
     # ── Schema ──────────────────────────────────────────────────────────────────
 

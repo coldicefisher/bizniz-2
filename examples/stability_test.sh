@@ -19,7 +19,7 @@ for i in $(seq 1 $NUM_RUNS); do
 
     if [ $EXIT_CODE -eq 0 ]; then
         # Check if all issues resolved by looking at the summary
-        if grep -q "failed: 0" "/tmp/stability_run_${i}.log" 2>/dev/null || grep -q "'failed': 0" "/tmp/stability_run_${i}.log" 2>/dev/null; then
+        if grep -q "0 failed" "/tmp/stability_run_${i}.log" 2>/dev/null || grep -q "failed: 0" "/tmp/stability_run_${i}.log" 2>/dev/null; then
             RESULTS+=("Run $i: PASS (${DURATION}s)")
             echo ""
             echo ">>> Run $i: PASS (${DURATION}s)"
