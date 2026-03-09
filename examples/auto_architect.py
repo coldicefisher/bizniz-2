@@ -18,7 +18,14 @@ Requirements:
     - OPENAI_API_KEY environment variable set (or .env file)
     - Docker daemon running
 """
+import os
+import sys
+import time
+import subprocess
 from pathlib import Path
+
+# Force unbuffered output so progress is visible in real time
+os.environ["PYTHONUNBUFFERED"] = "1"
 
 from dotenv import load_dotenv
 
@@ -49,6 +56,46 @@ PROBLEM_STATEMENT = (
     "and basic validation (no double-booking the same time slot). "
     "Use in-memory storage for now (no database required)."
 )
+
+
+_start_time = time.time()
+
+
+def log(msg: str):
+    """Timestamped, flush-safe logging."""
+    elapsed = time.time() - _start_time
+    print(f"  [{elapsed:6.1f}s] {msg}", flush=True)
+
+
+def preflight_checks():
+    """Validate prerequisites before running the pipeline."""
+    errors = []
+
+    # Check API key
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        errors.append("OPENAI_API_KEY environment variable is not set. Add it to .env or export it.")
+
+    # Check Docker daemon
+    try:
+        result = subprocess.run(
+            ["docker", "info"], capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            errors.append("Docker daemon is not running. Start Docker and try again.")
+    except FileNotFoundError:
+        errors.append("Docker is not installed. Install Docker and try again.")
+    except subprocess.TimeoutExpired:
+        errors.append("Docker daemon is not responding (timed out).")
+
+    if errors:
+        print("\n  PREFLIGHT FAILED:", flush=True)
+        for err in errors:
+            print(f"    - {err}", flush=True)
+        print(flush=True)
+        sys.exit(1)
+
+    log("Preflight OK (API key set, Docker running)")
 
 
 def _make_orchestrator(config, workspace, on_status_message=None, suggested_model=None, image_name=None):
@@ -107,14 +154,25 @@ def _make_engineer(config, workspace, on_status_message=None, image_name=None):
 
 if __name__ == "__main__":
 
+    print(f"\n{'='*60}", flush=True)
+    print(f"  Auto Architect", flush=True)
+    print(f"{'='*60}\n", flush=True)
+
+    preflight_checks()
+
+    log("Loading config...")
     config = BiznizConfig.find_and_load()
+    log(f"Config: default_model={config.default_model}, engineer_model={config.engineer_model}, max_iterations={config.max_iterations}")
+    log(f"Model progression: {config.models}")
+
+    log("Creating architect client...")
     architect_client = config.make_client(model="gpt-4o")
+    log("Architect client ready")
 
     project_name = "Pet Groomer"
     project_parent = Path.home() / "bizniz_projects"
     project_parent.mkdir(parents=True, exist_ok=True)
 
-    # Root workspace for the architect (temporary, used for AI calls)
     root_workspace = LocalWorkspace.from_name(project_name, parent=project_parent)
 
     architect = AutoArchitect(
@@ -125,24 +183,34 @@ if __name__ == "__main__":
             config, ws, on_status_message=on_status_message, image_name=image_name,
         ),
         project_parent=str(project_parent),
-        on_status_message=lambda msg: print(f"  {msg}"),
+        on_status_message=log,
     )
 
-    print(f"\n{'='*60}")
-    print(f"  Auto Architect: {project_name}")
-    print(f"{'='*60}\n")
+    log("Starting build pipeline...")
 
-    result = architect.build(PROBLEM_STATEMENT, project_name)
+    try:
+        result = architect.build(PROBLEM_STATEMENT, project_name)
+    except KeyboardInterrupt:
+        log("Interrupted by user")
+        sys.exit(130)
+    except Exception as e:
+        log(f"PIPELINE FAILED: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
-    print(f"\n{'='*60}")
-    print(f"  Results")
-    print(f"{'='*60}")
-    print(f"  Project: {result.project_name}")
-    print(f"  Project root: {result.project_root}")
-    print(f"  Services: {len(result.architecture.services)}")
-    print(f"  Docker compose: {result.docker_compose_path}")
-    print()
+    print(f"\n{'='*60}", flush=True)
+    print(f"  Results", flush=True)
+    print(f"{'='*60}", flush=True)
+    print(f"  Project: {result.project_name}", flush=True)
+    print(f"  Project root: {result.project_root}", flush=True)
+    print(f"  Services: {len(result.architecture.services)}", flush=True)
+    print(f"  Docker compose: {result.docker_compose_path}", flush=True)
+    print(flush=True)
     for sr in result.service_results:
         status_str = "PASS" if sr.success else "FAIL"
-        print(f"  {sr.service_name}: {status_str} ({sr.issues_passed}/{sr.issues_total} issues)")
-    print()
+        print(f"  {sr.service_name}: {status_str} ({sr.issues_passed}/{sr.issues_total} issues)", flush=True)
+
+    elapsed = time.time() - _start_time
+    print(f"\n  Total elapsed: {elapsed:.0f}s", flush=True)
+    print(flush=True)

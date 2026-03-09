@@ -5,6 +5,7 @@ from typing import Optional, Callable, List
 from bizniz.clients.chatgpt.messages import Message
 from bizniz.clients.chatgpt.types.response_format import ResponseFormat
 from bizniz.clients.base_ai_client import BaseAIClient
+from bizniz.clients.errors import AIInsufficientFunds
 from bizniz.autocoder.prompts.generate_prompts import GENERATE_SYSTEM_INSTRUCTIONS_PROMPT, GENERATE_RETURN_FORMAT_PROMPT
 from bizniz.autocoder.prompts.repair_prompt import REPAIR_PROMPT
 from bizniz.autocoder.prompts.generate_multi_prompt import GENERATE_MULTI_SYSTEM_PROMPT, GENERATE_MULTI_USER_PROMPT_TEMPLATE
@@ -504,23 +505,33 @@ class Autocoder(BaseAIAgent):
         """
         Send a multi-file generation prompt and return a list of FileChange objects.
         """
+        import time
         attempts = 3
         last_error = None
         text = None
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
 
         self.add_messages_to_history([Message(role="user", content=user_prompt)])
 
         for attempt in range(1, attempts + 1):
             try:
+                log(f"Autocoder: generate_multi AI call (attempt {attempt}/{attempts})...")
+                t0 = time.time()
                 text, job_id, output_messages = self._client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=GeneratePromptSchema,
                 )
+                elapsed = time.time() - t0
+                log(f"Autocoder: generate_multi AI responded in {elapsed:.1f}s ({len(text or '')} chars)")
                 self.add_messages_to_history(output_messages)
 
                 if not text or not text.strip():
                     last_error = "Empty response from AI"
+                    log(f"Autocoder: empty response on attempt {attempt}")
                     continue
 
                 text = self.clean_llm_json(text)
@@ -529,12 +540,22 @@ class Autocoder(BaseAIAgent):
                 changes = self._parse_changes(json_response)
                 if not changes:
                     last_error = "AI returned no file changes"
+                    log(f"Autocoder: no changes in response on attempt {attempt}")
                     continue
 
                 return changes
 
+            except AutocoderBadAIResponseError:
+                raise
+            except AIInsufficientFunds:
+                raise
             except Exception as e:
                 last_error = e
+                log(f"Autocoder: generate attempt {attempt} failed — {type(e).__name__}: {str(e)[:200]}")
+                if "Expecting" in str(e) or "json" in str(e).lower():
+                    log("Autocoder: clearing message history due to parse error (prevent token bloat)")
+                    self.clear_message_history()
+                    self.add_messages_to_history([Message(role="user", content=user_prompt)])
                 continue
 
         raise AutocoderBadAIResponseError(
@@ -546,23 +567,33 @@ class Autocoder(BaseAIAgent):
         """
         Send a multi-file repair prompt and return a list of FileChange objects.
         """
+        import time
         attempts = 3
         last_error = None
         text = None
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
 
         self.add_messages_to_history([Message(role="user", content=repair_prompt)])
 
         for attempt in range(1, attempts + 1):
             try:
+                log(f"Autocoder: repair_multi AI call (attempt {attempt}/{attempts})...")
+                t0 = time.time()
                 text, job_id, output_messages = self._client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=RepairPromptSchema,
                 )
+                elapsed = time.time() - t0
+                log(f"Autocoder: repair_multi AI responded in {elapsed:.1f}s ({len(text or '')} chars)")
                 self.add_messages_to_history(output_messages)
 
                 if not text or not text.strip():
                     last_error = "Empty response from AI"
+                    log(f"Autocoder: empty repair response on attempt {attempt}")
                     continue
 
                 text = self.clean_llm_json(text)
@@ -571,12 +602,23 @@ class Autocoder(BaseAIAgent):
                 changes = self._parse_changes(json_response)
                 if not changes:
                     last_error = "AI returned no file changes during repair"
+                    log(f"Autocoder: no changes in repair response on attempt {attempt}")
                     continue
 
                 return changes
 
+            except AutocoderBadAIResponseError:
+                raise
+            except AIInsufficientFunds:
+                raise
             except Exception as e:
                 last_error = e
+                log(f"Autocoder: repair attempt {attempt} failed — {type(e).__name__}: {str(e)[:200]}")
+                # Clear history on JSON parse failure to prevent token bloat on retry
+                if "Expecting" in str(e) or "json" in str(e).lower():
+                    log("Autocoder: clearing message history due to parse error (prevent token bloat)")
+                    self.clear_message_history()
+                    self.add_messages_to_history([Message(role="user", content=repair_prompt)])
                 continue
 
         raise AutocoderBadAIResponseError(

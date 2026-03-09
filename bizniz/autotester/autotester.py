@@ -3,6 +3,7 @@ from typing import Optional, Callable, List
 
 from bizniz.base_ai_agent import BaseAIAgent
 from bizniz.clients.base_ai_client import BaseAIClient
+from bizniz.clients.errors import AIInsufficientFunds
 from bizniz.clients.chatgpt.messages import Message
 from bizniz.clients.chatgpt.types.response_format import ResponseFormat
 from bizniz.environment.base_environment import BaseExecutionEnvironment
@@ -313,23 +314,33 @@ class Autotester(BaseAIAgent):
         """
         Send a multi-file test generation prompt and return a list of GeneratedTestFile objects.
         """
+        import time
         attempts = 3
         last_error = None
         text = None
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
 
         self.add_messages_to_history([Message(role="user", content=user_prompt)])
 
         for attempt in range(1, attempts + 1):
             try:
+                log(f"Autotester: generate_multi AI call (attempt {attempt}/{attempts})...")
+                t0 = time.time()
                 text, job_id, output_messages = self._client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=AutotesterSchema,
                 )
+                elapsed = time.time() - t0
+                log(f"Autotester: AI responded in {elapsed:.1f}s ({len(text or '')} chars)")
                 self.add_messages_to_history(output_messages)
 
                 if not text or not text.strip():
                     last_error = "Empty response from AI"
+                    log(f"Autotester: empty response on attempt {attempt}")
                     continue
 
                 text = self.clean_llm_json(text)
@@ -338,6 +349,7 @@ class Autotester(BaseAIAgent):
                 test_files_raw = json_response.get("test_files", [])
                 if not test_files_raw:
                     last_error = "AI returned no test files"
+                    log(f"Autotester: no test files in response on attempt {attempt}")
                     continue
 
                 result = []
@@ -354,12 +366,20 @@ class Autotester(BaseAIAgent):
 
                 if not result:
                     last_error = "AI returned empty test files"
+                    log(f"Autotester: empty test content on attempt {attempt}")
                     continue
 
                 return result
 
+            except AIInsufficientFunds:
+                raise
             except Exception as e:
                 last_error = e
+                log(f"Autotester: attempt {attempt} failed — {type(e).__name__}: {str(e)[:200]}")
+                if "Expecting" in str(e) or "json" in str(e).lower():
+                    log("Autotester: clearing message history due to parse error")
+                    self.clear_message_history()
+                    self.add_messages_to_history([Message(role="user", content=user_prompt)])
                 continue
 
         raise AutotesterBadAIResponseError(

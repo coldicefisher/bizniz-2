@@ -29,6 +29,7 @@ Safeguards
 
 import hashlib
 import re
+import time
 from pathlib import Path
 from typing import Optional, Callable, List
 
@@ -386,7 +387,10 @@ class CodingOrchestrator:
                 str(self._workspace.path(tf)) for tf in current_test_files.keys()
             ]
             call_spec = ExecutionCallSpec(symbol="pytest", args=test_abs_paths)
+            t0 = time.time()
             eval_result = self._test_environment.execute(code="", call_spec=call_spec)
+            test_elapsed = time.time() - t0
+            log(f"Orchestrator: tests {'PASSED' if eval_result.success else 'FAILED'} in {test_elapsed:.1f}s")
 
             if eval_result.success:
                 # Check for regressions against baseline
@@ -655,6 +659,7 @@ class CodingOrchestrator:
         """TDD: generate tests first (no source code), then code to pass them."""
         # Step 1: Generate tests from the spec only (no source code)
         log(f"Orchestrator [TDD]: generating {len(test_files)} test file(s) from spec...")
+        t0 = time.time()
         test_prompt = prompt + extra_context
         test_result = self._autotester.generate_multi(
             problem_statement=test_prompt,
@@ -663,6 +668,7 @@ class CodingOrchestrator:
             architecture_context=architecture_context,
         )
         current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+        log(f"Orchestrator [TDD]: test generation done in {time.time() - t0:.1f}s")
 
         # Step 2: Generate code to pass the tests
         log(f"Orchestrator [TDD]: generating code for {len(target_files)} file(s) to pass tests...")
@@ -674,6 +680,7 @@ class CodingOrchestrator:
             f"{prompt}{extra_context}\n\n"
             f"YOUR CODE MUST PASS THESE TESTS:\n{test_context}"
         )
+        t0 = time.time()
         code_result = self._autocoder.generate_multi(
             issue_description=code_prompt,
             target_files=target_files,
@@ -681,6 +688,7 @@ class CodingOrchestrator:
             existing_code=existing_code,
         )
         current_files = {ch.filepath: ch.code for ch in code_result.changes}
+        log(f"Orchestrator [TDD]: code generation done in {time.time() - t0:.1f}s ({len(current_files)} files)")
         return current_files, current_test_files
 
     def _generate_code_first(
@@ -690,6 +698,7 @@ class CodingOrchestrator:
         """Code-first: generate code, then tests based on the code."""
         # Step 1: Generate code
         log(f"Orchestrator [CODE_FIRST]: generating code for {len(target_files)} file(s)...")
+        t0 = time.time()
         code_result = self._autocoder.generate_multi(
             issue_description=prompt + extra_context,
             target_files=target_files,
@@ -697,9 +706,11 @@ class CodingOrchestrator:
             existing_code=existing_code,
         )
         current_files = {ch.filepath: ch.code for ch in code_result.changes}
+        log(f"Orchestrator [CODE_FIRST]: code generation done in {time.time() - t0:.1f}s ({len(current_files)} files)")
 
         # Step 2: Generate tests based on the code
         log(f"Orchestrator [CODE_FIRST]: generating {len(test_files)} test file(s)...")
+        t0 = time.time()
         test_result = self._autotester.generate_multi(
             problem_statement=prompt + extra_context,
             test_files=test_files,
@@ -707,6 +718,7 @@ class CodingOrchestrator:
             architecture_context=architecture_context,
         )
         current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+        log(f"Orchestrator [CODE_FIRST]: test generation done in {time.time() - t0:.1f}s")
         return current_files, current_test_files
 
     # ── Multi-file failure handling ───────────────────────────────────────────
@@ -987,16 +999,22 @@ class CodingOrchestrator:
                 return current_files, new_test_files, 0, None
 
         # Not stalled — standard repair
-        log("Orchestrator: repairing code across files...")
-        all_files = {**current_files}
-        for fp, tests in current_test_files.items():
-            all_files[fp] = tests
+        # Only send files relevant to the failure (not ALL files)
+        relevant_files = _extract_relevant_files(
+            failure_output, current_files, current_test_files,
+        )
+        log(f"Orchestrator: repairing {len(relevant_files)} relevant file(s) (of {len(current_files) + len(current_test_files)} total)...")
 
+        # Truncate error output to prevent massive prompts that cause JSON parse failures
+        truncated_error = _truncate_error(failure_output)
+
+        t0 = time.time()
         repaired = self._autocoder.repair_multi(
-            current_files=all_files,
-            error_message=failure_output,
+            current_files=relevant_files,
+            error_message=truncated_error,
             architecture_context=architecture_context,
         )
+        log(f"Orchestrator: repair done in {time.time() - t0:.1f}s")
 
         new_files, new_test_files = self._apply_multi_repair(
             repaired, current_files, current_test_files,
@@ -1493,6 +1511,80 @@ def _build_failure_message_multi(eval_result, test_files: dict) -> str:
         for fp, tests in test_files.items():
             parts.append(f"── {fp} ──\n{tests}")
     return "\n".join(parts) or "Tests failed with no additional output."
+
+
+def _extract_relevant_files(
+    failure_output: str,
+    current_files: dict,
+    current_test_files: dict,
+) -> dict:
+    """
+    Extract only the files mentioned in the failure output (plus their imports).
+    Returns a dict of filepath → content for the repair prompt.
+    Falls back to all files if we can't determine relevance.
+    """
+    mentioned = set()
+
+    # Find file paths mentioned in the error output
+    all_paths = set(current_files.keys()) | set(current_test_files.keys())
+    for path in all_paths:
+        # Check if the file path or module name appears in the error
+        if path in failure_output:
+            mentioned.add(path)
+        # Also check module-style references (e.g., "pet_groomer.models" for "pet_groomer/models.py")
+        module_path = path.replace("/", ".").replace(".py", "")
+        if module_path in failure_output:
+            mentioned.add(path)
+
+    # If no files were mentioned, send all files (fallback)
+    if not mentioned:
+        all_files = {**current_files}
+        for fp, tests in current_test_files.items():
+            all_files[fp] = tests
+        return all_files
+
+    # For each mentioned test file, also include the code files it likely imports
+    for test_fp in list(mentioned):
+        if test_fp in current_test_files:
+            test_content = current_test_files[test_fp]
+            # Find imports from the test file that reference our code files
+            for code_fp in current_files:
+                module_name = code_fp.replace("/", ".").replace(".py", "")
+                # Check if the test file imports from this module
+                base_name = module_name.split(".")[-1]
+                if base_name in test_content:
+                    mentioned.add(code_fp)
+
+    # For each mentioned code file, include the test files that test it
+    for code_fp in list(mentioned):
+        if code_fp in current_files:
+            base_name = code_fp.replace("/", ".").replace(".py", "").split(".")[-1]
+            for test_fp, test_content in current_test_files.items():
+                if base_name in test_content:
+                    mentioned.add(test_fp)
+
+    # Build result dict
+    relevant = {}
+    for fp in mentioned:
+        if fp in current_files:
+            relevant[fp] = current_files[fp]
+        elif fp in current_test_files:
+            relevant[fp] = current_test_files[fp]
+
+    return relevant
+
+
+def _truncate_error(error_output: str, max_chars: int = 8000) -> str:
+    """Truncate error output to prevent massive prompts that cause AI JSON parse failures."""
+    if len(error_output) <= max_chars:
+        return error_output
+    # Keep the first part (error summary) and last part (most relevant failures)
+    half = max_chars // 2
+    return (
+        error_output[:half]
+        + f"\n\n... [truncated {len(error_output) - max_chars} chars] ...\n\n"
+        + error_output[-half:]
+    )
 
 
 def _build_failure_message(eval_result, test_code: str = None) -> str:

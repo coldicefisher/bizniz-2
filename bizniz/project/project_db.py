@@ -114,7 +114,15 @@ class ProjectDB:
         cur = self._conn.execute(
             """INSERT INTO services
                (name, service_type, framework, language, workspace_path, image_name, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(name) DO UPDATE SET
+                   service_type = excluded.service_type,
+                   framework = excluded.framework,
+                   language = excluded.language,
+                   workspace_path = excluded.workspace_path,
+                   image_name = excluded.image_name,
+                   status = 'open',
+                   updated_at = excluded.updated_at""",
             (name, service_type, framework, language, workspace_path, image_name, now, now),
         )
         self._conn.commit()

@@ -8,6 +8,7 @@ then dispatches a CodingOrchestrator for each issue.
 """
 
 import json
+import time
 from typing import Optional, Callable, List
 
 from bizniz.base_ai_agent import BaseAIAgent
@@ -659,27 +660,39 @@ class AutoEngineer(BaseAIAgent):
         last_error = None
         text = None
 
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
         self.clear_message_history()
         self.add_messages_to_history([Message(role="user", content=user_prompt)])
 
         for attempt in range(1, attempts + 1):
             try:
+                log(f"AutoEngineer: AI plan call (attempt {attempt}/{attempts})...")
+                t0 = time.time()
                 text, job_id, output_messages = self._client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=ArchitecturePlanSchema,
                 )
+                elapsed = time.time() - t0
+                log(f"AutoEngineer: AI plan responded in {elapsed:.1f}s ({len(text or '')} chars)")
                 self.add_messages_to_history(output_messages)
 
                 if not text or not text.strip():
                     last_error = "Empty response from AI"
+                    log(f"AutoEngineer: empty plan response on attempt {attempt}")
                     continue
 
                 text = self.clean_llm_json(text)
                 return json.loads(text)
 
+            except AIInsufficientFunds:
+                raise
             except Exception as e:
                 last_error = e
+                log(f"AutoEngineer: plan attempt {attempt} failed — {type(e).__name__}: {e}")
                 continue
 
         raise AutoEngineerBadAIResponseError(
@@ -826,24 +839,36 @@ class AutoEngineer(BaseAIAgent):
 
         self.add_messages_to_history([Message(role="user", content=user_prompt)])
 
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
         for attempt in range(1, attempts + 1):
             try:
+                log(f"AutoEngineer: AI analysis call (attempt {attempt}/{attempts})...")
+                t0 = time.time()
                 text, job_id, output_messages = self._client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=AutoEngineerSchema,
                 )
+                elapsed = time.time() - t0
+                log(f"AutoEngineer: AI responded in {elapsed:.1f}s ({len(text or '')} chars)")
                 self.add_messages_to_history(output_messages)
 
                 if not text or not text.strip():
                     last_error = "Empty response from AI"
+                    log(f"AutoEngineer: empty response on attempt {attempt}")
                     continue
 
                 text = self.clean_llm_json(text)
                 return json.loads(text)
 
+            except AIInsufficientFunds:
+                raise
             except Exception as e:
                 last_error = e
+                log(f"AutoEngineer: attempt {attempt} failed — {type(e).__name__}: {e}")
                 continue
 
         raise AutoEngineerBadAIResponseError(

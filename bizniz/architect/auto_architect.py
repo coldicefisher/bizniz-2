@@ -24,6 +24,7 @@ Project structure:
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional, Callable, List
 
@@ -289,20 +290,29 @@ class AutoArchitect(BaseAIAgent):
         attempts = self.max_retries
         last_error = None
 
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
         self.clear_message_history()
         self.add_messages_to_history([Message(role="user", content=user_prompt)])
 
         for attempt in range(1, attempts + 1):
             try:
+                log(f"AutoArchitect: AI decomposition call (attempt {attempt}/{attempts})...")
+                t0 = time.time()
                 text, job_id, output_messages = self._client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=AutoArchitectSchema,
                 )
+                elapsed = time.time() - t0
+                log(f"AutoArchitect: AI responded in {elapsed:.1f}s ({len(text or '')} chars)")
                 self.add_messages_to_history(output_messages)
 
                 if not text or not text.strip():
                     last_error = "Empty response from AI"
+                    log(f"AutoArchitect: empty response on attempt {attempt}")
                     continue
 
                 text = self.clean_llm_json(text)
@@ -312,6 +322,7 @@ class AutoArchitect(BaseAIAgent):
                 raise
             except Exception as e:
                 last_error = e
+                log(f"AutoArchitect: attempt {attempt} failed — {type(e).__name__}: {e}")
                 continue
 
         raise AutoArchitectBadAIResponseError(
@@ -376,18 +387,30 @@ class AutoArchitect(BaseAIAgent):
 
     def _build_docker_image(self, service: ServiceDefinition, workspace, image_tag: str):
         """Build the Docker image for a service."""
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
         dockerfile_path = workspace.path("Dockerfile")
         if not dockerfile_path.exists():
             raise FileNotFoundError(f"Dockerfile not found at {dockerfile_path}")
 
+        log(f"AutoArchitect: docker build {image_tag} (from {dockerfile_path})...")
+        t0 = time.time()
         proc = subprocess.run(
             ["docker", "build", "-t", image_tag, "-f", str(dockerfile_path), str(workspace.root)],
             capture_output=True,
             text=True,
             timeout=300,
         )
+        elapsed = time.time() - t0
         if proc.returncode != 0:
+            log(f"AutoArchitect: docker build FAILED in {elapsed:.1f}s")
+            # Log first few lines of stderr for visibility
+            stderr_preview = proc.stderr[:300] if proc.stderr else "(no stderr)"
+            log(f"AutoArchitect: build error: {stderr_preview}")
             raise RuntimeError(f"Docker build failed: {proc.stderr[:500]}")
+        log(f"AutoArchitect: docker build OK in {elapsed:.1f}s")
 
     @staticmethod
     def _build_service_prompt(

@@ -74,10 +74,13 @@ def test_update_service_image(db):
     assert row["image_name"] == "api:v2"
 
 
-def test_service_name_unique(db):
+def test_service_name_upsert(db):
     db.save_service("api", "backend", "flask", "python", "/tmp/api")
-    with pytest.raises(Exception):
-        db.save_service("api", "backend", "django", "python", "/tmp/api2")
+    db.save_service("api", "backend", "django", "python", "/tmp/api2")
+    row = db.get_service("api")
+    assert row["framework"] == "django"
+    assert row["workspace_path"] == "/tmp/api2"
+    assert row["status"] == "open"
 
 
 # ── Architecture Snapshots ──────────────────────────────────────────────────────
