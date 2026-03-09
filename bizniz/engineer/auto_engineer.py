@@ -17,7 +17,8 @@ from bizniz.clients.chatgpt.types.response_format import ResponseFormat
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-from bizniz.clients.chatgpt.errors import OpenAIInsufficientFunds
+from bizniz.orchestrator.strategy import CodingStrategy
+from bizniz.clients.errors import AIInsufficientFunds
 from bizniz.orchestrator.types import OrchestratorResult, OrchestratorMaxIterationsError
 
 from bizniz.engineer.types import (
@@ -178,11 +179,26 @@ class AutoEngineer(BaseAIAgent):
         )
         return analysis
 
-    def dispatch(self, issue_id: int) -> OrchestratorResult:
+    def dispatch(
+        self,
+        issue_id: int,
+        workspace_context: Optional[dict] = None,
+    ) -> OrchestratorResult:
         """
         Load an issue from the DB and run the CodingOrchestrator for it.
-        Uses run_multi() for multi-file issues, run() for single-file.
-        Updates issue status: open → in_progress on start, → closed on success.
+
+        Retry strategies on failure:
+        1. TDD (default) — tests first, fix code only
+        2. Strategy flip — if TDD fails, retry with CODE_FIRST
+        3. Re-prompt — rewrite issue description using failure context
+        4. Decompose — break into sub-issues and dispatch each
+        5. Scope reduction — simplify and retry
+
+        Parameters
+        ----------
+        workspace_context:
+            Optional dict of existing workspace files {filepath: content}
+            from previously resolved issues (cross-issue learning).
         """
 
         def log(msg: str):
@@ -211,70 +227,149 @@ class AutoEngineer(BaseAIAgent):
             except Exception:
                 pass
 
+        # ── Attempt 1: TDD (default) ─────────────────────────────────────────
+        result = self._run_orchestrator(
+            row=row,
+            target_files=target_files,
+            test_files=test_files,
+            arch_context=arch_context,
+            suggested_model=suggested_model,
+            strategy=CodingStrategy.TDD,
+            workspace_context=workspace_context,
+            log=log,
+        )
+
+        if result.success:
+            return self._finalize_dispatch(issue_id, result, log)
+
+        # ── Attempt 2: Flip to CODE_FIRST ────────────────────────────────────
+        log(f"AutoEngineer: issue #{issue_id} failed with TDD — retrying with CODE_FIRST...")
+        result = self._run_orchestrator(
+            row=row,
+            target_files=target_files,
+            test_files=test_files,
+            arch_context=arch_context,
+            suggested_model=suggested_model,
+            strategy=CodingStrategy.CODE_FIRST,
+            workspace_context=workspace_context,
+            log=log,
+        )
+
+        if result.success:
+            return self._finalize_dispatch(issue_id, result, log)
+
+        # ── Attempt 3: Re-prompt with failure context ────────────────────────
+        log(f"AutoEngineer: issue #{issue_id} failed with CODE_FIRST — re-prompting...")
+        reprompted = self._reprompt_issue(row, result, log)
+        if reprompted:
+            result = self._run_orchestrator(
+                row=row,
+                target_files=target_files,
+                test_files=test_files,
+                arch_context=arch_context,
+                suggested_model=suggested_model,
+                strategy=CodingStrategy.TDD,
+                workspace_context=workspace_context,
+                log=log,
+                prompt_override=reprompted,
+            )
+            if result.success:
+                return self._finalize_dispatch(issue_id, result, log)
+
+        # ── Attempt 4: Scope reduction ───────────────────────────────────────
+        log(f"AutoEngineer: issue #{issue_id} — trying scope reduction...")
+        reduced = self._reduce_scope(row, result, log)
+        if reduced:
+            result = self._run_orchestrator(
+                row=row,
+                target_files=target_files,
+                test_files=test_files,
+                arch_context=arch_context,
+                suggested_model=suggested_model,
+                strategy=CodingStrategy.TDD,
+                workspace_context=workspace_context,
+                log=log,
+                prompt_override=reduced,
+            )
+            if result.success:
+                return self._finalize_dispatch(issue_id, result, log)
+
+        # All attempts failed
+        return self._finalize_dispatch(issue_id, result, log)
+
+    def _run_orchestrator(
+        self, row, target_files, test_files, arch_context,
+        suggested_model, strategy, workspace_context, log,
+        prompt_override=None,
+    ) -> OrchestratorResult:
+        """Run the orchestrator with the given strategy and return the result."""
         orchestrator = self._orchestrator_factory(suggested_model=suggested_model)
+        prompt = prompt_override or row["description"]
 
         try:
-            result = orchestrator.run_multi(
-                prompt=row["description"],
+            return orchestrator.run_multi(
+                prompt=prompt,
                 target_files=target_files,
                 test_files=test_files,
                 architecture_context=arch_context,
                 initial_model=suggested_model,
+                strategy=strategy,
+                workspace_context=workspace_context,
             )
         except OrchestratorMaxIterationsError:
-            log(f"AutoEngineer: issue #{issue_id} hit max iterations — marking as failed.")
-            result = OrchestratorResult(
+            log(f"AutoEngineer: hit max iterations with {strategy.value}")
+            return OrchestratorResult(
                 success=False,
                 changes=[],
                 test_files=[],
                 iterations=orchestrator._max_iterations,
+                strategy_used=strategy.value,
             )
-        except OpenAIInsufficientFunds as e:
-            log(f"AutoEngineer: API account has insufficient funds — stopping all processing.")
+        except AIInsufficientFunds:
+            log("AutoEngineer: API account has insufficient funds — stopping.")
             raise
         except Exception as e:
-            log(f"AutoEngineer: issue #{issue_id} crashed ({type(e).__name__}: {e}) — marking as failed.")
-            result = OrchestratorResult(
+            log(f"AutoEngineer: crashed ({type(e).__name__}: {e})")
+            return OrchestratorResult(
                 success=False,
                 changes=[],
                 test_files=[],
                 iterations=0,
+                strategy_used=strategy.value,
+                failure_context=str(e),
             )
 
+    def _finalize_dispatch(self, issue_id, result, log):
+        """Handle drift governance and update issue status."""
         # Handle drift detection via governance loop
-        if result.architecture_drift_detected and plan_row and result.drift_files:
-            log(f"AutoEngineer: architecture drift detected for issue #{issue_id} — "
-                f"{len(result.drift_files)} unplanned file(s)")
-
-            try:
-                plan_data = json.loads(plan_row["plan_json"])
-                plan = ArchitecturePlan(
-                    db_id=plan_row["id"],
-                    problem_id=row["problem_id"],
-                    **plan_data,
-                )
-
-                drift_items = [
-                    DriftItem(
-                        filepath=fp,
-                        drift_type="unplanned_file",
-                        reason=f"File created by autocoder but not in architecture plan",
+        if result.architecture_drift_detected and result.drift_files:
+            row = self._workspace.db.get_issue(issue_id)
+            plan_row = self._workspace.db.get_architecture_plan(row["problem_id"]) if row else None
+            if plan_row:
+                try:
+                    plan_data = json.loads(plan_row["plan_json"])
+                    plan = ArchitecturePlan(
+                        db_id=plan_row["id"],
+                        problem_id=row["problem_id"],
+                        **plan_data,
                     )
-                    for fp in result.drift_files
-                ]
-
-                decision = self.review_drift(plan, drift_items)
-
-                if decision.decision == "approve":
-                    log(f"AutoEngineer: drift approved — {decision.reason}")
-                elif decision.decision == "modify":
-                    log(f"AutoEngineer: plan modified to accommodate drift — {decision.reason}")
-                elif decision.decision == "reject":
-                    log(f"AutoEngineer: drift rejected — {decision.reason}")
-                    # On reject, mark issue as not fully resolved
-                    result.architecture_drift_detected = True
-            except Exception as e:
-                log(f"AutoEngineer: governance review failed — {e}")
+                    drift_items = [
+                        DriftItem(
+                            filepath=fp,
+                            drift_type="unplanned_file",
+                            reason="File created by autocoder but not in architecture plan",
+                        )
+                        for fp in result.drift_files
+                    ]
+                    decision = self.review_drift(plan, drift_items)
+                    if decision.decision == "approve":
+                        log(f"AutoEngineer: drift approved — {decision.reason}")
+                    elif decision.decision == "modify":
+                        log(f"AutoEngineer: plan modified — {decision.reason}")
+                    elif decision.decision == "reject":
+                        log(f"AutoEngineer: drift rejected — {decision.reason}")
+                except Exception as e:
+                    log(f"AutoEngineer: governance review failed — {e}")
 
         if result.success:
             self._workspace.db.close_issue(issue_id)
@@ -282,19 +377,85 @@ class AutoEngineer(BaseAIAgent):
         else:
             self._workspace.db.update_issue_status(issue_id, "open")
             log(f"AutoEngineer: issue #{issue_id} could not be resolved — reset to open.")
-
         return result
+
+    def _reprompt_issue(self, row, result, log) -> Optional[str]:
+        """Rewrite issue description using failure context."""
+        from bizniz.engineer.prompts.retry_prompts import REPROMPT_TEMPLATE
+        failure_context = result.failure_context or "No failure details available."
+        strategy_used = result.strategy_used or "unknown"
+
+        try:
+            prompt = REPROMPT_TEMPLATE.format(
+                title=row["title"],
+                description=row["description"],
+                failure_context=failure_context,
+                strategy_used=strategy_used,
+            )
+            text, _, _ = self._client.get_text(
+                messages=[Message(role="user", content=prompt)],
+                use_message_history=False,
+            )
+            if text and text.strip():
+                log(f"AutoEngineer: re-prompted issue — new description ({len(text)} chars)")
+                return text.strip()
+        except AIInsufficientFunds:
+            raise
+        except Exception as e:
+            log(f"AutoEngineer: re-prompting failed — {e}")
+        return None
+
+    def _reduce_scope(self, row, result, log) -> Optional[str]:
+        """Simplify issue to minimal scope using failure context."""
+        from bizniz.engineer.prompts.retry_prompts import SCOPE_REDUCTION_TEMPLATE
+
+        workspace_files = "\n".join(
+            f"- {f}" for f in self._workspace.list_relative_files()
+        ) or "(empty)"
+
+        failure_context = result.failure_context or "No failure details available."
+
+        try:
+            prompt = SCOPE_REDUCTION_TEMPLATE.format(
+                title=row["title"],
+                description=row["description"],
+                failure_context=failure_context,
+                workspace_files=workspace_files,
+            )
+            text, _, _ = self._client.get_text(
+                messages=[Message(role="user", content=prompt)],
+                use_message_history=False,
+            )
+            if text and text.strip():
+                log(f"AutoEngineer: reduced scope — new description ({len(text)} chars)")
+                return text.strip()
+        except AIInsufficientFunds:
+            raise
+        except Exception as e:
+            log(f"AutoEngineer: scope reduction failed — {e}")
+        return None
 
     def run(self, problem_statement: str) -> List[OrchestratorResult]:
         """
         Full pipeline: analyze the problem statement, then dispatch the
         CodingOrchestrator for every generated issue.
+
+        Uses cross-issue learning: working code from resolved issues
+        is passed as context to subsequent issues.
         """
         analysis = self.analyze(problem_statement)
         results = []
+        workspace_context = {}
+
         for issue in analysis.issues:
-            result = self.dispatch(issue.db_id)
+            result = self.dispatch(issue.db_id, workspace_context=workspace_context)
             results.append(result)
+
+            # Cross-issue learning: accumulate working code from resolved issues
+            if result.success and result.changes:
+                for change in result.changes:
+                    workspace_context[change.filepath] = change.code
+
         return results
 
     def close(self):
@@ -386,7 +547,7 @@ class AutoEngineer(BaseAIAgent):
             if self._on_status_message:
                 self._on_status_message(msg)
 
-        plan_json = plan.model_dump_json(indent=2)
+        plan_json = plan.json(indent=2)
 
         drift_parts = []
         for item in drift_items:
@@ -432,7 +593,7 @@ class AutoEngineer(BaseAIAgent):
         if decision.decision == "modify" and decision.plan_updates and plan.db_id:
             try:
                 updates = decision.plan_updates
-                current_data = json.loads(plan.model_dump_json())
+                current_data = json.loads(plan.json())
                 for key in ["namespaces", "domain_models", "modules", "dependencies"]:
                     if key in updates:
                         current_data.setdefault(key, []).extend(updates[key])

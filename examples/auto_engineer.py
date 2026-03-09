@@ -28,7 +28,6 @@ from bizniz.autocoder.autocoder import Autocoder
 from bizniz.autodebugger.autodebugger import Autodebugger
 from bizniz.agentic_debugger.agentic_debugger import AgenticDebugger
 from bizniz.autotester.autotester import Autotester
-from bizniz.deep_debugger.deep_debugger import DeepDebugger
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.engineer.auto_engineer import AutoEngineer
 from bizniz.config.bizniz_config import BiznizConfig
@@ -52,14 +51,6 @@ def make_orchestrator(client, workspace, config, suggested_model=None):
             workspace=workspace,
             environment=pytest_env,
             on_status_message=lambda msg: print(f"    [debugger] {msg}"),
-        )
-
-    def deep_debugger_factory():
-        """Create a DeepDebugger with its own fresh client instance."""
-        fresh_client = config.make_client()
-        return DeepDebugger(
-            client=fresh_client,
-            on_status_message=lambda msg: print(f"    [deep-debugger] {msg}"),
         )
 
     def client_factory(model_name):
@@ -90,7 +81,6 @@ def make_orchestrator(client, workspace, config, suggested_model=None):
         client=issue_client,
         client_factory=client_factory,
         debugger_factory=debugger_factory,
-        deep_debugger_factory=deep_debugger_factory,
         model_progression=config.make_model_progression(),
         max_iterations=config.max_iterations,
         on_status_message=lambda msg: print(f"    [orchestrator] {msg}"),

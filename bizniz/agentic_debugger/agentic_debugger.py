@@ -5,8 +5,8 @@ An agentic debugging agent that iteratively explores the codebase using tools
 (view_file, list_directory, run_tests) to diagnose test failures and optionally
 produce direct code fixes.
 
-Replaces both the Autodebugger (quick per-iteration diagnosis) and DeepDebugger
-(comprehensive stall diagnosis) with a single, more capable agent.
+Complements the Autodebugger (quick per-iteration diagnosis) with a more
+capable, exploratory agent for complex debugging scenarios.
 
 The debugger simulates tool calling via structured JSON responses — the LLM
 returns an action object per turn, the debugger executes it, and feeds the

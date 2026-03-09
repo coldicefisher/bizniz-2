@@ -8,7 +8,10 @@ when code repair stalls.
 from typing import List, Optional
 
 
-DEFAULT_PROGRESSION = ["gpt-4o-mini", "gpt-4o", "gpt-5"]
+DEFAULT_PROGRESSION = [
+    "gpt-4o-mini", "gpt-4o", "gpt-5",
+    "claude-sonnet", "claude-opus",
+]
 
 
 class ModelProgression:

@@ -17,10 +17,11 @@ def test_success_on_first_iteration(orchestrator, mock_autocoder, mock_autoteste
 
 def test_autocoder_process_called_with_prompt(orchestrator, mock_autocoder):
     orchestrator.run(prompt=PROMPT, code_filename="add.py", test_filename="test_add.py")
-    mock_autocoder.generate_only.assert_called_once_with(
-        prompt=PROMPT,
-        filename="add.py",
-    )
+    mock_autocoder.generate_only.assert_called_once()
+    call_kwargs = mock_autocoder.generate_only.call_args[1]
+    # In TDD mode, prompt includes test context
+    assert PROMPT in call_kwargs["prompt"]
+    assert call_kwargs["filename"] == "add.py"
 
 
 def test_autotester_process_from_prompt_called(orchestrator, mock_autotester):

@@ -19,7 +19,7 @@ def test_execution_environment_result_success():
     assert result.stdout == "Hello World\n"
     assert result.stderr == ""
 
-    dict_representation = result.model_dump(exclude_none=True)
+    dict_representation = result.dict(exclude_none=True)
 
     assert dict_representation == {
         "success": True,
@@ -53,7 +53,7 @@ def test_execution_environment_error_details():
     
     
 
-    dict_representation = error_details.model_dump()
+    dict_representation = error_details.dict()
 
     assert dict_representation == {
         "stage": "compile",

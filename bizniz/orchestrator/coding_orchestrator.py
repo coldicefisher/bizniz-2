@@ -4,27 +4,25 @@ CodingOrchestrator
 Iteratively generates code (via Autocoder) and tests (via Autotester), runs the
 tests, and repairs the code on failure until the tests pass or safeguards trigger.
 
-Features
---------
-- Autodebugger-driven diagnosis: determines whether to fix code or tests
-- Model escalation: starts with a cheap model, escalates to stronger models on stalls
-- Missing package detection: auto-installs packages and persists to workspace DB
-- Heuristic fallback when no autodebugger is provided
+Strategies
+----------
+- TDD (default): generate tests first from the spec, then code to pass them.
+  Debug loop fixes code only — tests are the source of truth.
+- CODE_FIRST: generate code first, then tests. Debug loop can fix either.
+  Used as a fallback when TDD fails.
 
-Iteration flow
---------------
-1.  Autocoder.generate_only(prompt, code_filename)  → generate initial code
-2.  Autotester.process_from_prompt(prompt, test_filename) → contract tests
+Iteration flow (TDD)
+---------------------
+1.  Autotester.generate_multi(prompt) → contract tests (no source code)
+2.  Autocoder.generate_multi(prompt + test_code) → generate code to pass tests
 3.  PytestEnvironment.execute(test_file) → run tests
 4.  If tests pass → done
-5.  If tests fail → Autodebugger.diagnose() → determine fix target
-6.  If fix_target is "code" → Autocoder.repair(code, diagnosis, code_filename)
-7.  If fix_target is "tests" → Autotester.process_from_prompt(enriched_prompt)
-8.  Repeat 3-7 until success or safeguards fire
+5.  If tests fail → repair code (tests are the spec, not modified)
+6.  Repeat 3-5 until success or safeguards fire
 
 Safeguards
 ----------
-- Stale loop: same code hash on two consecutive iterations → regenerate tests
+- Stale loop: same code hash on two consecutive iterations → escalate model
 - Model escalation: on stalls, switch to a stronger model
 - Max iterations cap → OrchestratorMaxIterationsError
 """
@@ -39,16 +37,16 @@ from bizniz.autodebugger.autodebugger import Autodebugger
 from bizniz.agentic_debugger.agentic_debugger import AgenticDebugger
 from bizniz.autotester.autotester import Autotester
 from bizniz.clients.base_ai_client import BaseAIClient
-from bizniz.deep_debugger.deep_debugger import DeepDebugger
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.environment.types import ExecutionCallSpec
 from bizniz.orchestrator.model_progression import ModelProgression
 from bizniz.orchestrator.stall_detector import StallDetector
 from bizniz.workspace.base_workspace import BaseWorkspace
 
-from bizniz.clients.chatgpt.errors import OpenAIInsufficientFunds
+from bizniz.clients.errors import AIInsufficientFunds
 from bizniz.autocoder.types import FileChange
 from bizniz.autotester.types import GeneratedTestFile
+from bizniz.orchestrator.strategy import CodingStrategy
 from bizniz.orchestrator.types import (
     OrchestratorResult,
     OrchestratorStalledError,
@@ -91,7 +89,6 @@ class CodingOrchestrator:
         autodebugger: Optional[Autodebugger] = None,
         client: Optional[BaseAIClient] = None,
         client_factory: Optional[Callable[[str], BaseAIClient]] = None,
-        deep_debugger_factory: Optional[Callable[[], DeepDebugger]] = None,
         debugger_factory: Optional[Callable[[], AgenticDebugger]] = None,
         model_progression: Optional[ModelProgression] = None,
         max_iterations: int = 20,
@@ -104,13 +101,12 @@ class CodingOrchestrator:
         self._workspace = workspace
         self._client = client
         self._client_factory = client_factory
-        self._deep_debugger_factory = deep_debugger_factory
         self._debugger_factory = debugger_factory
         self._model_progression = model_progression
         self._max_iterations = max_iterations
         self._on_status_message = on_status_message
         self._stall_detector = StallDetector()
-        self._deep_diagnosis_count = 0
+        self._stall_cycle_count = 0
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -119,14 +115,17 @@ class CodingOrchestrator:
         prompt: str,
         code_filename: str,
         test_filename: str,
+        strategy: CodingStrategy = CodingStrategy.TDD,
     ) -> OrchestratorResult:
         """
-        Run the full iterative coding + testing loop.
+        Run the full iterative coding + testing loop (single-file).
         """
 
         def log(msg: str):
             if self._on_status_message:
                 self._on_status_message(msg)
+
+        self._strategy = strategy
 
         # Load persisted packages from workspace DB into the Docker environment
         self._sync_environment_packages(log)
@@ -135,21 +134,39 @@ class CodingOrchestrator:
         current_code: Optional[str] = None
         stale_count: int = 0
 
-        # ── Iteration 1: fresh generate ────────────────────────────────────────
-        log("Orchestrator: generating initial code...")
-        code_result = self._autocoder.generate_only(
-            prompt=prompt,
-            filename=code_filename,
-        )
-        current_code = _extract_code(code_result.changes, code_filename) or self._workspace.read_file(code_filename)
+        if strategy == CodingStrategy.TDD:
+            # TDD: tests first, then code to pass them
+            log("Orchestrator [TDD]: generating contract tests from spec...")
+            test_result = self._autotester.process_from_prompt(
+                prompt=prompt,
+                output_path=test_filename,
+                code_filename=code_filename,
+            )
+            current_tests = _extract_tests(test_result.test_files, test_filename)
 
-        log("Orchestrator: generating contract tests from prompt...")
-        test_result = self._autotester.process_from_prompt(
-            prompt=prompt,
-            output_path=test_filename,
-            code_filename=code_filename,
-        )
-        current_tests = _extract_tests(test_result.test_files, test_filename)
+            log("Orchestrator [TDD]: generating code to pass tests...")
+            test_context = f"\n\nYOUR CODE MUST PASS THESE TESTS:\n```python\n{current_tests}\n```"
+            code_result = self._autocoder.generate_only(
+                prompt=prompt + test_context,
+                filename=code_filename,
+            )
+            current_code = _extract_code(code_result.changes, code_filename) or self._workspace.read_file(code_filename)
+        else:
+            # Code-first: code then tests
+            log("Orchestrator [CODE_FIRST]: generating initial code...")
+            code_result = self._autocoder.generate_only(
+                prompt=prompt,
+                filename=code_filename,
+            )
+            current_code = _extract_code(code_result.changes, code_filename) or self._workspace.read_file(code_filename)
+
+            log("Orchestrator [CODE_FIRST]: generating contract tests...")
+            test_result = self._autotester.process_from_prompt(
+                prompt=prompt,
+                output_path=test_filename,
+                code_filename=code_filename,
+            )
+            current_tests = _extract_tests(test_result.test_files, test_filename)
 
         # ── Test run + repair loop ─────────────────────────────────────────────
         for iteration in range(1, self._max_iterations + 1):
@@ -255,7 +272,7 @@ class CodingOrchestrator:
                         log=log,
                     )
                 )
-            except OpenAIInsufficientFunds:
+            except AIInsufficientFunds:
                 raise
             except Exception as e:
                 log(f"Orchestrator: repair failed ({type(e).__name__}: {e}), retrying...")
@@ -273,6 +290,8 @@ class CodingOrchestrator:
         test_files: List[str],
         architecture_context: str = "",
         initial_model: Optional[str] = None,
+        strategy: CodingStrategy = CodingStrategy.TDD,
+        workspace_context: Optional[dict] = None,
     ) -> OrchestratorResult:
         """
         Run the full iterative coding + testing loop for a multi-file issue.
@@ -287,11 +306,20 @@ class CodingOrchestrator:
             List of test file paths to generate.
         architecture_context:
             Formatted architecture plan string for context.
+        strategy:
+            CodingStrategy.TDD (default) — tests first, fix code only.
+            CodingStrategy.CODE_FIRST — code first, fix either.
+        workspace_context:
+            Optional dict of existing workspace files {filepath: content}
+            for cross-issue learning.
         """
 
         def log(msg: str):
             if self._on_status_message:
                 self._on_status_message(msg)
+
+        self._strategy = strategy
+        log(f"Orchestrator: using {strategy.value} strategy")
 
         # Set starting model if suggested by the engineer
         if initial_model and self._model_progression and self._client:
@@ -316,7 +344,8 @@ class CodingOrchestrator:
         total_collection_errors = 0
         regression_count = 0
         max_regression_retries = 3
-        self._deep_diagnosis_count = 0
+        self._stall_cycle_count = 0
+        last_failure_output = ""
 
         # ── Load existing code for files being modified ──────────────────────
         existing_code = {}
@@ -327,25 +356,27 @@ class CodingOrchestrator:
         # ── Snapshot passing tests before we start (regression baseline) ─────
         baseline_passing = self._get_passing_tests(log)
 
-        # ── Generate initial code ────────────────────────────────────────────
-        log(f"Orchestrator: generating code for {len(target_files)} file(s)...")
-        code_result = self._autocoder.generate_multi(
-            issue_description=prompt,
-            target_files=target_files,
-            architecture_context=architecture_context,
-            existing_code=existing_code,
-        )
-        current_files = {ch.filepath: ch.code for ch in code_result.changes}
+        # ── Build workspace context for cross-issue learning ─────────────────
+        extra_context = ""
+        if workspace_context:
+            ctx_parts = []
+            for fp, content in workspace_context.items():
+                ctx_parts.append(f"── {fp} ──\n```python\n{content}\n```")
+            extra_context = (
+                "\n\nEXISTING CODEBASE (from previously resolved issues):\n"
+                + "\n\n".join(ctx_parts) + "\n"
+            )
 
-        # ── Generate tests ───────────────────────────────────────────────────
-        log(f"Orchestrator: generating {len(test_files)} test file(s)...")
-        test_result = self._autotester.generate_multi(
-            problem_statement=prompt,
-            test_files=test_files,
-            source_code=current_files,
-            architecture_context=architecture_context,
-        )
-        current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+        if strategy == CodingStrategy.TDD:
+            current_files, current_test_files = self._generate_tdd(
+                prompt, target_files, test_files, architecture_context,
+                existing_code, extra_context, log,
+            )
+        else:
+            current_files, current_test_files = self._generate_code_first(
+                prompt, target_files, test_files, architecture_context,
+                existing_code, extra_context, log,
+            )
 
         # ── Test + repair loop ───────────────────────────────────────────────
         for iteration in range(1, self._max_iterations + 1):
@@ -362,7 +393,11 @@ class CodingOrchestrator:
                 regressions = self._detect_regressions(baseline_passing, log)
 
                 # Check for architecture drift
-                drift = self._detect_drift(target_files, code_result.changes)
+                actual_changes = [
+                    FileChange(filepath=fp, code=code, action="create")
+                    for fp, code in current_files.items()
+                ]
+                drift = self._detect_drift(target_files, actual_changes)
 
                 if regressions:
                     regression_count += 1
@@ -417,7 +452,7 @@ class CodingOrchestrator:
                                 log=log,
                             )
                         )
-                    except OpenAIInsufficientFunds:
+                    except AIInsufficientFunds:
                         raise
                     except Exception as e:
                         log(f"Orchestrator: regression repair failed ({type(e).__name__}: {e}), retrying...")
@@ -441,6 +476,7 @@ class CodingOrchestrator:
 
             # Tests failed
             failure_output = _build_failure_message_multi(eval_result, current_test_files)
+            last_failure_output = failure_output
             log(f"Orchestrator: tests failed (iteration {iteration})")
 
             # ── Missing package detection ─────────────────────────────────
@@ -484,7 +520,7 @@ class CodingOrchestrator:
                     # If escalation failed (models exhausted) AND we've had many total
                     # collection errors, use debugger to diagnose the structural issue
                     # and regenerate code from scratch
-                    has_debugger = self._debugger_factory is not None or self._deep_debugger_factory is not None
+                    has_debugger = self._debugger_factory is not None
                     if not escalated and total_collection_errors >= 6 and has_debugger:
                         try:
                             log("Orchestrator: persistent collection errors — running diagnosis...")
@@ -510,20 +546,6 @@ class CodingOrchestrator:
                                 diag_fix_plan = ad.fix_plan
                                 diag_approach = ad.suggested_approach
                                 diag_code_fixes = ad.code_fixes
-                            elif self._deep_debugger_factory is not None:
-                                deep_debugger = self._deep_debugger_factory()
-                                dd = deep_debugger.diagnose(
-                                    error_output=error_detail,
-                                    source_files=current_files,
-                                    test_files=current_test_files,
-                                    architecture_context=architecture_context,
-                                    repair_history=[],
-                                )
-                                log(f"Orchestrator: deep diagnosis — {dd.root_cause_category}, "
-                                    f"fix_target={dd.fix_target}")
-                                diag_text = dd.root_cause
-                                diag_fix_plan = dd.fix_plan
-                                diag_approach = dd.suggested_approach
 
                             # If agentic debugger produced direct fixes, apply them
                             if diag_code_fixes:
@@ -567,7 +589,7 @@ class CodingOrchestrator:
                             stale_count = 0
                             previous_code_hash = None
                             continue
-                        except OpenAIInsufficientFunds:
+                        except AIInsufficientFunds:
                             raise
                         except Exception as e:
                             log(f"Orchestrator: diagnosis regeneration failed ({type(e).__name__}: {e}), continuing...")
@@ -591,7 +613,7 @@ class CodingOrchestrator:
                         architecture_context=architecture_context,
                     )
                     current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
-                except OpenAIInsufficientFunds:
+                except AIInsufficientFunds:
                     raise
                 except Exception as e:
                     log(f"Orchestrator: test regeneration failed ({type(e).__name__}: {e}), retrying...")
@@ -615,7 +637,7 @@ class CodingOrchestrator:
                         log=log,
                     )
                 )
-            except OpenAIInsufficientFunds:
+            except AIInsufficientFunds:
                 raise
             except Exception as e:
                 log(f"Orchestrator: repair failed ({type(e).__name__}: {e}), retrying...")
@@ -623,6 +645,69 @@ class CodingOrchestrator:
         raise OrchestratorMaxIterationsError(
             f"Failed to produce passing tests after {self._max_iterations} iterations."
         )
+
+    # ── Generation strategies ─────────────────────────────────────────────────
+
+    def _generate_tdd(
+        self, prompt, target_files, test_files, architecture_context,
+        existing_code, extra_context, log,
+    ):
+        """TDD: generate tests first (no source code), then code to pass them."""
+        # Step 1: Generate tests from the spec only (no source code)
+        log(f"Orchestrator [TDD]: generating {len(test_files)} test file(s) from spec...")
+        test_prompt = prompt + extra_context
+        test_result = self._autotester.generate_multi(
+            problem_statement=test_prompt,
+            test_files=test_files,
+            source_code=None,  # TDD: no source code, tests define the contract
+            architecture_context=architecture_context,
+        )
+        current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+
+        # Step 2: Generate code to pass the tests
+        log(f"Orchestrator [TDD]: generating code for {len(target_files)} file(s) to pass tests...")
+        test_context = "\n\n".join(
+            f"── {fp} ──\n```python\n{tests}\n```"
+            for fp, tests in current_test_files.items()
+        )
+        code_prompt = (
+            f"{prompt}{extra_context}\n\n"
+            f"YOUR CODE MUST PASS THESE TESTS:\n{test_context}"
+        )
+        code_result = self._autocoder.generate_multi(
+            issue_description=code_prompt,
+            target_files=target_files,
+            architecture_context=architecture_context,
+            existing_code=existing_code,
+        )
+        current_files = {ch.filepath: ch.code for ch in code_result.changes}
+        return current_files, current_test_files
+
+    def _generate_code_first(
+        self, prompt, target_files, test_files, architecture_context,
+        existing_code, extra_context, log,
+    ):
+        """Code-first: generate code, then tests based on the code."""
+        # Step 1: Generate code
+        log(f"Orchestrator [CODE_FIRST]: generating code for {len(target_files)} file(s)...")
+        code_result = self._autocoder.generate_multi(
+            issue_description=prompt + extra_context,
+            target_files=target_files,
+            architecture_context=architecture_context,
+            existing_code=existing_code,
+        )
+        current_files = {ch.filepath: ch.code for ch in code_result.changes}
+
+        # Step 2: Generate tests based on the code
+        log(f"Orchestrator [CODE_FIRST]: generating {len(test_files)} test file(s)...")
+        test_result = self._autotester.generate_multi(
+            problem_statement=prompt + extra_context,
+            test_files=test_files,
+            source_code=current_files,
+            architecture_context=architecture_context,
+        )
+        current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+        return current_files, current_test_files
 
     # ── Multi-file failure handling ───────────────────────────────────────────
 
@@ -643,7 +728,7 @@ class CodingOrchestrator:
         Handle a test failure in multi-file mode.
 
         Uses StallDetector to track multiple stall signals. When stalled,
-        runs DeepDebugger for comprehensive diagnosis before escalating.
+        runs AgenticDebugger for comprehensive diagnosis before escalating.
 
         Returns (current_files, current_test_files, stale_count, previous_code_hash).
         """
@@ -654,10 +739,9 @@ class CodingOrchestrator:
 
         if self._stall_detector.is_stalled:
             log(f"Orchestrator: stall detected — {self._stall_detector.stall_reason}")
-            self._deep_diagnosis_count += 1
+            self._stall_cycle_count += 1
 
-            # Agentic or deep diagnosis before escalation
-            deep_diagnosis = None
+            # Agentic diagnosis before escalation
             agentic_diagnosis = None
             if self._debugger_factory is not None:
                 try:
@@ -673,30 +757,13 @@ class CodingOrchestrator:
                     log(f"Orchestrator: agentic diagnosis — {agentic_diagnosis.root_cause_category}, "
                         f"fix_target={agentic_diagnosis.fix_target} "
                         f"(confidence: {agentic_diagnosis.confidence})")
-                except OpenAIInsufficientFunds:
+                except AIInsufficientFunds:
                     raise
                 except Exception as e:
                     log(f"Orchestrator: agentic debugger failed ({type(e).__name__}: {e}), proceeding...")
-            elif self._deep_debugger_factory is not None:
-                try:
-                    log("Orchestrator: running deep diagnosis with fresh LLM instance...")
-                    deep_debugger = self._deep_debugger_factory()
-                    deep_diagnosis = deep_debugger.diagnose(
-                        error_output=failure_output,
-                        source_files=current_files,
-                        test_files=current_test_files,
-                        architecture_context=architecture_context,
-                        repair_history=self._stall_detector.repair_history,
-                    )
-                    log(f"Orchestrator: deep diagnosis — {deep_diagnosis.root_cause_category}, "
-                        f"fix_target={deep_diagnosis.fix_target}")
-                except OpenAIInsufficientFunds:
-                    raise
-                except Exception as e:
-                    log(f"Orchestrator: deep diagnosis failed ({e}), proceeding with escalation...")
 
             # Normalize diagnosis into a unified view
-            diagnosis = agentic_diagnosis or deep_diagnosis
+            diagnosis = agentic_diagnosis
             diagnosis_text = ""
             missing_packages = []
             fix_target = None
@@ -711,12 +778,6 @@ class CodingOrchestrator:
                 fix_plan = agentic_diagnosis.fix_plan
                 suggested_approach = agentic_diagnosis.suggested_approach
                 code_fixes = agentic_diagnosis.code_fixes
-            elif deep_diagnosis:
-                diagnosis_text = deep_diagnosis.root_cause
-                missing_packages = deep_diagnosis.missing_packages
-                fix_target = deep_diagnosis.fix_target
-                fix_plan = deep_diagnosis.fix_plan
-                suggested_approach = deep_diagnosis.suggested_approach
 
             # Install missing packages if identified
             if missing_packages:
@@ -739,10 +800,51 @@ class CodingOrchestrator:
             self._autocoder.clear_message_history()
             self._autotester.clear_message_history()
 
+            # Strategy flip: after 2 stall cycles in TDD, switch to code-first
+            # (and vice versa). This lets the agentic debugger modify tests too.
+            is_tdd = getattr(self, '_strategy', None) == CodingStrategy.TDD
+            if self._stall_cycle_count == 2 and is_tdd:
+                log("Orchestrator: flipping from TDD to CODE_FIRST — tests can now be modified")
+                self._strategy = CodingStrategy.CODE_FIRST
+                # Regenerate tests based on current code (now code-first style)
+                test_result = self._autotester.generate_multi(
+                    problem_statement=prompt + f"\n\nPrevious failures:\n{failure_output}",
+                    test_files=test_files,
+                    source_code=current_files,
+                    architecture_context=architecture_context,
+                )
+                new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+                return current_files, new_test_files, 0, None
+            elif self._stall_cycle_count == 2 and not is_tdd:
+                log("Orchestrator: flipping from CODE_FIRST to TDD — tests become the spec")
+                self._strategy = CodingStrategy.TDD
+                # Regenerate tests from spec (TDD style, no source code)
+                test_result = self._autotester.generate_multi(
+                    problem_statement=prompt,
+                    test_files=test_files,
+                    source_code=None,
+                    architecture_context=architecture_context,
+                )
+                new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+                # Regenerate code to pass the new tests
+                test_context = "\n\n".join(
+                    f"── {fp} ──\n```python\n{t}\n```" for fp, t in new_test_files.items()
+                )
+                code_result = self._autocoder.generate_multi(
+                    issue_description=(
+                        f"{prompt}\n\nYOUR CODE MUST PASS THESE TESTS:\n{test_context}"
+                    ),
+                    target_files=target_files,
+                    architecture_context=architecture_context,
+                    existing_code={},
+                )
+                new_files = {ch.filepath: ch.code for ch in code_result.changes}
+                return new_files, new_test_files, 0, None
+
             # After multiple stall cycles without progress, do a full regeneration
-            if self._deep_diagnosis_count >= 3:
-                log(f"Orchestrator: {self._deep_diagnosis_count} stall cycles — regenerating code and tests from scratch...")
-                self._deep_diagnosis_count = 0
+            if self._stall_cycle_count >= 3:
+                log(f"Orchestrator: {self._stall_cycle_count} stall cycles — regenerating code and tests from scratch...")
+                self._stall_cycle_count = 0
                 diagnosis_context = ""
                 if diagnosis_text:
                     diagnosis_context = (
@@ -785,6 +887,12 @@ class CodingOrchestrator:
                 new_hash = _hash("".join(sorted(f"{k}:{v}" for k, v in new_files.items())))
                 return new_files, new_test_files, 0, new_hash
 
+            # In TDD mode, override fix_target to always fix code (tests are the spec)
+            is_tdd = getattr(self, '_strategy', None) == CodingStrategy.TDD
+            if is_tdd and fix_target in ("tests", "both"):
+                log("Orchestrator: TDD mode — overriding fix_target to 'code' (tests are the spec)")
+                fix_target = "code"
+
             # Act on diagnosis fix_target
             if diagnosis and fix_target in ("tests", "both"):
                 log("Orchestrator: diagnosis recommends fixing tests — regenerating...")
@@ -807,7 +915,7 @@ class CodingOrchestrator:
                     # Also repair code with diagnosis context
                     enriched_error = self._build_diagnosis_context(
                         diagnosis_text, diagnosis, fix_plan, suggested_approach,
-                        deep_diagnosis, failure_output,
+                        failure_output,
                     )
                     all_files = {**current_files}
                     for fp, tests in new_test_files.items():
@@ -832,7 +940,7 @@ class CodingOrchestrator:
                 log("Orchestrator: diagnosis recommends fixing code — repairing with diagnosis...")
                 enriched_error = self._build_diagnosis_context(
                     diagnosis_text, diagnosis, fix_plan, suggested_approach,
-                    deep_diagnosis, failure_output,
+                    failure_output,
                 )
                 all_files = {**current_files}
                 for fp, tests in current_test_files.items():
@@ -848,16 +956,35 @@ class CodingOrchestrator:
                 new_hash = _hash("".join(sorted(f"{k}:{v}" for k, v in new_files.items())))
                 return new_files, new_test_files, 0, new_hash
 
-            # No diagnosis available — just regenerate tests
-            log("Orchestrator: regenerating tests after stall...")
-            test_result = self._autotester.generate_multi(
-                problem_statement=prompt + f"\n\nPrevious failures:\n{failure_output}",
-                test_files=test_files,
-                source_code=current_files,
-                architecture_context=architecture_context,
-            )
-            new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
-            return current_files, new_test_files, 0, None
+            # No diagnosis available
+            if is_tdd:
+                # TDD mode: regenerate code from scratch (tests are the spec)
+                log("Orchestrator: TDD stall — regenerating code from scratch...")
+                code_result = self._autocoder.generate_multi(
+                    issue_description=(
+                        f"{prompt}\n\n"
+                        f"YOUR CODE MUST PASS THESE TESTS:\n"
+                        + "\n".join(f"── {fp} ──\n```python\n{t}\n```" for fp, t in current_test_files.items())
+                        + f"\n\nPrevious failures:\n{failure_output}\n"
+                        f"Generate a COMPLETELY FRESH implementation."
+                    ),
+                    target_files=target_files,
+                    architecture_context=architecture_context,
+                    existing_code={},
+                )
+                new_files = {ch.filepath: ch.code for ch in code_result.changes}
+                return new_files, current_test_files, 0, None
+            else:
+                # Code-first mode: regenerate tests
+                log("Orchestrator: regenerating tests after stall...")
+                test_result = self._autotester.generate_multi(
+                    problem_statement=prompt + f"\n\nPrevious failures:\n{failure_output}",
+                    test_files=test_files,
+                    source_code=current_files,
+                    architecture_context=architecture_context,
+                )
+                new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+                return current_files, new_test_files, 0, None
 
         # Not stalled — standard repair
         log("Orchestrator: repairing code across files...")
@@ -892,14 +1019,11 @@ class CodingOrchestrator:
     @staticmethod
     def _build_diagnosis_context(
         diagnosis_text, diagnosis, fix_plan, suggested_approach,
-        deep_diagnosis, failure_output: str,
+        failure_output: str,
     ) -> str:
-        """Build an enriched error message from either agentic or deep diagnosis."""
+        """Build an enriched error message from agentic diagnosis."""
         affected = getattr(diagnosis, "affected_files", []) if diagnosis else []
         category = getattr(diagnosis, "root_cause_category", "unknown") if diagnosis else "unknown"
-        repair_analysis = ""
-        if deep_diagnosis and hasattr(deep_diagnosis, "repair_history_analysis"):
-            repair_analysis = f"Previous repair analysis: {deep_diagnosis.repair_history_analysis}\n"
 
         return (
             f"DIAGNOSIS (from comprehensive analysis):\n"
@@ -907,8 +1031,7 @@ class CodingOrchestrator:
             f"Category: {category}\n"
             f"Affected files: {', '.join(affected)}\n"
             f"Fix plan:\n" + "\n".join(f"  {i+1}. {step}" for i, step in enumerate(fix_plan)) + "\n"
-            f"Approach: {suggested_approach}\n"
-            f"{repair_analysis}\n"
+            f"Approach: {suggested_approach}\n\n"
             f"ORIGINAL ERROR:\n{failure_output}"
         )
 
@@ -1084,7 +1207,7 @@ class CodingOrchestrator:
                 test_code=current_tests,
                 test_filename=test_filename,
             )
-        except OpenAIInsufficientFunds:
+        except AIInsufficientFunds:
             raise
         except Exception as e:
             log(f"Orchestrator: autodebugger failed ({e}), falling back to code repair...")

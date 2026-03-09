@@ -22,6 +22,8 @@ class OrchestratorResult(BaseModel):
     test_files: List[GeneratedTestFile] = []
     iterations: int = 0
     error: Optional[str] = None
+    failure_context: Optional[str] = None  # last failure output for retry strategies
+    strategy_used: Optional[str] = None  # "tdd" or "code_first"
     architecture_drift_detected: bool = False
     drift_files: List[str] = []  # unplanned filepaths changed by the autocoder
 

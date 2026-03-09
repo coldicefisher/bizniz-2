@@ -34,5 +34,21 @@ class LocalWorkspace(BaseWorkspace):
 
         super().__init__(root_path)
 
+    @classmethod
+    def from_name(cls, name: str, parent: str | Path = "~", **kwargs) -> "LocalWorkspace":
+        """Create a workspace from a human-readable name.
+
+        Args:
+            name: Human-readable name like "Fraydit Solutions"
+            parent: Parent directory (default: home directory)
+
+        Returns:
+            LocalWorkspace at {parent}/{slugified_name}
+        """
+        from bizniz.workspace.naming import slugify
+        slug = slugify(name)
+        root = Path(parent).expanduser() / slug
+        return cls(root=root, **kwargs)
+
     def __repr__(self) -> str:
         return f"<LocalWorkspace root={self.root}>"

@@ -16,6 +16,7 @@ from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.autocoder.types import AutocoderProcessResult, FileChange
 from bizniz.autotester.types import AutotesterResult, GeneratedTestFile
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
+from bizniz.orchestrator.strategy import CodingStrategy
 from bizniz.orchestrator.types import OrchestratorMaxIterationsError
 
 
@@ -119,7 +120,8 @@ class TestRunMultiSuccess:
 
         mock_autocoder.generate_multi.assert_called_once()
         call_kwargs = mock_autocoder.generate_multi.call_args[1]
-        assert call_kwargs["issue_description"] == "Build expense tracker"
+        # In TDD mode, prompt includes test context
+        assert "Build expense tracker" in call_kwargs["issue_description"]
         assert call_kwargs["architecture_context"] == "Package: pkg"
 
     def test_calls_generate_multi_tests(self, orchestrator, mock_autotester):
@@ -132,6 +134,8 @@ class TestRunMultiSuccess:
         mock_autotester.generate_multi.assert_called_once()
         call_kwargs = mock_autotester.generate_multi.call_args[1]
         assert call_kwargs["test_files"] == TEST_FILES
+        # In TDD mode, tests are generated without source code
+        assert call_kwargs["source_code"] is None
 
     def test_loads_existing_code_for_modify_actions(self, orchestrator, mock_workspace, mock_autocoder):
         mock_workspace.exists.side_effect = lambda path: path == "pkg/models.py"

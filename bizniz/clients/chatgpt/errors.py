@@ -1,3 +1,6 @@
+from bizniz.clients.errors import AIInsufficientFunds
+
+
 class OpenAIClientError(Exception):
     """Base client error."""
 
@@ -6,7 +9,7 @@ class OpenAIRateLimit(OpenAIClientError):
     pass
 
 
-class OpenAIInsufficientFunds(OpenAIClientError):
+class OpenAIInsufficientFunds(OpenAIClientError, AIInsufficientFunds):
     """Raised when the API account has no funds/quota remaining.
 
     This is a terminal error — retrying will not help.

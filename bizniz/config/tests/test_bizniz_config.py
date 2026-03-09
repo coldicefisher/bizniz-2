@@ -42,7 +42,7 @@ class TestFromYaml:
         config = BiznizConfig.from_yaml(str(config_file))
 
         assert config.default_model == "gpt-5"
-        assert config.models == ["gpt-4o-mini", "gpt-4o", "gpt-5"]
+        assert config.models == ["gpt-4o-mini", "gpt-4o", "gpt-5", "claude-sonnet", "claude-opus"]
         assert config.api_key is None
         assert config.max_iterations == 20
 
@@ -65,7 +65,7 @@ class TestFindAndLoad:
             config = BiznizConfig.find_and_load()
 
         assert config.default_model == "gpt-4o-mini"
-        assert config.models == ["gpt-4o-mini", "gpt-4o", "gpt-5"]
+        assert config.models == ["gpt-4o-mini", "gpt-4o", "gpt-5", "claude-sonnet", "claude-opus"]
         assert config.max_iterations == 20
 
     def test_finds_yaml_in_cwd(self, tmp_path):
@@ -108,6 +108,8 @@ class TestMakeModelProgression:
         # Escalate through all models
         assert progression.escalate() == "gpt-4o"
         assert progression.escalate() == "gpt-5"
+        assert progression.escalate() == "claude-sonnet"
+        assert progression.escalate() == "claude-opus"
         assert progression.is_at_max
 
 

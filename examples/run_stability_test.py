@@ -22,7 +22,6 @@ load_dotenv()
 from bizniz.autocoder.autocoder import Autocoder
 from bizniz.autodebugger.autodebugger import Autodebugger
 from bizniz.autotester.autotester import Autotester
-from bizniz.deep_debugger.deep_debugger import DeepDebugger
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.engineer.auto_engineer import AutoEngineer
 from bizniz.config.bizniz_config import BiznizConfig
@@ -43,13 +42,6 @@ def make_orchestrator(client, workspace, config, suggested_model=None):
     sandbox = DockerExecutionEnvironment()
     pytest_env = PytestEnvironment(workspace_root=workspace.root)
 
-    def deep_debugger_factory():
-        fresh_client = config.make_client()
-        return DeepDebugger(
-            client=fresh_client,
-            on_status_message=lambda msg: print(f"      [deep-debugger] {msg}"),
-        )
-
     def client_factory(model_name):
         return config.make_client(model=model_name)
 
@@ -63,7 +55,6 @@ def make_orchestrator(client, workspace, config, suggested_model=None):
         workspace=workspace,
         client=issue_client,
         client_factory=client_factory,
-        deep_debugger_factory=deep_debugger_factory,
         model_progression=config.make_model_progression(),
         max_iterations=config.max_iterations,
         on_status_message=lambda msg: print(f"      [orchestrator] {msg}"),
