@@ -7,12 +7,14 @@ builds Docker images, and dispatches AutoEngineer instances.
 
 Output structure:
     project_root/
+    ├── backend/                  (service source code)
+    ├── frontend/                 (service source code)
     └── dockerfiles/
         └── development/
             ├── docker-compose.yml
             ├── .env
-            ├── backend/
-            └── frontend/
+            ├── backend/          (Dockerfile)
+            └── frontend/         (Dockerfile)
 
 Requirements:
     - OPENAI_API_KEY environment variable set (or .env file)

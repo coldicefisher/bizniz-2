@@ -9,17 +9,18 @@ AutoEngineer instances for application services.
 Project structure:
     project_root/
     ├── .bizniz/project.db
+    ├── backend/                  (service source code)
+    │   ├── src/...
+    │   └── tests/...
+    ├── frontend/                 (service source code)
+    │   ├── src/...
+    │   └── tests/...
     └── dockerfiles/
         └── development/
             ├── docker-compose.yml
             ├── .env
-            ├── backend/          (service workspace)
-            │   ├── Dockerfile
-            │   ├── requirements.txt
-            │   └── src/...
-            └── frontend/         (service workspace)
-                ├── Dockerfile
-                └── src/...
+            ├── backend/          (Dockerfile, requirements)
+            └── frontend/         (Dockerfile)
 """
 
 import json
@@ -175,21 +176,27 @@ class AutoArchitect(BaseAIAgent):
             description=f"Initial decomposition: {len(architecture.services)} services",
         )
 
-        # Step 3: Create service workspaces, Dockerfiles, and requirements
+        # Step 3: Create service workspaces and Docker configs
+        # Source code goes in project_root/<service>/
+        # Docker configs go in dockerfiles/development/<service>/
         log("AutoArchitect: creating service workspaces and Docker configs...")
         service_workspaces = {}
         for service in architecture.services:
             if service.service_type in _INFRASTRUCTURE_TYPES:
                 continue
 
+            # Source code workspace at project root
             workspace = project.get_service_workspace(service.workspace_name)
             service_workspaces[service.name] = workspace
 
-            # Generate Dockerfile
-            dockerfile_content = self._generate_dockerfile(service)
-            workspace.write_file("Dockerfile", dockerfile_content)
+            # Docker config directory
+            docker_dir = project.get_docker_service_dir(service.workspace_name)
 
-            # Generate requirements file
+            # Generate Dockerfile in docker dir
+            dockerfile_content = self._generate_dockerfile(service)
+            (docker_dir / "Dockerfile").write_text(dockerfile_content)
+
+            # Generate requirements file in workspace (Docker build context)
             if service.language == "python":
                 req_content = self._generate_requirements_txt(service)
                 workspace.write_file("requirements.txt", req_content)
@@ -206,7 +213,7 @@ class AutoArchitect(BaseAIAgent):
                 workspace_path=str(workspace.root),
             )
 
-            log(f"AutoArchitect: created workspace '{service.workspace_name}' with Dockerfile")
+            log(f"AutoArchitect: created workspace '{service.workspace_name}' and Docker config")
 
         # Step 4: Write docker-compose.yml and .env
         project.write_docker_compose(architecture.docker_compose)
@@ -222,8 +229,9 @@ class AutoArchitect(BaseAIAgent):
             workspace = service_workspaces[service.name]
             image_tag = f"{architecture.project_slug}-{service.name}:dev"
 
+            docker_dir = project.get_docker_service_dir(service.workspace_name)
             try:
-                self._build_docker_image(service, workspace, image_tag)
+                self._build_docker_image(service, workspace, image_tag, docker_dir=docker_dir)
                 service.image_name = image_tag
                 project.db.update_service_image(service.name, image_tag)
                 project.db.update_service_status(service.name, "ready")
@@ -386,13 +394,24 @@ class AutoArchitect(BaseAIAgent):
             issues_passed=successes,
         )
 
-    def _build_docker_image(self, service: ServiceDefinition, workspace, image_tag: str):
-        """Build the Docker image for a service."""
+    def _build_docker_image(
+        self, service: ServiceDefinition, workspace, image_tag: str, docker_dir=None,
+    ):
+        """Build the Docker image for a service.
+
+        The Dockerfile lives in docker_dir (dockerfiles/development/<service>/)
+        and the build context is the workspace root (project_root/<service>/).
+        """
         def log(msg: str):
             if self._on_status_message:
                 self._on_status_message(msg)
 
-        dockerfile_path = workspace.path("Dockerfile")
+        # Dockerfile is in the docker config dir, build context is the workspace
+        if docker_dir is not None:
+            dockerfile_path = docker_dir / "Dockerfile"
+        else:
+            dockerfile_path = workspace.path("Dockerfile")
+
         if not dockerfile_path.exists():
             raise FileNotFoundError(f"Dockerfile not found at {dockerfile_path}")
 
@@ -407,7 +426,6 @@ class AutoArchitect(BaseAIAgent):
         elapsed = time.time() - t0
         if proc.returncode != 0:
             log(f"AutoArchitect: docker build FAILED in {elapsed:.1f}s")
-            # Log first few lines of stderr for visibility
             stderr_preview = proc.stderr[:300] if proc.stderr else "(no stderr)"
             log(f"AutoArchitect: build error: {stderr_preview}")
             raise RuntimeError(f"Docker build failed: {proc.stderr[:500]}")

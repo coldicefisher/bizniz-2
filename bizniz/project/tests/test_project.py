@@ -45,17 +45,31 @@ def test_create_structure(project):
 def test_get_service_workspace(project):
     project.create_structure()
     ws = project.get_service_workspace("backend")
-    expected_path = project.dev_root / "backend"
+    expected_path = project.root / "backend"
     assert ws.root == expected_path.resolve()
     assert expected_path.exists()
 
 
 def test_get_service_workspace_creates_directory(project):
     project.create_structure()
-    ws_path = project.dev_root / "frontend"
+    ws_path = project.root / "frontend"
     assert not ws_path.exists()
     ws = project.get_service_workspace("frontend")
     assert ws_path.exists()
+
+
+# ── get_docker_service_dir ──────────────────────────────────────────────────────
+
+def test_get_docker_service_dir(project):
+    project.create_structure()
+    docker_dir = project.get_docker_service_dir("backend")
+    expected = project.docker_root / "backend"
+    assert docker_dir == expected
+    assert expected.exists()
+
+
+def test_docker_root_alias(project):
+    assert project.docker_root == project.dev_root
 
 
 # ── write_docker_compose ─────────────────────────────────────────────────────────

@@ -20,27 +20,35 @@ These defaults are overridden ONLY when the client explicitly requests a differe
 
 Design principles:
 - Always use service-based architecture (separate containers)
-- Each service gets its own workspace directory
+- Each service gets its own workspace directory for source code
 - Keep services focused and single-purpose
 - Design for containerized deployment with Docker Compose
 - Generate a requirements.txt (Python) or package.json (TypeScript) per service
 
 Project directory structure (MANDATORY):
-All services live under dockerfiles/development/:
+Source code lives at project_root/<service>/, Docker configs at dockerfiles/development/:
 ```
-dockerfiles/
-  development/
-    docker-compose.yml
-    .env
-    backend/          <- Python backend service workspace
-    frontend/         <- React/Angular frontend service workspace
-    fusionauth/       <- Infrastructure config (if needed)
-    postgres/         <- Database config (if needed)
+project_root/
+├── backend/                  <- Python backend source code
+│   ├── src/...
+│   ├── tests/...
+│   └── requirements.txt
+├── frontend/                 <- React/Angular frontend source code
+│   ├── src/...
+│   ├── tests/...
+│   └── package.json
+└── dockerfiles/
+    └── development/
+        ├── docker-compose.yml
+        ├── .env
+        ├── backend/          <- Dockerfile only
+        └── frontend/         <- Dockerfile only
 ```
 
-Docker Compose build contexts must point to `./<service_directory>` relative
-to the development directory. Infrastructure services (databases, caches)
-use standard Docker Hub images with no build context.
+Docker Compose build contexts must point to `../../<service_directory>` relative
+to the development directory (i.e. the source code root). Dockerfiles are
+referenced via the `dockerfile` key pointing to `../../dockerfiles/development/<service>/Dockerfile`.
+Infrastructure services (databases, caches) use standard Docker Hub images with no build context.
 
 For each application service, generate an initial requirements file:
 - Python backends: requirements.txt with framework + pytest + test dependencies

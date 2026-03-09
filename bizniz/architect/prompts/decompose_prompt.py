@@ -10,7 +10,7 @@ Decompose this into a service-based architecture. For each service, specify:
 - framework: the framework to use (e.g. "fastapi", "react", "angular", "nginx", "postgres", "redis", "fusionauth")
 - language: primary language ("python", "typescript", "yaml", "sql")
 - description: what this service does
-- workspace_name: directory name under dockerfiles/development/ (e.g. "backend", "frontend")
+- workspace_name: directory name for the service source code (e.g. "backend", "frontend")
 - port: exposed port number (if applicable)
 - depends_on: list of other service names this depends on
 - requirements: list of pip/npm packages needed (e.g. ["fastapi", "uvicorn", "pydantic"] for Python, or ["react", "axios"] for TypeScript)
@@ -28,8 +28,18 @@ IMPORTANT framework rules:
 - NEVER use Node.js for backends
 - C#/.NET is ONLY for enterprise refactors, never for new projects
 
+Project directory structure:
+Source code lives at project_root/<service>/, Docker configs at dockerfiles/development/:
+  project_root/backend/         <- source code + requirements.txt
+  project_root/frontend/        <- source code + package.json
+  project_root/dockerfiles/development/backend/   <- Dockerfile
+  project_root/dockerfiles/development/frontend/  <- Dockerfile
+  project_root/dockerfiles/development/docker-compose.yml
+  project_root/dockerfiles/development/.env
+
 The docker-compose.yml must:
-- Use build contexts pointing to "./<workspace_name>" for application services
+- Use build contexts pointing to "../../<workspace_name>" for application services (source code root)
+- Reference Dockerfiles at "../../dockerfiles/development/<workspace_name>/Dockerfile"
 - Use standard Docker Hub images for infrastructure (postgres, redis, etc.)
 - Define proper port mappings, environment variables, and dependencies
 - Include volume mounts for development (live code reloading)
@@ -39,12 +49,12 @@ Example docker-compose service for a Python backend:
 ```yaml
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: ../../backend
+      dockerfile: ../../dockerfiles/development/backend/Dockerfile
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/app
+      - ../../backend:/app
     environment:
       - DATABASE_URL=postgresql://user:pass@db:5432/dbname
     depends_on:

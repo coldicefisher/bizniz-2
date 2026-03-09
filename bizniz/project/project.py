@@ -5,14 +5,19 @@ Represents a bizniz project rooted at a directory with this structure:
 
     project_root/
     ├── .bizniz/
-    │   └── project.db          (project-level SQLite)
-    ├── dockerfiles/
-    │   └── development/
-    │       ├── docker-compose.yml
-    │       ├── .env
-    │       ├── backend/         (service workspace dir)
-    │       ├── frontend/        (service workspace dir)
-    │       └── ...
+    │   └── project.db
+    ├── backend/                 (service source code)
+    │   ├── src/
+    │   └── tests/
+    ├── frontend/                (service source code)
+    │   ├── src/
+    │   └── tests/
+    └── dockerfiles/
+        └── development/
+            ├── docker-compose.yml
+            ├── .env
+            ├── backend/         (Dockerfile, entrypoint, requirements)
+            └── frontend/        (Dockerfile, package.json)
 """
 
 from pathlib import Path
@@ -40,8 +45,13 @@ class Project:
 
     @property
     def dev_root(self) -> Path:
-        """Returns root / dockerfiles / development"""
+        """Returns root / dockerfiles / development (Docker configs live here)."""
         return self._root / "dockerfiles" / "development"
+
+    @property
+    def docker_root(self) -> Path:
+        """Alias for dev_root — Docker build configs for each service."""
+        return self.dev_root
 
     @property
     def db(self):
@@ -63,9 +73,15 @@ class Project:
         """Create the full project directory structure."""
         self.dev_root.mkdir(parents=True, exist_ok=True)
 
+    def get_docker_service_dir(self, service_name: str) -> Path:
+        """Returns the Docker config directory for a service (Dockerfile, requirements, etc.)."""
+        docker_dir = self.docker_root / service_name
+        docker_dir.mkdir(parents=True, exist_ok=True)
+        return docker_dir
+
     def get_service_workspace(self, service_name: str) -> LocalWorkspace:
-        """Returns a LocalWorkspace at dev_root / service_name"""
-        ws_path = self.dev_root / service_name
+        """Returns a LocalWorkspace at project_root / service_name (source code)."""
+        ws_path = self._root / service_name
         return LocalWorkspace(
             root=str(ws_path),
             bizniz_db=self._bizniz_db,

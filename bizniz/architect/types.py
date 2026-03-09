@@ -13,7 +13,7 @@ class ServiceDefinition(BaseModel):
     framework: str  # "fastapi", "react", "angular", "nginx", "redis", "postgres", etc.
     language: str  # "python", "typescript", "yaml", etc.
     description: str
-    workspace_name: str  # directory name under dockerfiles/development/
+    workspace_name: str  # directory name for source code at project_root/<workspace_name>/
     port: Optional[int] = None
     depends_on: List[str] = []
     requirements: List[str] = []  # pip/npm packages
