@@ -1,0 +1,229 @@
+"""
+Stability Test: Run AutoEngineer N times consecutively.
+
+Tracks success/failure across runs and reports aggregate stats.
+Stops on first failure by default (use --continue-on-failure to keep going).
+
+Usage:
+    python examples/run_stability_test.py [--runs N] [--continue-on-failure]
+"""
+import os
+import sys
+import shutil
+import argparse
+import datetime
+import json
+import traceback
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from bizniz.autocoder.autocoder import Autocoder
+from bizniz.autodebugger.autodebugger import Autodebugger
+from bizniz.autotester.autotester import Autotester
+from bizniz.deep_debugger.deep_debugger import DeepDebugger
+from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
+from bizniz.engineer.auto_engineer import AutoEngineer
+from bizniz.config.bizniz_config import BiznizConfig
+from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
+from bizniz.environment.docker_environment import DockerExecutionEnvironment
+from bizniz.environment.pytest_environment import PytestEnvironment
+from bizniz.workspace.local_workspace import LocalWorkspace
+from bizniz.logging.pipeline_logger import PipelineLogger
+
+
+PROBLEM_STATEMENT = (
+    "Build a command-line expense tracker that lets users add expenses "
+    "with a category and amount, list all expenses, and show totals by category."
+)
+
+
+def make_orchestrator(client, workspace, config, suggested_model=None):
+    sandbox = DockerExecutionEnvironment()
+    pytest_env = PytestEnvironment(workspace_root=workspace.root)
+
+    def deep_debugger_factory():
+        fresh_client = config.make_client()
+        return DeepDebugger(
+            client=fresh_client,
+            on_status_message=lambda msg: print(f"      [deep-debugger] {msg}"),
+        )
+
+    def client_factory(model_name):
+        return config.make_client(model=model_name)
+
+    issue_client = config.make_client(model=suggested_model) if suggested_model else client
+
+    return CodingOrchestrator(
+        autocoder=Autocoder(client=issue_client, environment=sandbox, workspace=workspace),
+        autotester=Autotester(client=issue_client, environment=sandbox, workspace=workspace),
+        autodebugger=Autodebugger(client=issue_client, environment=sandbox, workspace=workspace),
+        test_environment=pytest_env,
+        workspace=workspace,
+        client=issue_client,
+        client_factory=client_factory,
+        deep_debugger_factory=deep_debugger_factory,
+        model_progression=config.make_model_progression(),
+        max_iterations=config.max_iterations,
+        on_status_message=lambda msg: print(f"      [orchestrator] {msg}"),
+    )
+
+
+def run_once(run_number: int, config: BiznizConfig) -> dict:
+    """Execute one full auto_engineer run. Returns a result dict."""
+    workspace_path = os.path.expanduser("~/auto_engineer_workspace")
+    if os.path.exists(workspace_path):
+        shutil.rmtree(workspace_path)
+
+    workspace = LocalWorkspace(root=workspace_path)
+    log_dir = os.path.expanduser("~/.bizniz_stability_logs")
+    logger = PipelineLogger(log_dir=log_dir, run_id=f"stability_{run_number}_{datetime.datetime.now().strftime('%H%M%S')}")
+
+    engineer_client = config.make_engineer_client()
+    logger.log_run_start(PROBLEM_STATEMENT)
+
+    result_info = {
+        "run": run_number,
+        "success": False,
+        "total_issues": 0,
+        "resolved": 0,
+        "failed": 0,
+        "total_iterations": 0,
+        "error": None,
+        "log_path": str(logger.log_path),
+    }
+
+    try:
+        with AutoEngineer(
+            client=engineer_client,
+            environment=PythonSandboxExecutionEnvironment(),
+            workspace=workspace,
+            orchestrator_factory=lambda suggested_model=None: make_orchestrator(
+                engineer_client, workspace, config, suggested_model=suggested_model,
+            ),
+            on_status_message=lambda msg: print(f"    [engineer] {msg}"),
+        ) as engineer:
+
+            analysis = engineer.analyze(PROBLEM_STATEMENT)
+
+            print(f"    Issues: {len(analysis.issues)}")
+            for issue in analysis.issues:
+                model_tag = f" [{issue.suggested_model}]" if issue.suggested_model else ""
+                print(f"      #{issue.db_id}: {issue.title}{model_tag}")
+
+            resolved = 0
+            failed = 0
+            total_iterations = 0
+
+            for issue in analysis.issues:
+                print(f"    Dispatching #{issue.db_id}: {issue.title}")
+                logger.log_issue_start(issue.db_id, issue.title, issue.suggested_model)
+
+                try:
+                    result = engineer.dispatch(issue.db_id)
+                    logger.log_issue_end(issue.db_id, result.success, result.iterations)
+                    total_iterations += result.iterations
+
+                    if result.success:
+                        resolved += 1
+                        print(f"      OK ({result.iterations} iterations)")
+                    else:
+                        failed += 1
+                        print(f"      FAILED ({result.iterations} iterations)")
+                        logger.log_error(issue.db_id, "issue_failed", f"Failed after {result.iterations} iterations")
+                except Exception as e:
+                    failed += 1
+                    error_msg = f"{type(e).__name__}: {e}"
+                    print(f"      CRASHED: {error_msg}")
+                    logger.log_error(issue.db_id, type(e).__name__, error_msg)
+                    logger.log_issue_end(issue.db_id, False, 0)
+
+            result_info["total_issues"] = len(analysis.issues)
+            result_info["resolved"] = resolved
+            result_info["failed"] = failed
+            result_info["total_iterations"] = total_iterations
+            result_info["success"] = failed == 0
+
+    except Exception as e:
+        result_info["error"] = f"{type(e).__name__}: {e}"
+        print(f"    RUN CRASHED: {result_info['error']}")
+        logger.log_error(None, type(e).__name__, str(e))
+
+    logger.log_run_end(
+        success=result_info["success"],
+        total_issues=result_info["total_issues"],
+        resolved=result_info["resolved"],
+        failed=result_info["failed"],
+    )
+
+    return result_info
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run AutoEngineer stability test")
+    parser.add_argument("--runs", type=int, default=5, help="Number of consecutive runs (default: 5)")
+    parser.add_argument("--continue-on-failure", action="store_true", help="Keep running after a failure")
+    args = parser.parse_args()
+
+    config = BiznizConfig.find_and_load()
+    results = []
+    consecutive_passes = 0
+
+    print(f"=== Stability Test: {args.runs} consecutive runs ===\n")
+    print(f"  Engineer model: {config.engineer_model}")
+    print(f"  Default model: {config.default_model}")
+    print(f"  Model progression: {config.models}")
+    print(f"  Max iterations: {config.max_iterations}")
+    print()
+
+    for run in range(1, args.runs + 1):
+        print(f"--- Run {run}/{args.runs} ---")
+        result = run_once(run, config)
+        results.append(result)
+
+        if result["success"]:
+            consecutive_passes += 1
+            print(f"  PASS (consecutive: {consecutive_passes})\n")
+        else:
+            consecutive_passes = 0
+            print(f"  FAIL\n")
+            if not args.continue_on_failure:
+                print("  Stopping on first failure. Use --continue-on-failure to keep going.")
+                break
+
+    # Summary
+    total = len(results)
+    passes = sum(1 for r in results if r["success"])
+    fails = total - passes
+    total_iterations = sum(r["total_iterations"] for r in results)
+
+    print(f"\n{'=' * 50}")
+    print(f"STABILITY TEST RESULTS")
+    print(f"{'=' * 50}")
+    print(f"  Runs: {total}")
+    print(f"  Passes: {passes}")
+    print(f"  Fails: {fails}")
+    print(f"  Pass rate: {passes/total*100:.0f}%")
+    print(f"  Total iterations across all runs: {total_iterations}")
+    print()
+
+    for r in results:
+        status = "PASS" if r["success"] else "FAIL"
+        error = f" — {r['error']}" if r.get("error") else ""
+        print(f"  Run {r['run']}: {status} | {r['resolved']}/{r['total_issues']} issues | {r['total_iterations']} iterations{error}")
+        print(f"    Log: {r['log_path']}")
+
+    # Save aggregate results
+    log_dir = os.path.expanduser("~/.bizniz_stability_logs")
+    os.makedirs(log_dir, exist_ok=True)
+    summary_path = os.path.join(log_dir, f"stability_summary_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    with open(summary_path, "w") as f:
+        json.dump({"results": results, "passes": passes, "fails": fails, "total": total}, f, indent=2)
+    print(f"\n  Summary saved: {summary_path}")
+
+    sys.exit(0 if fails == 0 else 1)
+
+
+if __name__ == "__main__":
+    main()
