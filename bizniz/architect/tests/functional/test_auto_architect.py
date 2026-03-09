@@ -54,7 +54,7 @@ def _make_orchestrator(config, workspace, suggested_model=None):
     )
 
 
-def _make_engineer(config, workspace):
+def _make_engineer(config, workspace, on_status_message=None):
     """Create an AutoEngineer context manager for a service workspace."""
 
     def orchestrator_factory(suggested_model=None):
@@ -67,6 +67,7 @@ def _make_engineer(config, workspace):
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
         orchestrator_factory=orchestrator_factory,
+        on_status_message=on_status_message,
     )
 
 
@@ -96,7 +97,9 @@ def test_architect_decompose(api_key, workspace_path):
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
-        engineer_factory=lambda ws: _make_engineer(config, ws),
+        engineer_factory=lambda ws, on_status_message=None: _make_engineer(
+            config, ws, on_status_message=on_status_message,
+        ),
         workspace_parent=str(workspace_path),
         on_status_message=lambda msg: status_messages.append(msg),
     )
@@ -150,8 +153,8 @@ def test_architect_build_backend_only(api_key, workspace_path):
         "Use FastAPI."
     )
 
-    def engineer_factory(ws):
-        return _make_engineer(config, ws)
+    def engineer_factory(ws, on_status_message=None):
+        return _make_engineer(config, ws, on_status_message=on_status_message)
 
     architect = AutoArchitect(
         client=architect_client,

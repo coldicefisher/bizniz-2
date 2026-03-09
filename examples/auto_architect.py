@@ -41,7 +41,7 @@ PROBLEM_STATEMENT = (
 )
 
 
-def _make_orchestrator(config, workspace, suggested_model=None):
+def _make_orchestrator(config, workspace, on_status_message=None, suggested_model=None):
     sandbox = DockerExecutionEnvironment()
     pytest_env = PytestEnvironment(workspace_root=workspace.root)
 
@@ -49,6 +49,7 @@ def _make_orchestrator(config, workspace, suggested_model=None):
         fresh_client = config.make_client()
         return AgenticDebugger(
             client=fresh_client, workspace=workspace, environment=pytest_env,
+            on_status_message=on_status_message,
         )
 
     def client_factory(model_name):
@@ -67,12 +68,17 @@ def _make_orchestrator(config, workspace, suggested_model=None):
         debugger_factory=debugger_factory,
         model_progression=config.make_model_progression(),
         max_iterations=config.max_iterations,
+        on_status_message=on_status_message,
     )
 
 
-def _make_engineer(config, workspace):
+def _make_engineer(config, workspace, on_status_message=None):
     def orchestrator_factory(suggested_model=None):
-        return _make_orchestrator(config, workspace, suggested_model=suggested_model)
+        return _make_orchestrator(
+            config, workspace,
+            on_status_message=on_status_message,
+            suggested_model=suggested_model,
+        )
 
     engineer_client = config.make_engineer_client()
 
@@ -81,6 +87,7 @@ def _make_engineer(config, workspace):
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
         orchestrator_factory=orchestrator_factory,
+        on_status_message=on_status_message,
     )
 
 
@@ -99,7 +106,9 @@ if __name__ == "__main__":
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=root_workspace,
-        engineer_factory=lambda ws: _make_engineer(config, ws),
+        engineer_factory=lambda ws, on_status_message=None: _make_engineer(
+            config, ws, on_status_message=on_status_message,
+        ),
         workspace_parent=str(workspace_parent),
         on_status_message=lambda msg: print(f"  {msg}"),
     )

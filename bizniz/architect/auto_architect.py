@@ -257,7 +257,7 @@ class AutoArchitect(BaseAIAgent):
         service_prompt: str,
     ) -> ServiceResult:
         """Dispatch an AutoEngineer for a single service."""
-        with self._engineer_factory(workspace) as engineer:
+        with self._engineer_factory(workspace, on_status_message=self._on_status_message) as engineer:
             analysis = engineer.analyze(service_prompt)
 
             results = []
