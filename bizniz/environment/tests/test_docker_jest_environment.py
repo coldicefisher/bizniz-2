@@ -85,7 +85,7 @@ class TestExecuteCommand:
         assert run_d_count == 1
 
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
-    def test_network_disabled_by_default(self, mock_run, tmp_path):
+    def test_network_enabled_by_default(self, mock_run, tmp_path):
         mock_run.side_effect = [
             _completed(returncode=0, stdout="container123"),
             _completed(),
@@ -95,22 +95,22 @@ class TestExecuteCommand:
         env.execute(code="", call_spec=spec)
 
         start_cmd = mock_run.call_args_list[0][0][0]
-        assert "--network" in start_cmd
-        net_idx = start_cmd.index("--network")
-        assert start_cmd[net_idx + 1] == "none"
+        assert "--network" not in start_cmd
 
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
-    def test_network_enabled(self, mock_run, tmp_path):
+    def test_network_disabled(self, mock_run, tmp_path):
         mock_run.side_effect = [
             _completed(returncode=0, stdout="container123"),
             _completed(),
         ]
-        env = _make_env(tmp_path, network_enabled=True)
+        env = _make_env(tmp_path, network_enabled=False)
         spec = ExecutionCallSpec(symbol="jest", args=["test_a.test.ts"])
         env.execute(code="", call_spec=spec)
 
         start_cmd = mock_run.call_args_list[0][0][0]
-        assert "--network" not in start_cmd
+        assert "--network" in start_cmd
+        net_idx = start_cmd.index("--network")
+        assert start_cmd[net_idx + 1] == "none"
 
 
 class TestExecutePathConversion:
@@ -271,27 +271,21 @@ class TestInstallPackages:
     def test_install_runs_npm_in_container(self, mock_run, tmp_path):
         mock_run.side_effect = [
             _completed(returncode=0, stdout="container123"),  # start
-            _completed(returncode=0),  # docker network connect
             _completed(returncode=0, stdout="added 1 package"),  # docker exec npm
-            _completed(returncode=0),  # docker network disconnect
             _completed(returncode=0),  # docker commit
         ]
         env = _make_env(tmp_path)
         env.install_packages(["@testing-library/react"])
 
         calls = mock_run.call_args_list
-        # Network connect
-        assert "network" in calls[1][0][0] and "connect" in calls[1][0][0]
         # npm install
-        npm_cmd = calls[2][0][0]
+        npm_cmd = calls[1][0][0]
         assert "exec" in npm_cmd
         assert "npm" in npm_cmd
         assert "install" in npm_cmd
         assert "@testing-library/react" in npm_cmd
-        # Network disconnect
-        assert "network" in calls[3][0][0] and "disconnect" in calls[3][0][0]
         # docker commit
-        commit_cmd = calls[4][0][0]
+        commit_cmd = calls[2][0][0]
         assert "commit" in commit_cmd
 
         assert env.image == "myservice:latest"
@@ -309,9 +303,7 @@ class TestInstallPackages:
     def test_npm_failure_does_not_update_packages(self, mock_run, tmp_path):
         mock_run.side_effect = [
             _completed(returncode=0, stdout="container123"),  # start
-            _completed(returncode=0),  # docker network connect
             _completed(returncode=1, stderr="ERR! 404 Not Found"),  # npm fail
-            _completed(returncode=0),  # docker network disconnect
         ]
         env = _make_env(tmp_path)
         env.install_packages(["nonexistent-pkg-xyz"])
@@ -424,7 +416,7 @@ class TestInit:
         env = _make_env(tmp_path)
         assert env.timeout == 120
         assert env._extra_jest_args == []
-        assert env._network_enabled is False
+        assert env._network_enabled is True
         assert env._installed_packages == []
         assert env._container_id is None
 

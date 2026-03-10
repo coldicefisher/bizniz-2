@@ -1508,32 +1508,16 @@ class CodingOrchestrator:
         # Ensure container is running
         env._ensure_container()
 
-        # Temporarily enable network for pip install
-        needs_network_restore = False
-        if not env._network_enabled:
-            _sp.run(
-                ["docker", "network", "connect", "bridge", env._container_id],
-                capture_output=True, timeout=10,
-            )
-            needs_network_restore = True
-
-        try:
-            log("Orchestrator: installing project in editable mode (pip install -e .)...")
-            proc = _sp.run(
-                ["docker", "exec", env._container_id,
-                 "pip", "install", "--no-cache-dir", "-e", "/workspace"],
-                capture_output=True, text=True, timeout=120,
-            )
-            if proc.returncode == 0:
-                log("Orchestrator: project installed in editable mode.")
-            else:
-                log(f"Orchestrator: pip install -e . failed: {proc.stderr[:200]}")
-        finally:
-            if needs_network_restore:
-                _sp.run(
-                    ["docker", "network", "disconnect", "bridge", env._container_id],
-                    capture_output=True, timeout=10,
-                )
+        log("Orchestrator: installing project in editable mode (pip install -e .)...")
+        proc = _sp.run(
+            ["docker", "exec", env._container_id,
+             "pip", "install", "--no-cache-dir", "-e", "/workspace"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if proc.returncode == 0:
+            log("Orchestrator: project installed in editable mode.")
+        else:
+            log(f"Orchestrator: pip install -e . failed: {proc.stderr[:200]}")
 
     def _proactive_package_install(
         self,

@@ -58,7 +58,7 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
         image: str,
         timeout: int = 120,
         extra_pytest_args: Optional[List[str]] = None,
-        network_enabled: bool = False,
+        network_enabled: bool = True,
     ):
         super().__init__(timeout=timeout)
         self._workspace_root = Path(workspace_root).resolve()
