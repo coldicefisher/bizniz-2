@@ -81,6 +81,15 @@ class CodingOrchestrator:
         Optional callback for human-readable status updates.
     """
 
+    # Hard cap on total collection error regeneration cycles across all resets
+    MAX_TOTAL_COLLECTION_ERRORS = 12
+
+    # Max times we'll try to install the same package before giving up
+    MAX_PACKAGE_INSTALL_ATTEMPTS = 2
+
+    # Wall-clock timeout for a single run_multi call (seconds)
+    WALL_CLOCK_TIMEOUT = 1800  # 30 minutes
+
     def __init__(
         self,
         autocoder: Autocoder,
@@ -199,6 +208,7 @@ class CodingOrchestrator:
         previous_code_hash: Optional[str] = None
         current_code: Optional[str] = None
         stale_count: int = 0
+        _attempted_packages: dict = {}  # package_name -> attempt count
 
         if strategy == CodingStrategy.TDD:
             # TDD: tests first, then code to pass them
@@ -267,9 +277,14 @@ class CodingOrchestrator:
                     for f in workspace_files
                 )
                 if not is_workspace_module:
-                    log(f"Orchestrator: detected missing package '{missing_pkg}', installing...")
-                    self._install_package(missing_pkg, log)
-                    continue  # Re-run tests without counting as a failed iteration
+                    _attempted_packages[missing_pkg] = _attempted_packages.get(missing_pkg, 0) + 1
+                    if _attempted_packages[missing_pkg] <= self.MAX_PACKAGE_INSTALL_ATTEMPTS:
+                        log(f"Orchestrator: detected missing package '{missing_pkg}', installing...")
+                        self._install_package(missing_pkg, log)
+                        continue  # Re-run tests without counting as a failed iteration
+                    else:
+                        log(f"Orchestrator: package '{missing_pkg}' still missing after "
+                            f"{self.MAX_PACKAGE_INSTALL_ATTEMPTS} install attempts, proceeding to repair...")
 
             # ── Collection error → regenerate tests ───────────────────────────
             is_collection_error = (
@@ -412,6 +427,8 @@ class CodingOrchestrator:
         max_regression_retries = 3
         self._stall_cycle_count = 0
         last_failure_output = ""
+        _attempted_packages: dict = {}  # package_name -> attempt count
+        _wall_clock_start = time.time()
 
         # ── Load existing code for files being modified ──────────────────────
         existing_code = {}
@@ -446,6 +463,14 @@ class CodingOrchestrator:
 
         # ── Test + repair loop ───────────────────────────────────────────────
         for iteration in range(1, self._max_iterations + 1):
+            # Wall-clock timeout check
+            elapsed_wall = time.time() - _wall_clock_start
+            if elapsed_wall > self.WALL_CLOCK_TIMEOUT:
+                log(f"Orchestrator: wall-clock timeout ({elapsed_wall:.0f}s > {self.WALL_CLOCK_TIMEOUT}s)")
+                raise OrchestratorMaxIterationsError(
+                    f"Wall-clock timeout after {elapsed_wall:.0f}s "
+                    f"({iteration - 1} iterations completed)."
+                )
             log(f"Orchestrator: running tests (iteration {iteration}/{self._max_iterations})...")
 
             test_abs_paths = [
@@ -559,9 +584,14 @@ class CodingOrchestrator:
                     for f in workspace_files
                 )
                 if not is_workspace_module:
-                    log(f"Orchestrator: installing missing package '{missing_pkg}'...")
-                    self._install_package(missing_pkg, log)
-                    continue
+                    _attempted_packages[missing_pkg] = _attempted_packages.get(missing_pkg, 0) + 1
+                    if _attempted_packages[missing_pkg] <= self.MAX_PACKAGE_INSTALL_ATTEMPTS:
+                        log(f"Orchestrator: installing missing package '{missing_pkg}'...")
+                        self._install_package(missing_pkg, log)
+                        continue
+                    else:
+                        log(f"Orchestrator: package '{missing_pkg}' still missing after "
+                            f"{self.MAX_PACKAGE_INSTALL_ATTEMPTS} install attempts, proceeding to repair...")
 
             # ── Collection error → regenerate tests ───────────────────────
             is_collection_error = (
@@ -572,6 +602,14 @@ class CodingOrchestrator:
             if is_collection_error:
                 collection_error_count += 1
                 total_collection_errors += 1
+
+                # Hard cap: if we've burned too many iterations on collection errors, give up
+                if total_collection_errors >= self.MAX_TOTAL_COLLECTION_ERRORS:
+                    log(f"Orchestrator: {total_collection_errors} total collection errors — giving up")
+                    raise OrchestratorMaxIterationsError(
+                        f"Too many test collection errors ({total_collection_errors}). "
+                        f"Tests cannot be collected — likely a structural issue."
+                    )
 
                 error_detail = ""
                 if eval_result.error and eval_result.error.traceback:
