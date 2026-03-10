@@ -20,10 +20,18 @@ def _is_claude_model(model_name: str) -> bool:
 class BiznizConfig(BaseModel):
     default_model: str = "gpt-4o-mini"
     engineer_model: str = "gpt-4o"
+    architect_model: str = "gpt-4o"
     models: List[str] = [
         "gpt-4o-mini", "gpt-4o", "gpt-5",
         "claude-sonnet", "claude-opus",
     ]
+    # Per-agent model progressions (override `models` when set)
+    autocoder_models: Optional[List[str]] = None
+    autotester_models: Optional[List[str]] = None
+    repair_models: Optional[List[str]] = None
+    # Escalation thresholds (consecutive failures before escalating model)
+    stall_threshold: int = 3
+    agentic_debug_threshold: int = 5
     api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     is_azure: bool = False
@@ -68,6 +76,18 @@ class BiznizConfig(BaseModel):
 
     def make_model_progression(self) -> ModelProgression:
         return ModelProgression(models=self.models)
+
+    def make_autocoder_progression(self) -> ModelProgression:
+        """Model progression for code generation (autocoder)."""
+        return ModelProgression(models=self.autocoder_models or self.models)
+
+    def make_autotester_progression(self) -> ModelProgression:
+        """Model progression for test generation (autotester)."""
+        return ModelProgression(models=self.autotester_models or self.models)
+
+    def make_repair_progression(self) -> ModelProgression:
+        """Model progression for code repair."""
+        return ModelProgression(models=self.repair_models or self.models)
 
     def make_db(self) -> "BiznizDB":
         """Create a BiznizDB from the configured database_url."""

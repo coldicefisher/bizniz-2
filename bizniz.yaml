@@ -1,7 +1,19 @@
 default_model: gpt-4o-mini
-engineer_model: gpt-4o
+engineer_model: gpt-5
+architect_model: gpt-5
 models:
   - gpt-4o-mini
   - gpt-4o
   - gpt-5
+autocoder_models:
+  - gpt-4o
+  - gpt-5
+autotester_models:
+  - gpt-4o
+  - gpt-5
+repair_models:
+  - gpt-4o
+  - gpt-5
+stall_threshold: 3
+agentic_debug_threshold: 5
 max_iterations: 20

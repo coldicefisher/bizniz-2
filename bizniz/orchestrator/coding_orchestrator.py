@@ -102,6 +102,11 @@ class CodingOrchestrator:
         client_factory: Optional[Callable[[str], BaseAIClient]] = None,
         debugger_factory: Optional[Callable[[], AgenticDebugger]] = None,
         model_progression: Optional[ModelProgression] = None,
+        autocoder_progression: Optional[ModelProgression] = None,
+        autotester_progression: Optional[ModelProgression] = None,
+        repair_progression: Optional[ModelProgression] = None,
+        stall_threshold: int = 3,
+        agentic_debug_threshold: int = 5,
         max_iterations: int = 20,
         on_status_message: Optional[Callable[[str], None]] = None,
         language: str = "python",
@@ -114,11 +119,19 @@ class CodingOrchestrator:
         self._client = client
         self._client_factory = client_factory
         self._debugger_factory = debugger_factory
+        # Per-agent progressions (fall back to shared model_progression)
         self._model_progression = model_progression
+        self._autocoder_progression = autocoder_progression or model_progression
+        self._autotester_progression = autotester_progression or model_progression
+        self._repair_progression = repair_progression or model_progression
+        self._stall_threshold = stall_threshold
+        self._agentic_debug_threshold = agentic_debug_threshold
         self._max_iterations = max_iterations
         self._on_status_message = on_status_message
         self._language = language
-        self._stall_detector = StallDetector()
+        self._stall_detector = StallDetector(
+            consecutive_fail_threshold=stall_threshold,
+        )
         self._stall_cycle_count = 0
 
         # Override system prompts for non-Python languages
@@ -417,6 +430,12 @@ class CodingOrchestrator:
         # Set starting model if suggested by the engineer
         if initial_model and self._model_progression and self._client:
             self._model_progression.set_start(initial_model)
+            if self._autocoder_progression and self._autocoder_progression is not self._model_progression:
+                self._autocoder_progression.set_start(initial_model)
+            if self._autotester_progression and self._autotester_progression is not self._model_progression:
+                self._autotester_progression.set_start(initial_model)
+            if self._repair_progression and self._repair_progression is not self._model_progression:
+                self._repair_progression.set_start(initial_model)
             current = self._model_progression.current_model
             if self._client_factory:
                 fresh_client = self._client_factory(current)
@@ -700,8 +719,8 @@ class CodingOrchestrator:
                             log(f"Orchestrator: code repair for import error failed ({type(e).__name__}: {e})")
 
                 # After 3 consecutive collection errors, escalate model and clear history
-                if collection_error_count >= 3:
-                    escalated = self._try_escalate_model(log)
+                if collection_error_count >= self._stall_threshold:
+                    escalated = self._try_escalate_model(log, progression=self._repair_progression, agent="repair")
                     if escalated:
                         log("Orchestrator: repeated collection errors — escalating model...")
                     collection_error_count = 0
@@ -941,13 +960,6 @@ class CodingOrchestrator:
 
         Returns (current_files, current_test_files, stale_count, previous_code_hash).
         """
-        # Auto-escalate past mini models for repair — they're too weak for multi-file repair
-        if (self._model_progression
-                and self._model_progression.current_model.endswith("-mini")
-                and not self._model_progression.is_at_max):
-            self._try_escalate_model(log)
-            log("Orchestrator: auto-escalated past mini model for repair")
-
         # Record failure in stall detector
         combined = "".join(sorted(f"{k}:{v}" for k, v in current_files.items()))
         current_hash = _hash(combined)
@@ -957,9 +969,10 @@ class CodingOrchestrator:
             log(f"Orchestrator: stall detected — {self._stall_detector.stall_reason}")
             self._stall_cycle_count += 1
 
-            # Agentic diagnosis before escalation
+            # Agentic diagnosis — only if we've hit the agentic debug threshold
             agentic_diagnosis = None
-            if self._debugger_factory is not None:
+            if (self._debugger_factory is not None
+                    and self._stall_detector._consecutive_failures >= self._agentic_debug_threshold):
                 try:
                     log("Orchestrator: running agentic debugger...")
                     debugger = self._debugger_factory()
@@ -1001,8 +1014,8 @@ class CodingOrchestrator:
                     log(f"Orchestrator: diagnosis identified missing package '{pkg}', installing...")
                     self._install_package(pkg, log)
 
-            # Escalate model
-            self._try_escalate_model(log)
+            # Escalate repair model
+            self._try_escalate_model(log, progression=self._repair_progression, agent="repair")
             self._stall_detector.reset_counters()
 
             # If the issue was purely a dependency problem, re-run without repair
@@ -1432,31 +1445,46 @@ class CodingOrchestrator:
 
     # ── Model escalation ──────────────────────────────────────────────────────
 
-    def _try_escalate_model(self, log: Callable) -> bool:
+    def _try_escalate_model(self, log: Callable, progression: Optional[ModelProgression] = None, agent: str = "all") -> bool:
         """
-        Attempt to escalate to the next model in the progression.
-        When a client_factory is available, creates a fresh client (clean message
-        history) instead of just switching the model on the existing client.
+        Attempt to escalate to the next model in the given progression.
+
+        Parameters
+        ----------
+        progression:
+            The ModelProgression to escalate. Defaults to self._model_progression.
+        agent:
+            Which agent(s) to update: "autocoder", "autotester", "repair", or "all".
+            When "all", updates all agents to the new model.
+
         Returns True if escalation happened, False if already at max or not configured.
         """
-        if not self._model_progression or not self._client:
+        prog = progression or self._model_progression
+        if not prog or not self._client:
             return False
-        if self._model_progression.is_at_max:
+        if prog.is_at_max:
             return False
 
-        new_model = self._model_progression.escalate()
+        new_model = prog.escalate()
         if new_model:
             if self._client_factory:
                 fresh_client = self._client_factory(new_model)
-                self._client = fresh_client
-                self._autocoder._client = fresh_client
-                self._autotester._client = fresh_client
-                if self._autodebugger:
-                    self._autodebugger._client = fresh_client
-                log(f"Orchestrator: escalated to model {new_model} (fresh client)")
+                if agent == "all":
+                    self._client = fresh_client
+                    self._autocoder._client = fresh_client
+                    self._autotester._client = fresh_client
+                    if self._autodebugger:
+                        self._autodebugger._client = fresh_client
+                elif agent == "autocoder":
+                    self._autocoder._client = fresh_client
+                elif agent == "autotester":
+                    self._autotester._client = fresh_client
+                elif agent == "repair":
+                    self._autocoder._client = fresh_client  # repair uses autocoder
+                log(f"Orchestrator: escalated {agent} to model {new_model} (fresh client)")
             else:
                 self._client.set_model(new_model)
-                log(f"Orchestrator: escalated to model {new_model}")
+                log(f"Orchestrator: escalated {agent} to model {new_model}")
             return True
         return False
 

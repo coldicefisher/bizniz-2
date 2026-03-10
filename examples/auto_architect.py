@@ -137,6 +137,11 @@ def _make_orchestrator(config, workspace, on_status_message=None, suggested_mode
         client_factory=client_factory,
         debugger_factory=debugger_factory,
         model_progression=config.make_model_progression(),
+        autocoder_progression=config.make_autocoder_progression(),
+        autotester_progression=config.make_autotester_progression(),
+        repair_progression=config.make_repair_progression(),
+        stall_threshold=config.stall_threshold,
+        agentic_debug_threshold=config.agentic_debug_threshold,
         max_iterations=config.max_iterations,
         on_status_message=on_status_message,
         language=language,
@@ -175,12 +180,15 @@ if __name__ == "__main__":
 
     log("Loading config...")
     config = BiznizConfig.find_and_load()
-    log(f"Config: default_model={config.default_model}, engineer_model={config.engineer_model}, max_iterations={config.max_iterations}")
+    log(f"Config: default_model={config.default_model}, engineer_model={config.engineer_model}, architect_model={config.architect_model}")
     log(f"Model progression: {config.models}")
+    log(f"Autocoder models: {config.autocoder_models or config.models}")
+    log(f"Repair models: {config.repair_models or config.models}")
+    log(f"Stall threshold: {config.stall_threshold}, Agentic debug threshold: {config.agentic_debug_threshold}")
 
     log("Creating architect client...")
-    architect_client = config.make_client(model="gpt-4o")
-    log("Architect client ready")
+    architect_client = config.make_client(model=config.architect_model)
+    log(f"Architect client ready (model={config.architect_model})")
 
     project_name = "Pet Groomer"
     project_parent = Path.home() / "bizniz_projects"
