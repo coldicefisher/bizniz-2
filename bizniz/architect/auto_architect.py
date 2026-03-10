@@ -23,8 +23,10 @@ Project structure:
             └── frontend/         (Dockerfile)
 """
 
+import concurrent.futures
 import json
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Optional, Callable, List
@@ -146,6 +148,8 @@ class AutoArchitect(BaseAIAgent):
 
     def build(
         self, problem_statement: str, project_name: str,
+        parallel: bool = True, max_workers: int = 4,
+        layered: bool = True,
     ) -> ArchitectResult:
         """
         Full pipeline:
@@ -243,44 +247,18 @@ class AutoArchitect(BaseAIAgent):
                 log(f"AutoArchitect: image build failed for '{service.name}': {e}")
 
         # Step 6: Dispatch engineers for application services
-        log("AutoArchitect: dispatching engineers for application services...")
-        service_results = []
+        app_services = [s for s in architecture.services if s.name in service_workspaces]
 
-        for service in architecture.services:
-            if service.name not in service_workspaces:
-                continue
-
-            workspace = service_workspaces[service.name]
-            service_prompt = self._build_service_prompt(
-                problem_statement, service, architecture,
+        if parallel and len(app_services) > 1:
+            log(f"AutoArchitect: dispatching {len(app_services)} services in parallel (max_workers={max_workers})...")
+            service_results = self._dispatch_engineers_parallel(
+                app_services, service_workspaces, problem_statement, architecture, project, max_workers, layered,
             )
-
-            log(f"AutoArchitect: engineering service '{service.name}' ({service.framework}/{service.language})...")
-
-            try:
-                result = self._dispatch_engineer(
-                    workspace=workspace,
-                    service=service,
-                    service_prompt=service_prompt,
-                    project=project,
-                )
-                service_results.append(result)
-                status = "PASS" if result.success else "FAIL"
-                log(
-                    f"AutoArchitect: service '{service.name}' — {status} "
-                    f"({result.issues_passed}/{result.issues_total} issues)"
-                )
-            except AIInsufficientFunds:
-                log("AutoArchitect: API account has insufficient funds — stopping.")
-                raise
-            except Exception as e:
-                log(f"AutoArchitect: service '{service.name}' failed — {type(e).__name__}: {e}")
-                service_results.append(ServiceResult(
-                    service_name=service.name,
-                    workspace_name=service.workspace_name,
-                    success=False,
-                    error=str(e),
-                ))
+        else:
+            log("AutoArchitect: dispatching engineers for application services...")
+            service_results = self._dispatch_engineers_sequential(
+                app_services, service_workspaces, problem_statement, architecture, project, layered,
+            )
 
         compose_path = str(project.dev_root / "docker-compose.yml")
         return ArchitectResult(
@@ -338,12 +316,127 @@ class AutoArchitect(BaseAIAgent):
             f"Last error: {last_error}"
         )
 
+    def _dispatch_engineers_sequential(
+        self,
+        app_services,
+        service_workspaces,
+        problem_statement,
+        architecture,
+        project,
+        layered: bool = True,
+    ) -> List[ServiceResult]:
+        """Dispatch engineers for services one at a time."""
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        service_results = []
+        for service in app_services:
+            workspace = service_workspaces[service.name]
+            service_prompt = self._build_service_prompt(
+                problem_statement, service, architecture,
+            )
+            log(f"AutoArchitect: engineering service '{service.name}' ({service.framework}/{service.language})...")
+
+            try:
+                result = self._dispatch_engineer(
+                    workspace=workspace,
+                    service=service,
+                    service_prompt=service_prompt,
+                    project=project,
+                    layered=layered,
+                )
+                service_results.append(result)
+                status = "PASS" if result.success else "FAIL"
+                log(
+                    f"AutoArchitect: service '{service.name}' — {status} "
+                    f"({result.issues_passed}/{result.issues_total} issues)"
+                )
+            except AIInsufficientFunds:
+                log("AutoArchitect: API account has insufficient funds — stopping.")
+                raise
+            except Exception as e:
+                log(f"AutoArchitect: service '{service.name}' failed — {type(e).__name__}: {e}")
+                service_results.append(ServiceResult(
+                    service_name=service.name,
+                    workspace_name=service.workspace_name,
+                    success=False,
+                    error=str(e),
+                ))
+        return service_results
+
+    def _dispatch_engineers_parallel(
+        self,
+        app_services,
+        service_workspaces,
+        problem_statement,
+        architecture,
+        project,
+        max_workers: int,
+        layered: bool = True,
+    ) -> List[ServiceResult]:
+        """Dispatch engineers for all application services in parallel."""
+        project_db_lock = threading.Lock()
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        service_results = []
+        futures = {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for service in app_services:
+                workspace = service_workspaces[service.name]
+                service_prompt = self._build_service_prompt(
+                    problem_statement, service, architecture,
+                )
+                log(f"AutoArchitect: submitting service '{service.name}' to thread pool...")
+                future = executor.submit(
+                    self._dispatch_engineer,
+                    workspace=workspace,
+                    service=service,
+                    service_prompt=service_prompt,
+                    project=project,
+                    project_db_lock=project_db_lock,
+                    layered=layered,
+                )
+                futures[future] = service
+
+            for future in concurrent.futures.as_completed(futures):
+                service = futures[future]
+                try:
+                    result = future.result()
+                    service_results.append(result)
+                    status = "PASS" if result.success else "FAIL"
+                    log(
+                        f"AutoArchitect: service '{service.name}' — {status} "
+                        f"({result.issues_passed}/{result.issues_total} issues)"
+                    )
+                except AIInsufficientFunds:
+                    log("AutoArchitect: API account has insufficient funds — stopping.")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
+                except Exception as e:
+                    log(f"AutoArchitect: service '{service.name}' failed — {type(e).__name__}: {e}")
+                    service_results.append(ServiceResult(
+                        service_name=service.name,
+                        workspace_name=service.workspace_name,
+                        success=False,
+                        error=str(e),
+                    ))
+
+        return service_results
+
     def _dispatch_engineer(
         self,
         workspace,
         service: ServiceDefinition,
         service_prompt: str,
         project=None,
+        project_db_lock=None,
+        layered: bool = True,
     ) -> ServiceResult:
         """Dispatch an AutoEngineer for a single service."""
         with self._engineer_factory(
@@ -352,45 +445,88 @@ class AutoArchitect(BaseAIAgent):
             image_name=service.image_name,
             language=service.language,
         ) as engineer:
-            analysis = engineer.analyze(service_prompt)
+            if layered:
+                # Layered generation: batch issues by dependency layer
+                analysis = engineer.analyze(service_prompt)
 
-            results = []
-            for issue in analysis.issues:
-                # Log issue to project DB
-                issue_db_id = None
+                # Log issues to project DB
                 if project:
-                    issue_db_id = project.db.log_issue(
-                        service_name=service.name,
-                        title=issue.title,
-                        description=issue.description,
-                    )
+                    for issue in analysis.issues:
+                        if project_db_lock:
+                            with project_db_lock:
+                                project.db.log_issue(
+                                    service_name=service.name,
+                                    title=issue.title,
+                                    description=issue.description,
+                                )
+                        else:
+                            project.db.log_issue(
+                                service_name=service.name,
+                                title=issue.title,
+                                description=issue.description,
+                            )
 
-                try:
-                    result = engineer.dispatch(issue.db_id)
-                    results.append(result)
+                results = engineer.run_layered(service_prompt, analysis=analysis)
+            else:
+                # Sequential per-issue dispatch (legacy behavior)
+                analysis = engineer.analyze(service_prompt)
+                results = []
+                for issue in analysis.issues:
+                    issue_db_id = None
+                    if project:
+                        if project_db_lock:
+                            with project_db_lock:
+                                issue_db_id = project.db.log_issue(
+                                    service_name=service.name,
+                                    title=issue.title,
+                                    description=issue.description,
+                                )
+                        else:
+                            issue_db_id = project.db.log_issue(
+                                service_name=service.name,
+                                title=issue.title,
+                                description=issue.description,
+                            )
 
-                    if project and issue_db_id:
-                        status = "closed" if result.success else "failed"
-                        project.db.update_issue(
-                            issue_db_id, status,
-                            strategy_used=getattr(result, 'strategy_used', None),
-                            iterations=result.iterations,
-                        )
-                except AIInsufficientFunds:
-                    raise
-                except Exception as e:
-                    results.append(type('R', (), {
-                        'success': False, 'iterations': 0,
-                    })())
-                    if project and issue_db_id:
-                        project.db.update_issue(issue_db_id, "failed")
+                    try:
+                        result = engineer.dispatch(issue.db_id)
+                        results.append(result)
 
-        successes = sum(1 for r in results if r.success)
+                        if project and issue_db_id:
+                            status = "closed" if result.success else "failed"
+                            if project_db_lock:
+                                with project_db_lock:
+                                    project.db.update_issue(
+                                        issue_db_id, status,
+                                        strategy_used=getattr(result, 'strategy_used', None),
+                                        iterations=result.iterations,
+                                    )
+                            else:
+                                project.db.update_issue(
+                                    issue_db_id, status,
+                                    strategy_used=getattr(result, 'strategy_used', None),
+                                    iterations=result.iterations,
+                                )
+                    except AIInsufficientFunds:
+                        raise
+                    except Exception as e:
+                        results.append(type('R', (), {
+                            'success': False, 'iterations': 0,
+                        })())
+                        if project and issue_db_id:
+                            if project_db_lock:
+                                with project_db_lock:
+                                    project.db.update_issue(issue_db_id, "failed")
+                            else:
+                                project.db.update_issue(issue_db_id, "failed")
+
+        successes = sum(1 for r in results if getattr(r, 'success', False))
+        total = len(results)
         return ServiceResult(
             service_name=service.name,
             workspace_name=service.workspace_name,
-            success=successes == len(results) and len(results) > 0,
-            issues_total=len(results),
+            success=successes == total and total > 0,
+            issues_total=total,
             issues_passed=successes,
         )
 

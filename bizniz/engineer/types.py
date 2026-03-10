@@ -104,7 +104,14 @@ class EngineeringIssue(BaseModel):
     target_files: List[TargetFile] = []
     test_files: List[str] = []
     depends_on_issues: List[int] = []
+    depends_on_titles: List[str] = []
     suggested_model: Optional[str] = None
+
+
+class DependencyLayer(BaseModel):
+    """A group of issues with no inter-dependencies, safe to batch together."""
+    layer_index: int
+    issues: List[EngineeringIssue]
 
 
 class EngineeringAnalysis(BaseModel):

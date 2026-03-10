@@ -27,6 +27,7 @@ from bizniz.engineer.types import (
     EngineeringRequirement,
     EngineeringUseCase,
     EngineeringIssue,
+    DependencyLayer,
     TargetFile,
     ArchitecturePlan,
     ArchitectureNamespace,
@@ -39,6 +40,11 @@ from bizniz.engineer.types import (
     DriftReport,
     GovernanceDecision,
     AutoEngineerBadAIResponseError,
+)
+from bizniz.engineer.dependency_graph import (
+    resolve_dependencies,
+    sort_into_layers,
+    CyclicDependencyError,
 )
 from bizniz.engineer.prompts.system_prompt import AUTO_ENGINEER_SYSTEM_PROMPT, get_engineer_system_prompt
 from bizniz.engineer.prompts.analyze_prompt import ANALYZE_PROMPT_TEMPLATE, get_analyze_prompt
@@ -148,6 +154,7 @@ class AutoEngineer(BaseAIAgent):
         for issue in refined_raw.get("issues", []):
             target_files = issue.get("target_files", [])
             test_files = issue.get("test_files", [])
+            depends_on = issue.get("depends_on", [])
             suggested_model = issue.get("suggested_model")
             db_id = self._workspace.db.save_issue(
                 problem_id=problem_id,
@@ -163,6 +170,7 @@ class AutoEngineer(BaseAIAgent):
                 description=issue["description"],
                 target_files=[TargetFile(**tf) for tf in target_files],
                 test_files=test_files,
+                depends_on_titles=depends_on,
                 suggested_model=suggested_model,
             ))
 
@@ -463,6 +471,163 @@ class AutoEngineer(BaseAIAgent):
                     workspace_context[change.filepath] = change.code
 
         return results
+
+    def run_layered(
+        self,
+        problem_statement: str,
+        analysis: Optional[EngineeringAnalysis] = None,
+    ) -> List[OrchestratorResult]:
+        """
+        Full pipeline with layered generation: analyze the problem,
+        sort issues into dependency layers, and dispatch each layer
+        as a batch (one orchestrator call per layer).
+
+        Layers are determined by topological sort of issue dependencies.
+        Issues within the same layer share no inter-dependencies and are
+        batched into a single code generation call, giving the LLM full
+        context of all related files.
+
+        Previous layers' code is passed as workspace context to subsequent
+        layers, so generated code can correctly import from foundation modules.
+
+        Parameters
+        ----------
+        analysis:
+            Pre-computed analysis. If None, analyze() is called.
+        """
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        if analysis is None:
+            analysis = self.analyze(problem_statement)
+
+        # Resolve title-based dependencies to db_id-based
+        resolve_dependencies(analysis.issues)
+
+        # Sort into layers
+        try:
+            layers = sort_into_layers(analysis.issues)
+        except CyclicDependencyError as e:
+            log(f"AutoEngineer: {e} — falling back to sequential dispatch")
+            return self.run(problem_statement)
+
+        log(f"AutoEngineer: {len(analysis.issues)} issues sorted into {len(layers)} layer(s)")
+        for layer in layers:
+            titles = [i.title for i in layer.issues]
+            log(f"  Layer {layer.layer_index}: {titles}")
+
+        results = []
+        workspace_context = {}
+
+        for layer in layers:
+            log(
+                f"AutoEngineer: dispatching layer {layer.layer_index} "
+                f"({len(layer.issues)} issue(s))..."
+            )
+
+            if len(layer.issues) == 1:
+                # Single issue — dispatch normally (gets retry strategies)
+                issue = layer.issues[0]
+                result = self.dispatch(issue.db_id, workspace_context=workspace_context)
+                results.append(result)
+            else:
+                # Multiple issues — batch into one orchestrator call
+                result = self._dispatch_layer(layer, analysis, workspace_context)
+                results.append(result)
+
+            # Accumulate working code for cross-layer context
+            if result.success and result.changes:
+                for change in result.changes:
+                    workspace_context[change.filepath] = change.code
+
+        return results
+
+    def _dispatch_layer(
+        self,
+        layer: DependencyLayer,
+        analysis: EngineeringAnalysis,
+        workspace_context: dict,
+    ) -> OrchestratorResult:
+        """
+        Batch all issues in a layer into one orchestrator call.
+        Merges target files, test files, and descriptions.
+        """
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        # Merge all issues into a combined prompt
+        combined_descriptions = []
+        all_target_files = []
+        all_test_files = []
+        seen_targets = set()
+        seen_tests = set()
+
+        for issue in layer.issues:
+            combined_descriptions.append(f"## {issue.title}\n{issue.description}")
+            for tf in issue.target_files:
+                if tf.filepath not in seen_targets:
+                    all_target_files.append({"filepath": tf.filepath, "action": tf.action})
+                    seen_targets.add(tf.filepath)
+            for tf in issue.test_files:
+                if tf not in seen_tests:
+                    all_test_files.append(tf)
+                    seen_tests.add(tf)
+
+        combined_prompt = (
+            "Implement the following issues together as a cohesive batch. "
+            "All issues in this batch are at the same dependency level and "
+            "should be implemented together.\n\n"
+            + "\n\n".join(combined_descriptions)
+        )
+
+        # Use the strongest suggested_model from the batch
+        suggested = None
+        for issue in layer.issues:
+            if issue.suggested_model:
+                if suggested is None:
+                    suggested = issue.suggested_model
+                # Simple heuristic: prefer non-mini models
+                elif "mini" in (suggested or "") and "mini" not in issue.suggested_model:
+                    suggested = issue.suggested_model
+
+        # Load architecture context
+        arch_context = ""
+        if analysis.architecture:
+            arch_context = self.format_architecture_context(analysis.architecture)
+
+        # Mark all issues as in_progress
+        for issue in layer.issues:
+            self._workspace.db.update_issue_status(issue.db_id, "in_progress")
+
+        log(
+            f"AutoEngineer: layer {layer.layer_index} — "
+            f"{len(all_target_files)} target file(s), "
+            f"{len(all_test_files)} test file(s)"
+        )
+
+        result = self._run_orchestrator(
+            row={"title": f"Layer {layer.layer_index}", "description": combined_prompt},
+            target_files=all_target_files,
+            test_files=all_test_files,
+            arch_context=arch_context,
+            suggested_model=suggested,
+            strategy=CodingStrategy.TDD,
+            workspace_context=workspace_context,
+            log=log,
+        )
+
+        # Update all issue statuses
+        for issue in layer.issues:
+            if result.success:
+                self._workspace.db.close_issue(issue.db_id)
+            else:
+                self._workspace.db.update_issue_status(issue.db_id, "open")
+
+        return result
 
     def close(self):
         """Close the underlying database connection (if open)."""
@@ -929,6 +1094,7 @@ class AutoEngineer(BaseAIAgent):
                 description=issue["description"],
                 target_files=[TargetFile(**tf) for tf in target_files],
                 test_files=test_files,
+                depends_on_titles=depends_on,
                 suggested_model=suggested_model,
             ))
 

@@ -32,6 +32,10 @@ class BiznizConfig(BaseModel):
     # Escalation thresholds (consecutive failures before escalating model)
     stall_threshold: int = 3
     agentic_debug_threshold: int = 5
+    # Pipeline execution mode
+    layered_generation: bool = True
+    parallel_services: bool = True
+    max_service_workers: int = 4
     api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     is_azure: bool = False

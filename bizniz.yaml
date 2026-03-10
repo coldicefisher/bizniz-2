@@ -16,4 +16,7 @@ repair_models:
   - gpt-5
 stall_threshold: 3
 agentic_debug_threshold: 5
+layered_generation: true
+parallel_services: true
+max_service_workers: 4
 max_iterations: 20

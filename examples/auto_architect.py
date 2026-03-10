@@ -185,6 +185,7 @@ if __name__ == "__main__":
     log(f"Autocoder models: {config.autocoder_models or config.models}")
     log(f"Repair models: {config.repair_models or config.models}")
     log(f"Stall threshold: {config.stall_threshold}, Agentic debug threshold: {config.agentic_debug_threshold}")
+    log(f"Layered generation: {config.layered_generation}, Parallel services: {config.parallel_services}")
 
     log("Creating architect client...")
     architect_client = config.make_client(model=config.architect_model)
@@ -210,7 +211,12 @@ if __name__ == "__main__":
     log("Starting build pipeline...")
 
     try:
-        result = architect.build(PROBLEM_STATEMENT, project_name)
+        result = architect.build(
+            PROBLEM_STATEMENT, project_name,
+            parallel=config.parallel_services,
+            max_workers=config.max_service_workers,
+            layered=config.layered_generation,
+        )
     except KeyboardInterrupt:
         log("Interrupted by user")
         sys.exit(130)
