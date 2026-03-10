@@ -89,6 +89,7 @@ class AutoEngineer(BaseAIAgent):
         on_event: Optional[Callable] = None,
         on_status_message: Optional[Callable[[str], None]] = None,
         language: str = "python",
+        available_models: Optional[List[str]] = None,
     ):
         self._language = language  # Must be set before super().__init__ reads _process_system_prompt
         super().__init__(
@@ -100,6 +101,7 @@ class AutoEngineer(BaseAIAgent):
             on_status_message=on_status_message,
         )
         self._orchestrator_factory = orchestrator_factory
+        self._available_models = available_models or ["gpt-4o", "gpt-5"]
 
     # ── BaseAIAgent contract ────────────────────────────────────────────────────
 
@@ -125,9 +127,11 @@ class AutoEngineer(BaseAIAgent):
 
         # Step 1: Initial analysis (requirements, use cases, issues)
         log("AutoEngineer: calling AI for engineering analysis...")
+        models_str = ", ".join(self._available_models)
         user_prompt = get_analyze_prompt(self._language).format(
             problem_statement=problem_statement,
             architecture_context="",
+            available_models=models_str,
         )
         raw = self._call_ai_for_analysis(user_prompt)
 
@@ -146,6 +150,7 @@ class AutoEngineer(BaseAIAgent):
         refined_prompt = get_analyze_prompt(self._language).format(
             problem_statement=problem_statement,
             architecture_context=f"ARCHITECTURE PLAN:\n{arch_context}",
+            available_models=models_str,
         )
         refined_raw = self._call_ai_for_analysis(refined_prompt)
 

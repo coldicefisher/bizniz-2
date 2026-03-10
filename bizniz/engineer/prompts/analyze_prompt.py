@@ -18,11 +18,9 @@ Produce a JSON response with:
     - "target_files": list of objects with "filepath" and "action" ("create" or "modify")
     - "test_files": list of test file paths (e.g. "tests/test_expense_manager.py")
     - "depends_on": list of issue titles this issue depends on (empty if none)
-    - "suggested_model": the AI model to start with for this issue based on complexity:
-        - "gpt-4o-mini" for simple tasks: data classes, enums, basic CRUD, simple utility functions, straightforward tests
-        - "gpt-4o" for moderate tasks: business logic with multiple dependencies, CLI interfaces, modules with complex interactions
-        - "gpt-5" for complex tasks: multi-module architectural work, complex algorithms, intricate state management
-      Choose the cheapest model that can reliably solve the task. Most issues should use "gpt-4o-mini". Reserve "gpt-4o" for issues with 3+ dependencies or complex logic. Use "gpt-5" sparingly.
+    - "suggested_model": the AI model to start with for this issue based on complexity.
+      AVAILABLE MODELS (ordered cheapest to most capable): {available_models}
+      Choose the cheapest model that can reliably solve the task. Use cheaper models for simple tasks (data classes, enums, basic CRUD). Use more capable models for complex tasks (multi-module, complex algorithms). Only pick from the list above.
 
 RULES FOR ISSUES:
 - All file paths must be inside the package namespace or tests/ directory.
@@ -55,11 +53,9 @@ Produce a JSON response with:
     - "target_files": list of objects with "filepath" and "action" ("create" or "modify")
     - "test_files": list of test file paths (e.g. "src/__tests__/App.test.tsx", "src/__tests__/utils.test.ts")
     - "depends_on": list of issue titles this issue depends on (empty if none)
-    - "suggested_model": the AI model to start with for this issue based on complexity:
-        - "gpt-4o-mini" for simple tasks: interfaces, enums, basic CRUD, simple utility functions, straightforward tests
-        - "gpt-4o" for moderate tasks: business logic with multiple dependencies, React components with complex state, modules with complex interactions
-        - "gpt-5" for complex tasks: multi-module architectural work, complex algorithms, intricate state management
-      Choose the cheapest model that can reliably solve the task. Most issues should use "gpt-4o-mini". Reserve "gpt-4o" for issues with 3+ dependencies or complex logic. Use "gpt-5" sparingly.
+    - "suggested_model": the AI model to start with for this issue based on complexity.
+      AVAILABLE MODELS (ordered cheapest to most capable): {available_models}
+      Choose the cheapest model that can reliably solve the task. Use cheaper models for simple tasks (interfaces, enums, basic CRUD). Use more capable models for complex tasks (multi-module, complex algorithms). Only pick from the list above.
 
 RULES FOR ISSUES:
 - All file paths must use .ts or .tsx extensions.

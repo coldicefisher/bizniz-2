@@ -199,6 +199,7 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
             "python3", "-m", "pytest",
             *test_paths_container,
             "-v", "--tb=long", "--no-header",
+            "-p", "no:cacheprovider",
             *self._extra_pytest_args,
         ]
 

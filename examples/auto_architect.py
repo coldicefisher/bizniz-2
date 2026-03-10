@@ -167,6 +167,7 @@ def _make_engineer(config, workspace, on_status_message=None, image_name=None, l
         orchestrator_factory=orchestrator_factory,
         on_status_message=on_status_message,
         language=language,
+        available_models=config.autocoder_models or config.models,
     )
 
 
