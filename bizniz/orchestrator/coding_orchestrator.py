@@ -306,6 +306,10 @@ class CodingOrchestrator:
                     error_detail = eval_result.error.traceback
                 elif eval_result.stdout:
                     error_detail = eval_result.stdout
+                if not error_detail and eval_result.stderr:
+                    error_detail = eval_result.stderr
+                elif eval_result.stderr and eval_result.stderr not in error_detail:
+                    error_detail += f"\nstderr: {eval_result.stderr}"
 
                 regen_prompt = (
                     f"{prompt}\n\n"
@@ -629,8 +633,20 @@ class CodingOrchestrator:
                     error_detail = eval_result.error.traceback
                 elif eval_result.stdout:
                     error_detail = eval_result.stdout
+                # Also check stderr (exit code 4 often only has stderr)
+                if not error_detail and eval_result.stderr:
+                    error_detail = eval_result.stderr
+                elif eval_result.stderr and eval_result.stderr not in error_detail:
+                    error_detail += f"\nstderr: {eval_result.stderr}"
 
                 log(f"Orchestrator: collection error detail: {error_detail[:500]}")
+
+                # Auto-fix bad pytest config files created by debugger
+                fixed_config = self._fix_bad_pytest_config(current_files, error_detail, log)
+                if fixed_config:
+                    log("Orchestrator: removed bad pytest config — retrying...")
+                    collection_error_count = 0
+                    continue
 
                 # Auto-fix file/directory collisions (e.g. models.py vs models/)
                 fixed_collision = self._fix_file_directory_collisions(current_files, log)
@@ -1305,6 +1321,45 @@ class CodingOrchestrator:
             current_files[new_path] = content
         for old_path in files_to_remove:
             current_files.pop(old_path, None)
+
+        return fixed
+
+    # ── Config file cleanup ────────────────────────────────────────────────────
+
+    def _fix_bad_pytest_config(self, current_files: dict, error_detail: str, log: Callable) -> bool:
+        """
+        Detect and remove pytest config files that cause collection errors.
+
+        The agentic debugger sometimes creates pytest.ini or conftest.py files
+        with invalid options (e.g. --asyncio-mode=auto without pytest-asyncio).
+        """
+        if "unrecognized arguments" not in error_detail:
+            return False
+
+        try:
+            workspace_root = self._workspace.root
+            if not isinstance(workspace_root, Path):
+                return False
+        except Exception:
+            return False
+
+        fixed = False
+        for config_file in ["pytest.ini", "setup.cfg", "tox.ini"]:
+            config_path = workspace_root / config_file
+            if config_path.exists():
+                try:
+                    content = config_path.read_text()
+                    # Check if this config contains the problematic argument
+                    # Extract the unrecognized arg from the error
+                    import re
+                    match = re.search(r"unrecognized arguments: (\S+)", error_detail)
+                    if match and match.group(1) in content:
+                        log(f"Orchestrator: removing bad config file {config_file} (contains {match.group(1)})")
+                        config_path.unlink()
+                        current_files.pop(config_file, None)
+                        fixed = True
+                except Exception:
+                    pass
 
         return fixed
 
