@@ -229,8 +229,10 @@ class TestCreatePackageStructure:
 
         eng.create_package_structure(plan)
 
+        # Root package is created, but subdirectory namespaces are NOT
+        # pre-created to avoid collisions with single-file modules
         assert (ws.root / "expense_tracker" / "__init__.py").exists()
-        assert (ws.root / "expense_tracker" / "models" / "__init__.py").exists()
+        assert not (ws.root / "expense_tracker" / "models" / "__init__.py").exists()
         assert (ws.root / "pyproject.toml").exists()
         assert (ws.root / "tests" / "__init__.py").exists()
 

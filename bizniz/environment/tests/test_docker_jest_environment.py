@@ -386,7 +386,7 @@ class TestDescribe:
         assert "DockerJestEnvironment" in desc
         assert "myservice:latest" in desc
         assert str(tmp_path) in desc
-        assert "60s" in desc
+        assert "120s" in desc
         assert "not started" in desc
 
     def test_describe_with_packages(self, tmp_path):
@@ -413,7 +413,7 @@ class TestInit:
 
     def test_defaults(self, tmp_path):
         env = _make_env(tmp_path)
-        assert env.timeout == 60
+        assert env.timeout == 120
         assert env._extra_jest_args == []
         assert env._network_enabled is False
         assert env._installed_packages == []

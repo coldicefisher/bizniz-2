@@ -529,15 +529,17 @@ class AutoEngineer(BaseAIAgent):
     def create_package_structure(self, plan: ArchitecturePlan):
         """
         Create the workspace directory structure from the architecture plan:
-        pyproject.toml, package directory, namespace directories with __init__.py.
+        pyproject.toml and root package directory with __init__.py.
+
+        Only the root package directory is created here. Subdirectory namespaces
+        (e.g. models/, api/) are NOT pre-created because the autocoder may generate
+        single files (models.py) instead of packages (models/__init__.py), and
+        having both causes Python import collisions.
         """
         self._workspace.init_as_package(
             package_name=plan.package_name,
             description=f"Generated package: {plan.package_name}",
         )
-
-        for ns in plan.namespaces:
-            self._workspace.create_namespace(ns.namespace_path)
 
     def review_drift(
         self,

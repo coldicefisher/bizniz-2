@@ -84,9 +84,28 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
                 capture_output=True, text=True,
             )
             if check.returncode == 0 and "true" in check.stdout.strip().lower():
-                return
-            # Container died, reset and restart
-            self._container_id = None
+                # Verify bind mount is still valid (host dir may have been recreated)
+                # Create a probe file on host, check if container can see it
+                probe = self._workspace_root / ".bizniz_mount_probe"
+                try:
+                    probe.write_text("ok")
+                    mount_check = subprocess.run(
+                        ["docker", "exec", self._container_id,
+                         "cat", "/workspace/.bizniz_mount_probe"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    probe.unlink(missing_ok=True)
+                    if mount_check.returncode == 0 and "ok" in mount_check.stdout:
+                        return
+                except Exception:
+                    probe.unlink(missing_ok=True)
+                # Mount is stale — restart container
+                self.stop()
+            else:
+                self._container_id = None
+
+        # Generate fresh container name for each start
+        self._container_name = f"bizniz-pytest-{uuid.uuid4().hex[:12]}"
 
         cmd = [
             "docker", "run", "-d",

@@ -290,7 +290,8 @@ class CodingOrchestrator:
             is_collection_error = (
                 eval_result.error
                 and eval_result.error.message
-                and "exited with code 2" in eval_result.error.message
+                and ("exited with code 2" in eval_result.error.message
+                     or "exited with code 4" in eval_result.error.message)
             )
             if is_collection_error:
                 log("Orchestrator: test collection error — regenerating tests...")
@@ -571,7 +572,9 @@ class CodingOrchestrator:
             # Tests failed
             failure_output = _build_failure_message_multi(eval_result, current_test_files)
             last_failure_output = failure_output
-            log(f"Orchestrator: tests failed (iteration {iteration})")
+            # Log failure detail (truncated) for debugging
+            fail_preview = (failure_output or "")[:200].replace("\n", " | ")
+            log(f"Orchestrator: tests failed (iteration {iteration}): {fail_preview}")
 
             # ── Missing package detection ─────────────────────────────────
             missing_pkg = _detect_missing_package(failure_output)
@@ -597,7 +600,8 @@ class CodingOrchestrator:
             is_collection_error = (
                 eval_result.error
                 and eval_result.error.message
-                and "exited with code 2" in eval_result.error.message
+                and ("exited with code 2" in eval_result.error.message
+                     or "exited with code 4" in eval_result.error.message)
             )
             if is_collection_error:
                 collection_error_count += 1
@@ -616,6 +620,15 @@ class CodingOrchestrator:
                     error_detail = eval_result.error.traceback
                 elif eval_result.stdout:
                     error_detail = eval_result.stdout
+
+                log(f"Orchestrator: collection error detail: {error_detail[:300]}")
+
+                # Auto-fix file/directory collisions (e.g. models.py vs models/)
+                fixed_collision = self._fix_file_directory_collisions(current_files, log)
+                if fixed_collision:
+                    log("Orchestrator: fixed file/directory collision — retrying...")
+                    collection_error_count = 0
+                    continue
 
                 # After 3 consecutive collection errors, escalate model and clear history
                 if collection_error_count >= 3:
@@ -1227,6 +1240,64 @@ class CodingOrchestrator:
             if ch.filepath not in planned_paths
         ]
         return unplanned
+
+    # ── Structural fixes ────────────────────────────────────────────────────
+
+    def _fix_file_directory_collisions(self, current_files: dict, log: Callable) -> bool:
+        """
+        Detect and fix file/directory name collisions.
+
+        If the autocoder generates e.g. 'pkg/models.py' but a directory
+        'pkg/models/' with __init__.py already exists, move the file content
+        into 'pkg/models/__init__.py' and remove the standalone .py file.
+
+        Returns True if any collision was fixed.
+        """
+        try:
+            workspace_root = self._workspace.root
+            if not isinstance(workspace_root, Path):
+                return False
+        except Exception:
+            return False
+
+        fixed = False
+        files_to_update = {}
+        files_to_remove = []
+
+        for filepath in list(current_files.keys()):
+            p = Path(filepath)
+            if p.suffix != ".py":
+                continue
+
+            # Check if a directory with the same stem exists
+            dir_path = workspace_root / p.with_suffix("")
+            if dir_path.is_dir():
+                # Move the file content into the directory's __init__.py
+                new_rel_path = str(p.with_suffix("")) + "/__init__.py"
+                content = current_files[filepath]
+
+                log(f"Orchestrator: collision detected — {filepath} vs {p.with_suffix('')}/")
+                log(f"Orchestrator: moving {filepath} → {new_rel_path}")
+
+                # Write to the __init__.py inside the directory
+                self._workspace.write_file(path=new_rel_path, content=content)
+                files_to_update[new_rel_path] = content
+                files_to_remove.append(filepath)
+
+                # Remove the standalone .py file from disk
+                standalone = workspace_root / filepath
+                if standalone.exists():
+                    standalone.unlink()
+
+                fixed = True
+
+        # Update the current_files dict
+        for new_path, content in files_to_update.items():
+            current_files[new_path] = content
+        for old_path in files_to_remove:
+            current_files.pop(old_path, None)
+
+        return fixed
 
     # ── Model escalation ──────────────────────────────────────────────────────
 

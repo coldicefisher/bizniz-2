@@ -504,7 +504,7 @@ class AutoArchitect(BaseAIAgent):
 
         # Add framework defaults if not already specified
         framework_defaults = {
-            "fastapi": ["fastapi", "uvicorn", "pydantic"],
+            "fastapi": ["fastapi", "uvicorn", "pydantic", "httpx"],
             "flask": ["flask"],
             "django": ["django"],
         }
