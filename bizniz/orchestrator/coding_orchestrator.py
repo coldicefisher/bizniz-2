@@ -659,6 +659,46 @@ class CodingOrchestrator:
                     collection_error_count = 0
                     continue
 
+                # If collection error is an ImportError in source code (not tests),
+                # repair the source code instead of just regenerating tests
+                if "ImportError" in error_detail and collection_error_count <= 2:
+                    # Check if the import error traces back to a source file (not a test file)
+                    source_import_error = False
+                    for fp in current_files:
+                        basename = fp.rsplit("/", 1)[-1] if "/" in fp else fp
+                        module = basename.replace(".py", "")
+                        if basename in error_detail or module in error_detail:
+                            source_import_error = True
+                            break
+                    if source_import_error:
+                        log("Orchestrator: collection error caused by source code import — repairing code...")
+                        all_files = {**current_files}
+                        for fp, tests in current_test_files.items():
+                            all_files[fp] = tests
+                        try:
+                            repaired = self._autocoder.repair_multi(
+                                current_files=all_files,
+                                error_message=f"Test collection failed with ImportError. Fix the source code imports.\n\n{error_detail}",
+                                architecture_context=architecture_context,
+                            )
+                            if repaired.dependencies:
+                                self._install_declared_dependencies(repaired.dependencies, log)
+                            for ch in repaired.changes:
+                                if ch.filepath in current_test_files:
+                                    current_test_files[ch.filepath] = ch.code
+                                else:
+                                    current_files[ch.filepath] = ch.code
+                                    self._workspace.write_file(path=ch.filepath, content=ch.code)
+                            # Re-install project after code changes
+                            self._install_project_editable(log)
+                            stale_count = 0
+                            previous_code_hash = None
+                            continue
+                        except AIInsufficientFunds:
+                            raise
+                        except Exception as e:
+                            log(f"Orchestrator: code repair for import error failed ({type(e).__name__}: {e})")
+
                 # After 3 consecutive collection errors, escalate model and clear history
                 if collection_error_count >= 3:
                     escalated = self._try_escalate_model(log)
