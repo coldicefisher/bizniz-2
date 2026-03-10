@@ -1,9 +1,13 @@
 """
 DockerPytestEnvironment
 
-Runs pytest inside a Docker container with the workspace mounted, so that
-third-party dependencies (e.g. ``fastapi``, ``pydantic``) are available at
-import time.
+Runs pytest inside a persistent Docker container with the workspace mounted,
+so that third-party dependencies (e.g. ``fastapi``, ``pydantic``) are available
+at import time.
+
+The container is started once (lazily on first execute()) and reused for all
+subsequent test runs via ``docker exec``. This eliminates container startup
+overhead (~5-10s per run) which compounds across many iterations.
 
 Usage in the orchestrator::
 
@@ -14,6 +18,9 @@ Usage in the orchestrator::
     call_spec = ExecutionCallSpec(symbol="pytest", args=["/abs/path/to/test_file.py"])
     result = env.execute(code="", call_spec=call_spec)
 
+    # When done, clean up:
+    env.stop()
+
 The ``code`` argument is intentionally unused — the test file is already on disk.
 The workspace root is bind-mounted at ``/workspace`` inside the container and
 ``PYTHONPATH=/workspace`` is set so plain ``import module_name`` works.
@@ -23,6 +30,7 @@ import os
 import subprocess
 import time
 import traceback
+import uuid
 from pathlib import Path
 from typing import Optional, List, Union
 
@@ -36,11 +44,10 @@ from bizniz.environment.types import (
 
 class DockerPytestEnvironment(BaseExecutionEnvironment):
     """
-    Runs pytest inside a Docker container with the workspace mounted.
+    Runs pytest inside a persistent Docker container with the workspace mounted.
 
-    Each service workspace has its own Docker image with the correct
-    dependencies installed. Tests run inside that container so imports
-    like ``fastapi``, ``pydantic``, etc. work correctly.
+    The container is started lazily on the first execute() call and kept alive
+    for all subsequent runs. Use stop() to clean up, or use as a context manager.
     """
 
     name: str = "docker-pytest-environment"
@@ -49,7 +56,7 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
         self,
         workspace_root: Union[Path, str],
         image: str,
-        timeout: int = 120,
+        timeout: int = 60,
         extra_pytest_args: Optional[List[str]] = None,
         network_enabled: bool = False,
     ):
@@ -59,10 +66,63 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
         self._extra_pytest_args = extra_pytest_args or []
         self._network_enabled = network_enabled
         self._installed_packages: List[str] = []
+        self._container_id: Optional[str] = None
+        self._container_name = f"bizniz-pytest-{uuid.uuid4().hex[:12]}"
 
     @property
     def image(self) -> str:
         return self._image
+
+    # ── Container lifecycle ────────────────────────────────────────────────────
+
+    def _ensure_container(self):
+        """Start the persistent container if not already running."""
+        if self._container_id is not None:
+            # Verify it's still running
+            check = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", self._container_id],
+                capture_output=True, text=True,
+            )
+            if check.returncode == 0 and "true" in check.stdout.strip().lower():
+                return
+            # Container died, reset and restart
+            self._container_id = None
+
+        cmd = [
+            "docker", "run", "-d",
+            "--name", self._container_name,
+            "-v", f"{self._workspace_root}:/workspace",
+            "-w", "/workspace",
+            "-e", "PYTHONPATH=/workspace",
+        ]
+
+        if not self._network_enabled:
+            cmd += ["--network", "none"]
+
+        cmd += [self._image, "sleep", "infinity"]
+
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Failed to start persistent container: {proc.stderr.strip()}"
+            )
+        self._container_id = proc.stdout.strip()
+
+    def stop(self):
+        """Stop and remove the persistent container."""
+        if self._container_id is not None:
+            self._fix_permissions()
+            subprocess.run(
+                ["docker", "rm", "-f", self._container_id],
+                capture_output=True, timeout=10,
+            )
+            self._container_id = None
+
+    def __del__(self):
+        try:
+            self.stop()
+        except Exception:
+            pass
 
     # ── BaseExecutionEnvironment interface ──────────────────────────────────────
 
@@ -72,12 +132,7 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
         call_spec: ExecutionCallSpec,
     ) -> ExecutionEnvironmentResult:
         """
-        Run pytest inside the Docker container.
-
-        1. Mount workspace_root at /workspace inside the container
-        2. Set PYTHONPATH=/workspace
-        3. Run: python3 -m pytest <test_paths> -v --tb=long
-        4. Parse exit code and output
+        Run pytest inside the persistent Docker container via docker exec.
 
         call_spec.args should contain test file paths (relative to workspace root).
         These get converted to /workspace/<relative_path> inside the container.
@@ -94,31 +149,34 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
                 ),
             )
 
+        # Ensure persistent container is running
+        try:
+            self._ensure_container()
+        except Exception as e:
+            return ExecutionEnvironmentResult(
+                success=False,
+                error=ExecutionEnvironmentErrorDetails(
+                    stage="container_start",
+                    type=type(e).__name__,
+                    message=str(e),
+                ),
+            )
+
         # Convert absolute host paths to container paths
         test_paths_container = []
         for arg in call_spec.args:
             if arg.startswith("-"):
                 break
-            # Convert to path relative to workspace, then to /workspace/<relative>
             p = Path(arg).resolve()
             try:
                 relative = p.relative_to(self._workspace_root)
             except ValueError:
-                relative = Path(arg)  # already relative
+                relative = Path(arg)
             test_paths_container.append(f"/workspace/{relative}")
 
         cmd = [
-            "docker", "run", "--rm",
-            "-v", f"{self._workspace_root}:/workspace",
-            "-w", "/workspace",
-            "-e", "PYTHONPATH=/workspace",
-        ]
-
-        if not self._network_enabled:
-            cmd += ["--network", "none"]
-
-        cmd += [
-            self._image,
+            "docker", "exec",
+            self._container_id,
             "python3", "-m", "pytest",
             *test_paths_container,
             "-v", "--tb=long", "--no-header",
@@ -133,7 +191,6 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
                 timeout=self.timeout,
             )
         except subprocess.TimeoutExpired as e:
-            self._fix_permissions()
             return ExecutionEnvironmentResult(
                 success=False,
                 error=ExecutionEnvironmentErrorDetails(
@@ -145,7 +202,6 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
                 stderr=e.stderr,
             )
         except Exception as e:
-            self._fix_permissions()
             return ExecutionEnvironmentResult(
                 success=False,
                 error=ExecutionEnvironmentErrorDetails(
@@ -155,8 +211,6 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
                     traceback=traceback.format_exc(),
                 ),
             )
-
-        self._fix_permissions()
 
         if proc.returncode == 0:
             return ExecutionEnvironmentResult(
@@ -182,52 +236,35 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
 
     def install_packages(self, packages: List[str]) -> None:
         """
-        Install packages into the Docker image and update requirements.txt.
+        Install packages into the running container via docker exec.
 
-        Strategy:
-        1. Run ``pip install <packages>`` inside a container based on current image
-        2. Commit that container as a new image layer
-        3. Update self._image to point to the new image
-        4. Append packages to requirements.txt in the workspace
+        Also commits the container as a new image layer so packages persist
+        if the container is restarted.
         """
         new_packages = [p for p in packages if p not in self._installed_packages]
         if not new_packages:
             return
 
-        # Run pip install in a temporary container
-        container_name = f"bizniz-pip-{hash(tuple(new_packages)) & 0xFFFFFFFF:08x}"
-        install_cmd = [
-            "docker", "run",
-            "--name", container_name,
-            self._image,
-            "pip", "install", "--no-cache-dir", *new_packages,
-        ]
+        self._ensure_container()
 
-        try:
-            proc = subprocess.run(
-                install_cmd, capture_output=True, text=True, timeout=120,
-            )
-            if proc.returncode != 0:
-                # Clean up container on failure
-                subprocess.run(
-                    ["docker", "rm", container_name], capture_output=True,
-                )
-                return
+        # Install directly in the running container
+        proc = subprocess.run(
+            ["docker", "exec", self._container_id,
+             "pip", "install", "--no-cache-dir", *new_packages],
+            capture_output=True, text=True, timeout=120,
+        )
+        if proc.returncode != 0:
+            return
 
-            # Commit the container as a new image
-            new_tag = f"{self._image.split(':')[0]}:latest"
-            subprocess.run(
-                ["docker", "commit", container_name, new_tag],
-                capture_output=True, text=True, check=True,
-            )
-            self._image = new_tag
-            self._installed_packages.extend(new_packages)
+        self._installed_packages.extend(new_packages)
 
-        finally:
-            # Clean up the temporary container
-            subprocess.run(
-                ["docker", "rm", container_name], capture_output=True,
-            )
+        # Commit the container so the image is updated for future restarts
+        new_tag = f"{self._image.split(':')[0]}:latest"
+        subprocess.run(
+            ["docker", "commit", self._container_id, new_tag],
+            capture_output=True, text=True,
+        )
+        self._image = new_tag
 
         # Update requirements.txt in the workspace
         req_path = self._workspace_root / "requirements.txt"
@@ -260,6 +297,8 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
                 ],
                 capture_output=True, text=True, check=True, timeout=300,
             )
+            # Restart the container with the new image
+            self.stop()
             return True
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return False
@@ -268,14 +307,12 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
 
     def _fix_permissions(self):
         """Fix file ownership after Docker runs (containers run as root)."""
+        if self._container_id is None:
+            return
         try:
             subprocess.run(
-                [
-                    "docker", "run", "--rm",
-                    "-v", f"{self._workspace_root}:/workspace",
-                    self._image,
-                    "chown", "-R", f"{os.getuid()}:{os.getgid()}", "/workspace/.bizniz",
-                ],
+                ["docker", "exec", self._container_id,
+                 "chown", "-R", f"{os.getuid()}:{os.getgid()}", "/workspace/.bizniz"],
                 capture_output=True,
                 timeout=10,
             )
@@ -285,10 +322,12 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
     # ── Describe ───────────────────────────────────────────────────────────────
 
     def describe(self) -> str:
+        container_status = "running" if self._container_id else "not started"
         return (
             f"DockerPytestEnvironment\n"
             f"Image: {self._image}\n"
             f"Workspace root: {self._workspace_root}\n"
             f"Timeout: {self.timeout}s\n"
+            f"Container: {container_status}\n"
             f"Installed packages: {', '.join(self._installed_packages) or 'none'}\n"
         )

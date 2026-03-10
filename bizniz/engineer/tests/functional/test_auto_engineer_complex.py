@@ -22,7 +22,7 @@ from bizniz.engineer.auto_engineer import AutoEngineer
 from bizniz.workspace.local_workspace import LocalWorkspace
 
 
-def _make_orchestrator(config, workspace, suggested_model=None, image_name=None):
+def _make_orchestrator(config, workspace, suggested_model=None, image_name=None, on_status_message=None):
     sandbox = DockerExecutionEnvironment()
     test_env = DockerPytestEnvironment(
         workspace_root=workspace.root,
@@ -33,6 +33,7 @@ def _make_orchestrator(config, workspace, suggested_model=None, image_name=None)
         fresh_client = config.make_client()
         return AgenticDebugger(
             client=fresh_client, workspace=workspace, environment=test_env,
+            on_status_message=on_status_message,
         )
 
     def client_factory(model_name):
@@ -51,6 +52,7 @@ def _make_orchestrator(config, workspace, suggested_model=None, image_name=None)
         debugger_factory=debugger_factory,
         model_progression=config.make_model_progression(),
         max_iterations=config.max_iterations,
+        on_status_message=on_status_message,
     )
 
 
@@ -84,7 +86,12 @@ def test_inventory_system_full_pipeline(api_key, workspace_path):
     engineer_client = config.make_engineer_client()
     workspace = LocalWorkspace(root=str(workspace_path))
 
-    status_messages = []
+    import time as _time
+    _t0 = _time.time()
+
+    def _log(msg):
+        elapsed = _time.time() - _t0
+        print(f"  [{elapsed:6.1f}s] {msg}", flush=True)
 
     with AutoEngineer(
         client=engineer_client,
@@ -92,8 +99,9 @@ def test_inventory_system_full_pipeline(api_key, workspace_path):
         workspace=workspace,
         orchestrator_factory=lambda suggested_model=None, image_name=None: _make_orchestrator(
             config, workspace, suggested_model=suggested_model, image_name=image_name,
+            on_status_message=_log,
         ),
-        on_status_message=lambda msg: status_messages.append(msg),
+        on_status_message=_log,
     ) as engineer:
 
         analysis = engineer.analyze(PROBLEM_STATEMENT)
