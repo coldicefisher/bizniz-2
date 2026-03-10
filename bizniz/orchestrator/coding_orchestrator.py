@@ -630,7 +630,7 @@ class CodingOrchestrator:
                 elif eval_result.stdout:
                     error_detail = eval_result.stdout
 
-                log(f"Orchestrator: collection error detail: {error_detail[:300]}")
+                log(f"Orchestrator: collection error detail: {error_detail[:500]}")
 
                 # Auto-fix file/directory collisions (e.g. models.py vs models/)
                 fixed_collision = self._fix_file_directory_collisions(current_files, log)

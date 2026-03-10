@@ -481,21 +481,72 @@ class AgenticDebugger:
             parts.append("\n## Architecture Context")
             parts.append(architecture_context)
 
+        # Only include files mentioned in the error output to stay within context limits.
+        # The debugger can use view_file to inspect other files if needed.
+        mentioned_source = {}
+        mentioned_test = {}
+        for filepath, content in source_files.items():
+            basename = filepath.rsplit("/", 1)[-1] if "/" in filepath else filepath
+            module = basename.replace(".py", "").replace(".ts", "").replace(".tsx", "")
+            if filepath in error_output or basename in error_output or module in error_output:
+                mentioned_source[filepath] = content
+        for filepath, content in test_files.items():
+            basename = filepath.rsplit("/", 1)[-1] if "/" in filepath else filepath
+            if filepath in error_output or basename in error_output:
+                mentioned_test[filepath] = content
+
+        # If no files matched, include the first test file and its likely source
+        if not mentioned_test and test_files:
+            first_test = next(iter(test_files))
+            mentioned_test[first_test] = test_files[first_test]
+        if not mentioned_source and source_files:
+            # Include up to 3 source files to give context
+            for fp, content in list(source_files.items())[:3]:
+                mentioned_source[fp] = content
+
+        # Truncate file content to prevent context overflow
+        max_lines_per_file = 200
+
         # Source files
         parts.append("\n## Source Files Under Test")
-        for filepath, content in source_files.items():
-            parts.append(f"\n--- {filepath} ---")
-            parts.append(content)
+        if mentioned_source:
+            for filepath, content in mentioned_source.items():
+                parts.append(f"\n--- {filepath} ---")
+                lines = content.splitlines()
+                if len(lines) > max_lines_per_file:
+                    parts.append("\n".join(lines[:max_lines_per_file]))
+                    parts.append(f"\n... ({len(lines) - max_lines_per_file} more lines, use view_file to see full content)")
+                else:
+                    parts.append(content)
+            # List other source files available for inspection
+            other_source = [fp for fp in source_files if fp not in mentioned_source]
+            if other_source:
+                parts.append(f"\nOther source files (use view_file to inspect): {', '.join(other_source)}")
+        else:
+            parts.append("(none provided)")
 
         # Test files
         parts.append("\n## Test Files")
-        for filepath, content in test_files.items():
+        for filepath, content in mentioned_test.items():
             parts.append(f"\n--- {filepath} ---")
-            parts.append(content)
+            lines = content.splitlines()
+            if len(lines) > max_lines_per_file:
+                parts.append("\n".join(lines[:max_lines_per_file]))
+                parts.append(f"\n... ({len(lines) - max_lines_per_file} more lines, use view_file to see full content)")
+            else:
+                parts.append(content)
+        other_test = [fp for fp in test_files if fp not in mentioned_test]
+        if other_test:
+            parts.append(f"\nOther test files (use view_file to inspect): {', '.join(other_test)}")
 
-        # Error output
+        # Error output (truncate if very large)
         parts.append("\n## Error Output")
-        parts.append(error_output)
+        if len(error_output) > 8000:
+            parts.append(error_output[:4000])
+            parts.append(f"\n... ({len(error_output) - 8000} chars truncated) ...")
+            parts.append(error_output[-4000:])
+        else:
+            parts.append(error_output)
 
         # Repair history
         if repair_history:
