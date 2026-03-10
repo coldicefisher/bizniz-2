@@ -288,22 +288,27 @@ class TestInstallPackages:
     def test_install_runs_pip_in_container(self, mock_run, tmp_path):
         mock_run.side_effect = [
             _completed(returncode=0, stdout="container123"),  # docker run -d (start)
+            _completed(returncode=0),  # docker network connect
             _completed(returncode=0, stdout="Successfully installed fastapi"),  # docker exec pip
+            _completed(returncode=0),  # docker network disconnect
             _completed(returncode=0),  # docker commit
         ]
         env = _make_env(tmp_path)
         env.install_packages(["fastapi"])
 
         calls = mock_run.call_args_list
-        # Second call: docker exec pip install
-        pip_cmd = calls[1][0][0]
+        # Network connect
+        assert "network" in calls[1][0][0] and "connect" in calls[1][0][0]
+        # docker exec pip install
+        pip_cmd = calls[2][0][0]
         assert "exec" in pip_cmd
         assert "pip" in pip_cmd
         assert "install" in pip_cmd
         assert "fastapi" in pip_cmd
-
-        # Third call: docker commit
-        commit_cmd = calls[2][0][0]
+        # Network disconnect
+        assert "network" in calls[3][0][0] and "disconnect" in calls[3][0][0]
+        # docker commit
+        commit_cmd = calls[4][0][0]
         assert "commit" in commit_cmd
 
         # requirements.txt updated
@@ -327,7 +332,9 @@ class TestInstallPackages:
 
         mock_run.side_effect = [
             _completed(returncode=0, stdout="container123"),  # start
+            _completed(returncode=0),  # docker network connect
             _completed(returncode=0),  # pip install
+            _completed(returncode=0),  # docker network disconnect
             _completed(returncode=0),  # docker commit
         ]
         env = _make_env(tmp_path)
@@ -345,8 +352,10 @@ class TestInstallPackages:
 
         mock_run.side_effect = [
             _completed(returncode=0, stdout="container123"),
-            _completed(returncode=0),
-            _completed(returncode=0),
+            _completed(returncode=0),  # docker network connect
+            _completed(returncode=0),  # pip install
+            _completed(returncode=0),  # docker network disconnect
+            _completed(returncode=0),  # docker commit
         ]
         env = _make_env(tmp_path)
         env.install_packages(["fastapi"])
@@ -358,7 +367,9 @@ class TestInstallPackages:
     def test_pip_failure_does_not_update_packages(self, mock_run, tmp_path):
         mock_run.side_effect = [
             _completed(returncode=0, stdout="container123"),  # start
+            _completed(returncode=0),  # docker network connect
             _completed(returncode=1, stderr="ERROR: No matching distribution"),  # pip fail
+            _completed(returncode=0),  # docker network disconnect
         ]
         env = _make_env(tmp_path)
         env.install_packages(["nonexistent-pkg-xyz"])
@@ -444,7 +455,7 @@ class TestDescribe:
         assert "DockerPytestEnvironment" in desc
         assert "myservice:latest" in desc
         assert str(tmp_path) in desc
-        assert "60s" in desc
+        assert "120s" in desc
         assert "not started" in desc
 
     def test_describe_with_packages(self, tmp_path):
@@ -471,7 +482,7 @@ class TestInit:
 
     def test_defaults(self, tmp_path):
         env = _make_env(tmp_path)
-        assert env.timeout == 60
+        assert env.timeout == 120
         assert env._extra_pytest_args == []
         assert env._network_enabled is False
         assert env._installed_packages == []

@@ -29,9 +29,10 @@ Safeguards
 
 import hashlib
 import re
+import sys
 import time
 from pathlib import Path
-from typing import Optional, Callable, List
+from typing import Optional, Callable, List, Set
 
 from bizniz.autocoder.autocoder import Autocoder
 from bizniz.autodebugger.autodebugger import Autodebugger
@@ -85,7 +86,7 @@ class CodingOrchestrator:
     MAX_TOTAL_COLLECTION_ERRORS = 12
 
     # Max times we'll try to install the same package before giving up
-    MAX_PACKAGE_INSTALL_ATTEMPTS = 2
+    MAX_PACKAGE_INSTALL_ATTEMPTS = 3
 
     # Wall-clock timeout for a single run_multi call (seconds)
     WALL_CLOCK_TIMEOUT = 1800  # 30 minutes
@@ -243,6 +244,11 @@ class CodingOrchestrator:
                 code_filename=code_filename,
             )
             current_tests = _extract_tests(test_result.test_files, test_filename)
+
+        # ── Proactive package installation ─────────────────────────────────────
+        code_dict = {code_filename: current_code} if current_code else {}
+        test_dict = {test_filename: current_tests} if current_tests else {}
+        self._proactive_package_install(code_dict, test_dict, log)
 
         # ── Test run + repair loop ─────────────────────────────────────────────
         for iteration in range(1, self._max_iterations + 1):
@@ -461,6 +467,9 @@ class CodingOrchestrator:
                 prompt, target_files, test_files, architecture_context,
                 existing_code, extra_context, log,
             )
+
+        # ── Proactive package installation ───────────────────────────────────
+        self._proactive_package_install(current_files, current_test_files, log)
 
         # ── Test + repair loop ───────────────────────────────────────────────
         for iteration in range(1, self._max_iterations + 1):
@@ -1382,6 +1391,59 @@ class CodingOrchestrator:
             return self._autocoder._environment
         return None
 
+    def _proactive_package_install(
+        self,
+        current_files: dict,
+        current_test_files: dict,
+        log: Callable,
+    ):
+        """
+        Scan all generated source and test files for imports, identify third-party
+        packages, and install them before running tests.
+        """
+        all_files = {**current_files, **current_test_files}
+        imports = _scan_imports(all_files)
+        if not imports:
+            return
+
+        # Build set of workspace module names (to exclude from install)
+        workspace_modules = set()
+        for fp in list(current_files.keys()) + list(current_test_files.keys()):
+            # Extract top-level module name from filepath
+            parts = fp.replace("\\", "/").split("/")
+            if parts:
+                workspace_modules.add(parts[0].replace(".py", "").replace(".ts", "").replace(".tsx", ""))
+
+        # Also add workspace files from disk
+        try:
+            for f in self._workspace.list_relative_files():
+                parts = str(f).replace("\\", "/").split("/")
+                if parts:
+                    workspace_modules.add(parts[0].replace(".py", "").replace(".ts", "").replace(".tsx", ""))
+        except Exception:
+            pass
+
+        third_party = _filter_third_party_packages(imports, workspace_modules, self._language)
+        if not third_party:
+            return
+
+        # Check what's already installed (from workspace DB)
+        already_installed = set()
+        try:
+            rows = self._workspace.db.get_packages()
+            if rows:
+                already_installed = {row["package"].lower() for row in rows}
+        except Exception:
+            pass
+
+        to_install = [pkg for pkg in third_party if pkg.lower() not in already_installed]
+        if not to_install:
+            return
+
+        log(f"Orchestrator: proactively installing {len(to_install)} detected package(s): {', '.join(sorted(to_install))}")
+        for pkg in to_install:
+            self._install_package(pkg, log)
+
     # ── Failure handling strategies ────────────────────────────────────────────
 
     def _handle_failure_with_debugger(
@@ -1754,6 +1816,98 @@ def _extract_relevant_files(
             relevant[fp] = current_test_files[fp]
 
     return relevant
+
+
+def _scan_imports(files: dict) -> Set[str]:
+    """
+    Scan Python/TypeScript source code for import statements and return
+    the set of top-level package names that are third-party (not stdlib, not local).
+    """
+    packages = set()
+    for filepath, content in files.items():
+        if filepath.endswith(".py"):
+            # Python: import foo / from foo import bar
+            for match in re.finditer(r'^(?:from|import)\s+(\w+)', content, re.MULTILINE):
+                packages.add(match.group(1))
+        elif filepath.endswith((".ts", ".tsx", ".js", ".jsx")):
+            # TypeScript/JS: import ... from 'package' / require('package')
+            for match in re.finditer(r'''(?:from\s+['"]|require\s*\(\s*['"])([^./'"]\S*?)['"/]''', content):
+                pkg = match.group(1)
+                # Strip @scope/name to just @scope/name
+                if pkg.startswith("@"):
+                    # @scope/name → keep as-is
+                    packages.add(pkg)
+                else:
+                    packages.add(pkg)
+    return packages
+
+
+# Standard library module names (Python 3.8+)
+_STDLIB_MODULES = set(sys.stdlib_module_names) if hasattr(sys, 'stdlib_module_names') else {
+    'abc', 'aifc', 'argparse', 'array', 'ast', 'asynchat', 'asyncio', 'asyncore',
+    'atexit', 'audioop', 'base64', 'bdb', 'binascii', 'binhex', 'bisect',
+    'builtins', 'bz2', 'calendar', 'cgi', 'cgitb', 'chunk', 'cmath', 'cmd',
+    'code', 'codecs', 'codeop', 'collections', 'colorsys', 'compileall',
+    'concurrent', 'configparser', 'contextlib', 'contextvars', 'copy', 'copyreg',
+    'cProfile', 'crypt', 'csv', 'ctypes', 'curses', 'dataclasses', 'datetime',
+    'dbm', 'decimal', 'difflib', 'dis', 'distutils', 'doctest', 'email',
+    'encodings', 'enum', 'errno', 'faulthandler', 'fcntl', 'filecmp', 'fileinput',
+    'fnmatch', 'formatter', 'fractions', 'ftplib', 'functools', 'gc', 'getopt',
+    'getpass', 'gettext', 'glob', 'grp', 'gzip', 'hashlib', 'heapq', 'hmac',
+    'html', 'http', 'idlelib', 'imaplib', 'imghdr', 'imp', 'importlib', 'inspect',
+    'io', 'ipaddress', 'itertools', 'json', 'keyword', 'lib2to3', 'linecache',
+    'locale', 'logging', 'lzma', 'mailbox', 'mailcap', 'marshal', 'math',
+    'mimetypes', 'mmap', 'modulefinder', 'multiprocessing', 'netrc', 'nis',
+    'nntplib', 'numbers', 'operator', 'optparse', 'os', 'ossaudiodev',
+    'pathlib', 'pdb', 'pickle', 'pickletools', 'pipes', 'pkgutil', 'platform',
+    'plistlib', 'poplib', 'posix', 'posixpath', 'pprint', 'profile', 'pstats',
+    'pty', 'pwd', 'py_compile', 'pyclbr', 'pydoc', 'queue', 'quopri', 'random',
+    're', 'readline', 'reprlib', 'resource', 'rlcompleter', 'runpy', 'sched',
+    'secrets', 'select', 'selectors', 'shelve', 'shlex', 'shutil', 'signal',
+    'site', 'smtpd', 'smtplib', 'sndhdr', 'socket', 'socketserver', 'sqlite3',
+    'sre_compile', 'sre_constants', 'sre_parse', 'ssl', 'stat', 'statistics',
+    'string', 'stringprep', 'struct', 'subprocess', 'sunau', 'symtable', 'sys',
+    'sysconfig', 'syslog', 'tabnanny', 'tarfile', 'telnetlib', 'tempfile',
+    'termios', 'test', 'textwrap', 'threading', 'time', 'timeit', 'tkinter',
+    'token', 'tokenize', 'trace', 'traceback', 'tracemalloc', 'tty', 'turtle',
+    'turtledemo', 'types', 'typing', 'unicodedata', 'unittest', 'urllib', 'uu',
+    'uuid', 'venv', 'warnings', 'wave', 'weakref', 'webbrowser', 'winreg',
+    'winsound', 'wsgiref', 'xdrlib', 'xml', 'xmlrpc', 'zipapp', 'zipfile',
+    'zipimport', 'zlib', '_thread',
+}
+
+# Common test framework names that are part of the stdlib or always available
+_TEST_BUILTINS = {'pytest', 'unittest', 'doctest', 'mock'}
+
+
+def _filter_third_party_packages(
+    imports: Set[str],
+    workspace_modules: Set[str],
+    language: str = "python",
+) -> Set[str]:
+    """
+    Filter imports to only third-party packages (not stdlib, not workspace modules).
+    """
+    if language == "python":
+        return {
+            pkg for pkg in imports
+            if pkg not in _STDLIB_MODULES
+            and pkg not in _TEST_BUILTINS
+            and pkg not in workspace_modules
+            and not pkg.startswith("_")
+        }
+    else:
+        # TypeScript: filter out node builtins
+        node_builtins = {
+            'fs', 'path', 'os', 'http', 'https', 'url', 'util', 'stream',
+            'events', 'buffer', 'crypto', 'child_process', 'cluster', 'net',
+            'dns', 'tls', 'assert', 'zlib', 'readline', 'querystring',
+        }
+        return {
+            pkg for pkg in imports
+            if pkg not in node_builtins
+            and pkg not in workspace_modules
+        }
 
 
 def _truncate_error(error_output: str, max_chars: int = 8000) -> str:

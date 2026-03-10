@@ -258,6 +258,9 @@ class DockerJestEnvironment(BaseExecutionEnvironment):
         """
         Install npm packages into the running container via docker exec.
 
+        Temporarily connects the container to the bridge network if it was
+        started with --network none, then disconnects after installation.
+
         Also commits the container as a new image layer so packages persist
         if the container is restarted.
         """
@@ -267,13 +270,30 @@ class DockerJestEnvironment(BaseExecutionEnvironment):
 
         self._ensure_container()
 
-        proc = subprocess.run(
-            ["docker", "exec", "-w", "/workspace", self._container_id,
-             "npm", "install", "--save-dev", *new_packages],
-            capture_output=True, text=True, timeout=120,
-        )
-        if proc.returncode != 0:
-            return
+        # Temporarily enable network if container was started without it
+        needs_network_restore = False
+        if not self._network_enabled:
+            subprocess.run(
+                ["docker", "network", "connect", "bridge", self._container_id],
+                capture_output=True, timeout=10,
+            )
+            needs_network_restore = True
+
+        try:
+            proc = subprocess.run(
+                ["docker", "exec", "-w", "/workspace", self._container_id,
+                 "npm", "install", "--save-dev", *new_packages],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                return
+        finally:
+            # Restore network isolation
+            if needs_network_restore:
+                subprocess.run(
+                    ["docker", "network", "disconnect", "bridge", self._container_id],
+                    capture_output=True, timeout=10,
+                )
 
         self._installed_packages.extend(new_packages)
 

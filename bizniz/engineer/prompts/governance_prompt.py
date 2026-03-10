@@ -5,17 +5,13 @@ The autocoder introduced changes that were NOT in the architectural plan.
 Review these unplanned changes and decide whether to approve, reject, or modify
 the architecture plan to accommodate them.
 
-CURRENT ARCHITECTURE PLAN:
+ARCHITECTURE SUMMARY:
 ──────────────────────────────────────────────────────────────
-{plan_json}
+{architecture_summary}
 
 UNPLANNED CHANGES DETECTED:
 ──────────────────────────────────────────────────────────────
 {drift_description}
-
-CURRENT WORKSPACE FILES:
-──────────────────────────────────────────────────────────────
-{workspace_files}
 
 DECISION CRITERIA:
 - APPROVE if the changes are reasonable extensions that improve the design

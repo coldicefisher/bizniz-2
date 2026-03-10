@@ -555,7 +555,8 @@ class AutoEngineer(BaseAIAgent):
             if self._on_status_message:
                 self._on_status_message(msg)
 
-        plan_json = plan.json(indent=2)
+        # Use compact architecture summary instead of full plan JSON
+        architecture_summary = self.format_architecture_context(plan)
 
         drift_parts = []
         for item in drift_items:
@@ -565,14 +566,9 @@ class AutoEngineer(BaseAIAgent):
             )
         drift_description = "\n".join(drift_parts)
 
-        workspace_files = "\n".join(
-            f"- {f}" for f in self._workspace.list_relative_files()
-        )
-
         user_prompt = GOVERNANCE_PROMPT_TEMPLATE.format(
-            plan_json=plan_json,
+            architecture_summary=architecture_summary,
             drift_description=drift_description,
-            workspace_files=workspace_files or "(empty)",
         )
 
         log("AutoEngineer: reviewing architecture drift...")

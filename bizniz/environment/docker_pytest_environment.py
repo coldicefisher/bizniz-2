@@ -56,7 +56,7 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
         self,
         workspace_root: Union[Path, str],
         image: str,
-        timeout: int = 60,
+        timeout: int = 120,
         extra_pytest_args: Optional[List[str]] = None,
         network_enabled: bool = False,
     ):
@@ -257,6 +257,9 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
         """
         Install packages into the running container via docker exec.
 
+        Temporarily connects the container to the bridge network if it was
+        started with --network none, then disconnects after installation.
+
         Also commits the container as a new image layer so packages persist
         if the container is restarted.
         """
@@ -266,14 +269,31 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
 
         self._ensure_container()
 
-        # Install directly in the running container
-        proc = subprocess.run(
-            ["docker", "exec", self._container_id,
-             "pip", "install", "--no-cache-dir", *new_packages],
-            capture_output=True, text=True, timeout=120,
-        )
-        if proc.returncode != 0:
-            return
+        # Temporarily enable network if container was started without it
+        needs_network_restore = False
+        if not self._network_enabled:
+            subprocess.run(
+                ["docker", "network", "connect", "bridge", self._container_id],
+                capture_output=True, timeout=10,
+            )
+            needs_network_restore = True
+
+        try:
+            # Install directly in the running container
+            proc = subprocess.run(
+                ["docker", "exec", self._container_id,
+                 "pip", "install", "--no-cache-dir", *new_packages],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                return
+        finally:
+            # Restore network isolation
+            if needs_network_restore:
+                subprocess.run(
+                    ["docker", "network", "disconnect", "bridge", self._container_id],
+                    capture_output=True, timeout=10,
+                )
 
         self._installed_packages.extend(new_packages)
 

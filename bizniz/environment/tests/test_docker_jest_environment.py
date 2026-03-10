@@ -271,20 +271,27 @@ class TestInstallPackages:
     def test_install_runs_npm_in_container(self, mock_run, tmp_path):
         mock_run.side_effect = [
             _completed(returncode=0, stdout="container123"),  # start
+            _completed(returncode=0),  # docker network connect
             _completed(returncode=0, stdout="added 1 package"),  # docker exec npm
+            _completed(returncode=0),  # docker network disconnect
             _completed(returncode=0),  # docker commit
         ]
         env = _make_env(tmp_path)
         env.install_packages(["@testing-library/react"])
 
         calls = mock_run.call_args_list
-        npm_cmd = calls[1][0][0]
+        # Network connect
+        assert "network" in calls[1][0][0] and "connect" in calls[1][0][0]
+        # npm install
+        npm_cmd = calls[2][0][0]
         assert "exec" in npm_cmd
         assert "npm" in npm_cmd
         assert "install" in npm_cmd
         assert "@testing-library/react" in npm_cmd
-
-        commit_cmd = calls[2][0][0]
+        # Network disconnect
+        assert "network" in calls[3][0][0] and "disconnect" in calls[3][0][0]
+        # docker commit
+        commit_cmd = calls[4][0][0]
         assert "commit" in commit_cmd
 
         assert env.image == "myservice:latest"
@@ -302,7 +309,9 @@ class TestInstallPackages:
     def test_npm_failure_does_not_update_packages(self, mock_run, tmp_path):
         mock_run.side_effect = [
             _completed(returncode=0, stdout="container123"),  # start
+            _completed(returncode=0),  # docker network connect
             _completed(returncode=1, stderr="ERR! 404 Not Found"),  # npm fail
+            _completed(returncode=0),  # docker network disconnect
         ]
         env = _make_env(tmp_path)
         env.install_packages(["nonexistent-pkg-xyz"])
