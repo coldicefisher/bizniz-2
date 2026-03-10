@@ -32,7 +32,7 @@ class ProjectDB:
         db_dir.mkdir(parents=True, exist_ok=True)
         self._db_path = db_dir / "project.db"
         self._db_dir = db_dir
-        self._conn = sqlite3.connect(str(self._db_path), timeout=30)
+        self._conn = sqlite3.connect(str(self._db_path), timeout=30, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._create_tables()
         self._ensure_writable()
