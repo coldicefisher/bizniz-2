@@ -941,6 +941,13 @@ class CodingOrchestrator:
 
         Returns (current_files, current_test_files, stale_count, previous_code_hash).
         """
+        # Auto-escalate past mini models for repair — they're too weak for multi-file repair
+        if (self._model_progression
+                and self._model_progression.current_model.endswith("-mini")
+                and not self._model_progression.is_at_max):
+            self._try_escalate_model(log)
+            log("Orchestrator: auto-escalated past mini model for repair")
+
         # Record failure in stall detector
         combined = "".join(sorted(f"{k}:{v}" for k, v in current_files.items()))
         current_hash = _hash(combined)

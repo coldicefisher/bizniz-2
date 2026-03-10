@@ -10,7 +10,7 @@ class StallDetector:
         self,
         code_hash_threshold: int = 2,
         error_sig_threshold: int = 3,
-        consecutive_fail_threshold: int = 5,
+        consecutive_fail_threshold: int = 3,
     ):
         self._code_hash_threshold = code_hash_threshold
         self._error_sig_threshold = error_sig_threshold
