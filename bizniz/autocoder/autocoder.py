@@ -503,10 +503,20 @@ class Autocoder(BaseAIAgent):
             files_parts.append(f"── {fp} ──\n{content}")
         files_str = "\n\n".join(files_parts)
 
+        # Build workspace files listing
+        workspace_files = "(unknown)"
+        try:
+            all_files = sorted(str(f) for f in self._workspace.list_relative_files())
+            if all_files:
+                workspace_files = "\n".join(f"  {f}" for f in all_files)
+        except Exception:
+            pass
+
         repair_prompt = REPAIR_MULTI_PROMPT_TEMPLATE.format(
             architecture_context=architecture_context or "(none)",
             error_message=error_message,
             current_files=files_str,
+            workspace_files=workspace_files,
         )
 
         log("Requesting multi-file repair...")

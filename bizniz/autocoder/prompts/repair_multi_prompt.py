@@ -7,13 +7,26 @@ IMPORTANT CONTEXT:
 - Read the error output and test code carefully to understand what is expected.
 - Your code must define the exact function/class signatures that tests import and call.
 - Respect the package structure — use relative imports within the package.
+- Do NOT import modules that don't exist in the workspace. Check the file list below.
+- If a function or class is missing, create it — don't import it from a non-existent module.
+
+COMMON MISTAKES TO AVOID:
+- Importing from modules that don't exist (e.g. utils.validation when no utils/ directory exists)
+- Wrong function signatures or return types that don't match what tests expect
+- Forgetting to export classes/functions in __init__.py
+- Using absolute imports when relative imports are needed (or vice versa)
 
 Perform these steps carefully:
 1. Read the error output and any test code carefully.
 2. Identify the root cause — is it a logic error, missing function, wrong signature,
    import issue, or missing dependency between modules?
-3. Determine which files need changes.
-4. Return the COMPLETE content for every file you change.
+3. Check the WORKSPACE FILES list to verify all imports reference existing modules.
+4. Determine which files need changes.
+5. Return the COMPLETE content for every file you change.
+
+WORKSPACE FILES:
+──────────────────────────────────────────────────────────────
+{workspace_files}
 
 ARCHITECTURE CONTEXT:
 ──────────────────────────────────────────────────────────────
