@@ -16,9 +16,11 @@ GUIDING PRINCIPLES:
 
 RESPONSE FORMAT:
 ──────────────────────────────────────────────────────────────
-Return a JSON object with key "test_files" — an array of objects, each with
-"filepath" (workspace-relative) and "tests" (complete pytest source code).
-Also include a "notes" key with a brief description of test coverage.
+Return a JSON object with keys "test_files", "notes", and "dependencies":
+- "test_files": array of objects with "filepath" (workspace-relative) and "tests" (complete pytest source code)
+- "notes": brief description of test coverage
+- "dependencies": array of third-party test packages needed (e.g. ["pytest", "pytest-asyncio", "httpx"])
+  Do NOT include standard library modules. Return an empty array if only pytest is needed.
 Return ONLY valid JSON. No markdown, no code fences, no explanations outside JSON.
 """
 
@@ -41,14 +43,20 @@ GUIDING PRINCIPLES:
 
 RESPONSE FORMAT:
 ──────────────────────────────────────────────────────────────
-Return a JSON object with key "test_files" — an array of objects, each with
-"filepath" (workspace-relative, must end in .test.ts or .test.tsx) and "tests" (complete Jest test source code).
-Also include a "notes" key with a brief description of test coverage.
+Return a JSON object with keys "test_files", "notes", and "dependencies":
+- "test_files": array of objects with "filepath" (workspace-relative, must end in .test.ts or .test.tsx) and "tests" (complete Jest test source code)
+- "notes": brief description of test coverage
+- "dependencies": array of third-party test packages needed (e.g. ["jest", "@testing-library/react"])
+  Do NOT include standard library modules. Return an empty array if only jest is needed.
 Return ONLY valid JSON. No markdown, no code fences, no explanations outside JSON.
 """
 
 _GENERATE_MULTI_USER_PROMPT_PYTHON = """
 Write pytest test suites for a multi-file Python project.
+
+PROJECT ROOT:
+──────────────────────────────────────────────────────────────
+{project_root}
 
 PROBLEM STATEMENT / ISSUE:
 ──────────────────────────────────────────────────────────────
@@ -68,17 +76,24 @@ TEST FILES TO GENERATE:
 
 TASK:
 Write comprehensive pytest tests for each test file listed above.
+- The project root directory is shown above. Use it to determine the correct import paths.
 - Import from the actual package modules (e.g. `from expense_tracker.models import Expense`).
 - Each test file should thoroughly test the module it corresponds to.
 - Cover the happy path, boundary conditions, and error cases.
 - Tests must be written so they will pass against the provided source code.
 - Always include `import pytest` at the top of each test file.
 
-Return ONLY valid JSON with "test_files" array and "notes" string.
+Return ONLY valid JSON with "test_files" array, "notes" string, and "dependencies" array.
+The "dependencies" array must list all third-party packages your tests import
+(e.g. ["pytest", "pytest-asyncio", "httpx"]). Do NOT include standard library modules.
 """
 
 _GENERATE_MULTI_USER_PROMPT_TYPESCRIPT = """
 Write Jest test suites for a multi-file TypeScript project.
+
+PROJECT ROOT:
+──────────────────────────────────────────────────────────────
+{project_root}
 
 PROBLEM STATEMENT / ISSUE:
 ──────────────────────────────────────────────────────────────
@@ -98,13 +113,16 @@ TEST FILES TO GENERATE:
 
 TASK:
 Write comprehensive Jest tests for each test file listed above.
+- The project root directory is shown above. Use it to determine the correct import paths.
 - Import from the actual project modules (e.g. `import {{ App }} from '../App'`).
 - Each test file should thoroughly test the module it corresponds to.
 - Cover the happy path, boundary conditions, and error cases.
 - Tests must be written so they will pass against the provided source code.
 - Test files MUST end in .test.ts or .test.tsx.
 
-Return ONLY valid JSON with "test_files" array and "notes" string.
+Return ONLY valid JSON with "test_files" array, "notes" string, and "dependencies" array.
+The "dependencies" array must list all third-party packages your tests import
+(e.g. ["jest", "@testing-library/react"]). Do NOT include standard library modules.
 """
 
 

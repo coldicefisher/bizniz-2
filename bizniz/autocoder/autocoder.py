@@ -438,22 +438,38 @@ class Autocoder(BaseAIAgent):
             existing_parts.append(f"── {fp} ──\n{content}")
         existing_str = "\n\n".join(existing_parts) if existing_parts else "(no existing code)"
 
+        # Build project root description with file tree
+        project_root_parts = []
+        if hasattr(self._workspace, 'root'):
+            project_root_parts.append(f"Workspace path: {self._workspace.root}")
+        try:
+            all_files = sorted(str(f) for f in self._workspace.list_relative_files())
+            if all_files:
+                project_root_parts.append("Files in workspace:\n" + "\n".join(f"  {f}" for f in all_files))
+        except Exception:
+            pass
+        project_root = "\n".join(project_root_parts) if project_root_parts else "(unknown)"
+
         user_prompt = GENERATE_MULTI_USER_PROMPT_TEMPLATE.format(
             issue_description=issue_description,
             architecture_context=architecture_context or "(none)",
             target_files_description=target_desc,
             existing_code=existing_str,
+            project_root=project_root,
         )
 
         log(f"Requesting multi-file code generation ({len(target_files)} files)...")
-        changes = self._generate_multi_code(user_prompt)
+        changes, dependencies = self._generate_multi_code(user_prompt)
 
         # Save all files to workspace
         for change in changes:
             log(f"Saving {change.filepath} to workspace...")
             self._workspace.write_file(path=change.filepath, content=change.code)
 
-        return AutocoderProcessResult(changes=changes)
+        if dependencies:
+            log(f"Autocoder: LLM declared dependencies: {', '.join(dependencies)}")
+
+        return AutocoderProcessResult(changes=changes, dependencies=dependencies)
 
     def repair_multi(
         self,
@@ -494,20 +510,23 @@ class Autocoder(BaseAIAgent):
         )
 
         log("Requesting multi-file repair...")
-        changes = self._repair_multi_code(repair_prompt)
+        changes, dependencies = self._repair_multi_code(repair_prompt)
 
         # Save all changed files to workspace
         for change in changes:
             log(f"Saving repaired {change.filepath} to workspace...")
             self._workspace.write_file(path=change.filepath, content=change.code)
 
-        return AutocoderProcessResult(changes=changes)
+        if dependencies:
+            log(f"Autocoder: repair declared dependencies: {', '.join(dependencies)}")
+
+        return AutocoderProcessResult(changes=changes, dependencies=dependencies)
 
     # ── Multi-file private helpers ────────────────────────────────────────────
 
-    def _generate_multi_code(self, user_prompt: str) -> List[FileChange]:
+    def _generate_multi_code(self, user_prompt: str) -> tuple:
         """
-        Send a multi-file generation prompt and return a list of FileChange objects.
+        Send a multi-file generation prompt and return (list of FileChange, list of dependency strings).
         """
         import time
         attempts = 3
@@ -547,7 +566,8 @@ class Autocoder(BaseAIAgent):
                     log(f"Autocoder: no changes in response on attempt {attempt}")
                     continue
 
-                return changes
+                dependencies = json_response.get("dependencies", [])
+                return changes, dependencies
 
             except AutocoderBadAIResponseError:
                 raise
@@ -567,9 +587,9 @@ class Autocoder(BaseAIAgent):
             f"Last error: {last_error}"
         )
 
-    def _repair_multi_code(self, repair_prompt: str) -> List[FileChange]:
+    def _repair_multi_code(self, repair_prompt: str) -> tuple:
         """
-        Send a multi-file repair prompt and return a list of FileChange objects.
+        Send a multi-file repair prompt and return (list of FileChange, list of dependency strings).
         """
         import time
         attempts = 3
@@ -609,7 +629,8 @@ class Autocoder(BaseAIAgent):
                     log(f"Autocoder: no changes in repair response on attempt {attempt}")
                     continue
 
-                return changes
+                dependencies = json_response.get("dependencies", [])
+                return changes, dependencies
 
             except AutocoderBadAIResponseError:
                 raise

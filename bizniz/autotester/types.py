@@ -12,6 +12,7 @@ class GeneratedTestFile(BaseModel):
 
 class AutotesterResult(BaseModel):
     test_files: List[GeneratedTestFile] = []
+    dependencies: List[str] = []
     mode: Literal["from_code", "from_prompt", "review"]
     success: bool
     error: Optional[str] = None

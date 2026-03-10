@@ -70,6 +70,10 @@ GENERATE_MULTI_SYSTEM_PROMPT = _GENERATE_MULTI_SYSTEM_PROMPT_PYTHON
 
 
 GENERATE_MULTI_USER_PROMPT_TEMPLATE = """
+PROJECT ROOT:
+──────────────────────────────────────────────────────────────
+{project_root}
+
 ISSUE:
 ──────────────────────────────────────────────────────────────
 {issue_description}
@@ -88,7 +92,7 @@ EXISTING CODE:
 
 RESPONSE FORMAT:
 ──────────────────────────────────────────────────────────────
-Return ONLY valid JSON with a "changes" array:
+Return ONLY valid JSON with a "changes" array and a "dependencies" array:
 
 {{
     "changes": [
@@ -102,11 +106,17 @@ Return ONLY valid JSON with a "changes" array:
             "code": "<complete file content>",
             "action": "modify"
         }}
-    ]
+    ],
+    "dependencies": ["fastapi", "pydantic", "httpx"]
 }}
 
 Each change must include:
 - filepath: workspace-relative path
 - code: the COMPLETE file content (not a diff)
 - action: "create", "modify", or "delete"
+
+The "dependencies" array must list ALL third-party packages your code imports.
+Do NOT include standard library modules (os, sys, json, etc.).
+Include the pip-installable package name (e.g. "pydantic" not "pydantic.BaseModel").
+Return an empty array if no third-party packages are needed.
 """

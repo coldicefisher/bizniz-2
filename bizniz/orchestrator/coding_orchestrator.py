@@ -249,6 +249,7 @@ class CodingOrchestrator:
         code_dict = {code_filename: current_code} if current_code else {}
         test_dict = {test_filename: current_tests} if current_tests else {}
         self._proactive_package_install(code_dict, test_dict, log)
+        self._install_project_editable(log)
 
         # ── Test run + repair loop ─────────────────────────────────────────────
         for iteration in range(1, self._max_iterations + 1):
@@ -474,6 +475,9 @@ class CodingOrchestrator:
 
         # ── Proactive package installation ───────────────────────────────────
         self._proactive_package_install(current_files, current_test_files, log)
+
+        # ── Install project in editable mode if pyproject.toml/setup.py exists ─
+        self._install_project_editable(log)
 
         # ── Test + repair loop ───────────────────────────────────────────────
         for iteration in range(1, self._max_iterations + 1):
@@ -830,6 +834,12 @@ class CodingOrchestrator:
         )
         current_files = {ch.filepath: ch.code for ch in code_result.changes}
         log(f"Orchestrator [TDD]: code generation done in {time.time() - t0:.1f}s ({len(current_files)} files)")
+
+        # Install LLM-declared dependencies
+        all_deps = list(set(test_result.dependencies + code_result.dependencies))
+        if all_deps:
+            self._install_declared_dependencies(all_deps, log)
+
         return current_files, current_test_files
 
     def _generate_code_first(
@@ -860,6 +870,12 @@ class CodingOrchestrator:
         )
         current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
         log(f"Orchestrator [CODE_FIRST]: test generation done in {time.time() - t0:.1f}s")
+
+        # Install LLM-declared dependencies
+        all_deps = list(set(code_result.dependencies + test_result.dependencies))
+        if all_deps:
+            self._install_declared_dependencies(all_deps, log)
+
         return current_files, current_test_files
 
     # ── Multi-file failure handling ───────────────────────────────────────────
@@ -1157,6 +1173,10 @@ class CodingOrchestrator:
         )
         log(f"Orchestrator: repair done in {time.time() - t0:.1f}s")
 
+        # Install any new dependencies declared in repair
+        if repaired.dependencies:
+            self._install_declared_dependencies(repaired.dependencies, log)
+
         new_files, new_test_files = self._apply_multi_repair(
             repaired, current_files, current_test_files,
         )
@@ -1445,6 +1465,75 @@ class CodingOrchestrator:
         if hasattr(self._autocoder, '_environment') and hasattr(self._autocoder._environment, 'install_packages'):
             return self._autocoder._environment
         return None
+
+    def _install_declared_dependencies(self, dependencies: list, log: Callable):
+        """Install dependencies declared by the LLM in its response."""
+        if not dependencies:
+            return
+
+        # Check what's already installed
+        already_installed = set()
+        try:
+            rows = self._workspace.db.get_packages()
+            if rows:
+                already_installed = {row["package"].lower() for row in rows}
+        except Exception:
+            pass
+
+        to_install = [d for d in dependencies if d.lower() not in already_installed]
+        if not to_install:
+            return
+
+        log(f"Orchestrator: installing {len(to_install)} LLM-declared dependency(ies): {', '.join(sorted(to_install))}")
+        for pkg in to_install:
+            self._install_package(pkg, log)
+
+    def _install_project_editable(self, log: Callable):
+        """
+        Run `pip install -e .` in the Docker container if a pyproject.toml or setup.py exists.
+        This makes the project's own package importable (e.g. `from pet_groomer.api import app`).
+        """
+        env = self._find_installable_environment()
+        if env is None or not hasattr(env, '_container_id') or not hasattr(env, '_workspace_root'):
+            return
+
+        workspace = env._workspace_root
+        has_pyproject = (workspace / "pyproject.toml").exists()
+        has_setup = (workspace / "setup.py").exists()
+        if not has_pyproject and not has_setup:
+            return
+
+        import subprocess as _sp
+
+        # Ensure container is running
+        env._ensure_container()
+
+        # Temporarily enable network for pip install
+        needs_network_restore = False
+        if not env._network_enabled:
+            _sp.run(
+                ["docker", "network", "connect", "bridge", env._container_id],
+                capture_output=True, timeout=10,
+            )
+            needs_network_restore = True
+
+        try:
+            log("Orchestrator: installing project in editable mode (pip install -e .)...")
+            proc = _sp.run(
+                ["docker", "exec", env._container_id,
+                 "pip", "install", "--no-cache-dir", "-e", "/workspace"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode == 0:
+                log("Orchestrator: project installed in editable mode.")
+            else:
+                log(f"Orchestrator: pip install -e . failed: {proc.stderr[:200]}")
+        finally:
+            if needs_network_restore:
+                _sp.run(
+                    ["docker", "network", "disconnect", "bridge", env._container_id],
+                    capture_output=True, timeout=10,
+                )
 
     def _proactive_package_install(
         self,

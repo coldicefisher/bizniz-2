@@ -26,9 +26,14 @@ GeneratePromptSchema = {
                     "required": ["filepath", "code", "action"],
                     "additionalProperties": False
                 }
+            },
+            "dependencies": {
+                "type": "array",
+                "description": "List of third-party packages required (e.g. ['fastapi', 'pydantic', 'httpx']). Do NOT include standard library modules.",
+                "items": {"type": "string"}
             }
         },
-        "required": ["changes"],
+        "required": ["changes", "dependencies"],
         "additionalProperties": False,
     }
 }
@@ -70,9 +75,14 @@ RepairPromptSchema = {
                     "required": ["filepath", "code", "action"],
                     "additionalProperties": False
                 }
+            },
+            "dependencies": {
+                "type": "array",
+                "description": "List of third-party packages required (e.g. ['fastapi', 'pydantic', 'httpx']). Do NOT include standard library modules.",
+                "items": {"type": "string"}
             }
         },
-        "required": ["analysis", "fix_plan", "changes"],
+        "required": ["analysis", "fix_plan", "changes", "dependencies"],
         "additionalProperties": False,
     }
 }

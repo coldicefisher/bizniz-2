@@ -298,30 +298,51 @@ class Autotester(BaseAIAgent):
         has_ts = any(tf.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx")) for tf in test_files)
         lang = "typescript" if has_ts else "python"
 
+        # Build project root description with file tree
+        project_root_parts = []
+        if hasattr(self._workspace, 'root'):
+            project_root_parts.append(f"Workspace path: {self._workspace.root}")
+        # List all files in workspace so the LLM knows the directory structure
+        try:
+            all_files = sorted(str(f) for f in self._workspace.list_relative_files())
+            if all_files:
+                project_root_parts.append("Files in workspace:\n" + "\n".join(f"  {f}" for f in all_files))
+        except Exception:
+            pass
+        # Also include source file paths if provided
+        if source_code:
+            project_root_parts.append("Source files provided:\n" + "\n".join(f"  {fp}" for fp in source_code.keys()))
+        project_root = "\n".join(project_root_parts) if project_root_parts else "(unknown)"
+
         user_prompt = get_generate_multi_user_prompt(lang).format(
             problem_statement=problem_statement,
             architecture_context=architecture_context or "(none)",
             source_code=source_str,
             test_files_description=test_desc,
+            project_root=project_root,
         )
 
         log(f"Requesting multi-file test generation ({len(test_files)} test files)...")
-        result_files = self._generate_multi_tests(user_prompt)
+        result_files, dependencies = self._generate_multi_tests(user_prompt)
 
         # Save all test files
         for tf in result_files:
             log(f"Saving tests to {tf.filepath}...")
             self._workspace.write_file(path=tf.filepath, content=tf.tests)
 
+        if dependencies:
+            log(f"Autotester: LLM declared dependencies: {', '.join(dependencies)}")
+
         return AutotesterResult(
             test_files=result_files,
+            dependencies=dependencies,
             mode="from_prompt",
             success=True,
         )
 
-    def _generate_multi_tests(self, user_prompt: str) -> List[GeneratedTestFile]:
+    def _generate_multi_tests(self, user_prompt: str) -> tuple:
         """
-        Send a multi-file test generation prompt and return a list of GeneratedTestFile objects.
+        Send a multi-file test generation prompt and return (list of GeneratedTestFile, list of dependency strings).
         """
         import time
         attempts = 3
@@ -378,7 +399,8 @@ class Autotester(BaseAIAgent):
                     log(f"Autotester: empty test content on attempt {attempt}")
                     continue
 
-                return result
+                dependencies = json_response.get("dependencies", [])
+                return result, dependencies
 
             except AIInsufficientFunds:
                 raise

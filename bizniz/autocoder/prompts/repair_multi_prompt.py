@@ -45,9 +45,14 @@ Return ONLY valid JSON:
             "code": "<complete corrected file content>",
             "action": "modify"
         }}
-    ]
+    ],
+    "dependencies": ["fastapi", "pydantic"]
 }}
 
 Each change must include the COMPLETE file content, not a diff.
 Only include files that actually need changes.
+
+The "dependencies" array must list ALL third-party packages your code imports.
+Do NOT include standard library modules. Include the pip-installable package name.
+Return an empty array if no third-party packages are needed.
 """

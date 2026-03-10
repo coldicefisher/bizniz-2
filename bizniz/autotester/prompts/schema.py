@@ -26,9 +26,14 @@ AutotesterSchema = {
             "notes": {
                 "type": "string",
                 "description": "Brief description of what the tests cover"
+            },
+            "dependencies": {
+                "type": "array",
+                "description": "List of third-party test packages required (e.g. ['pytest', 'pytest-asyncio', 'httpx']). Do NOT include standard library modules.",
+                "items": {"type": "string"}
             }
         },
-        "required": ["test_files", "notes"],
+        "required": ["test_files", "notes", "dependencies"],
         "additionalProperties": False
     }
 }
