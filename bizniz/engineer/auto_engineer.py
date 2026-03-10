@@ -241,23 +241,9 @@ class AutoEngineer(BaseAIAgent):
             except Exception:
                 pass
 
-        # ── Attempt 1: TDD (default) ─────────────────────────────────────────
-        result = self._run_orchestrator(
-            row=row,
-            target_files=target_files,
-            test_files=test_files,
-            arch_context=arch_context,
-            suggested_model=suggested_model,
-            strategy=CodingStrategy.TDD,
-            workspace_context=workspace_context,
-            log=log,
-        )
-
-        if result.success:
-            return self._finalize_dispatch(issue_id, result, log)
-
-        # ── Attempt 2: Flip to CODE_FIRST ────────────────────────────────────
-        log(f"AutoEngineer: issue #{issue_id} failed with TDD — retrying with CODE_FIRST...")
+        # ── Attempt 1: CODE_FIRST (default) ──────────────────────────────────
+        # Code-first generates code before tests, so tests see the real
+        # module structure and use correct imports — avoids collection errors.
         result = self._run_orchestrator(
             row=row,
             target_files=target_files,
@@ -272,8 +258,24 @@ class AutoEngineer(BaseAIAgent):
         if result.success:
             return self._finalize_dispatch(issue_id, result, log)
 
+        # ── Attempt 2: Flip to TDD ───────────────────────────────────────────
+        log(f"AutoEngineer: issue #{issue_id} failed with CODE_FIRST — retrying with TDD...")
+        result = self._run_orchestrator(
+            row=row,
+            target_files=target_files,
+            test_files=test_files,
+            arch_context=arch_context,
+            suggested_model=suggested_model,
+            strategy=CodingStrategy.TDD,
+            workspace_context=workspace_context,
+            log=log,
+        )
+
+        if result.success:
+            return self._finalize_dispatch(issue_id, result, log)
+
         # ── Attempt 3: Re-prompt with failure context ────────────────────────
-        log(f"AutoEngineer: issue #{issue_id} failed with CODE_FIRST — re-prompting...")
+        log(f"AutoEngineer: issue #{issue_id} failed with TDD — re-prompting...")
         reprompted = self._reprompt_issue(row, result, log)
         if reprompted:
             result = self._run_orchestrator(
@@ -282,7 +284,7 @@ class AutoEngineer(BaseAIAgent):
                 test_files=test_files,
                 arch_context=arch_context,
                 suggested_model=suggested_model,
-                strategy=CodingStrategy.TDD,
+                strategy=CodingStrategy.CODE_FIRST,
                 workspace_context=workspace_context,
                 log=log,
                 prompt_override=reprompted,
@@ -300,7 +302,7 @@ class AutoEngineer(BaseAIAgent):
                 test_files=test_files,
                 arch_context=arch_context,
                 suggested_model=suggested_model,
-                strategy=CodingStrategy.TDD,
+                strategy=CodingStrategy.CODE_FIRST,
                 workspace_context=workspace_context,
                 log=log,
                 prompt_override=reduced,
@@ -615,7 +617,7 @@ class AutoEngineer(BaseAIAgent):
             test_files=all_test_files,
             arch_context=arch_context,
             suggested_model=suggested,
-            strategy=CodingStrategy.TDD,
+            strategy=CodingStrategy.CODE_FIRST,
             workspace_context=workspace_context,
             log=log,
         )
