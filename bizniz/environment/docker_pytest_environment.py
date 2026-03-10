@@ -284,7 +284,7 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
             proc = subprocess.run(
                 ["docker", "exec", self._container_id,
                  "pip", "install", "--no-cache-dir", *new_packages],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, timeout=300,
             )
             if proc.returncode != 0:
                 return

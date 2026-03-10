@@ -283,7 +283,7 @@ class DockerJestEnvironment(BaseExecutionEnvironment):
             proc = subprocess.run(
                 ["docker", "exec", "-w", "/workspace", self._container_id,
                  "npm", "install", "--save-dev", *new_packages],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, timeout=300,
             )
             if proc.returncode != 0:
                 return
