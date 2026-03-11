@@ -45,6 +45,10 @@ class PythonPreflightValidator(BasePreflightValidator):
         # Normalize declared deps to top-level package names
         dep_names = self._normalize_dep_names(declared_dependencies)
 
+        # Normalize all relative imports to absolute before validation
+        self._normalize_relative_imports(generated_files, result)
+        all_files.update(generated_files)
+
         for filepath, content in generated_files.items():
             if not filepath.endswith(".py"):
                 continue
@@ -84,6 +88,70 @@ class PythonPreflightValidator(BasePreflightValidator):
                 except Exception:
                     files[rel] = ""  # File exists but can't read — still counts
         return files
+
+    def _normalize_relative_imports(
+        self, generated_files: Dict[str, str], result: "PreflightResult"
+    ) -> None:
+        """Rewrite all relative imports to absolute in generated files.
+
+        Modifies generated_files in-place. This eliminates the entire class
+        of wrong-level relative import bugs (e.g. ``from ..models`` when
+        ``from ...models`` was needed).
+        """
+        from bizniz.preflight.types import ImportRewrite
+
+        for filepath, content in list(generated_files.items()):
+            if not filepath.endswith(".py"):
+                continue
+            try:
+                tree = ast.parse(content, filename=filepath)
+            except SyntaxError:
+                continue
+
+            # Compute the package of this file (its parent directory as dotted path)
+            fp_parts = PurePosixPath(filepath).parts
+            if len(fp_parts) < 2:
+                continue  # top-level file, no package context for relative imports
+            pkg_parts = list(fp_parts[:-1])  # directory parts
+
+            new_content = content
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                level = node.level or 0
+                if level == 0:
+                    continue  # already absolute
+
+                module = node.module or ""
+
+                # Resolve: go up (level - 1) from the package
+                trim = level - 1
+                if trim > len(pkg_parts):
+                    continue  # invalid relative import, skip
+                if trim == 0:
+                    base_parts = pkg_parts
+                else:
+                    base_parts = pkg_parts[:-trim]
+
+                absolute = ".".join(base_parts)
+                if module:
+                    absolute = f"{absolute}.{module}"
+
+                # Build the old import text to replace
+                dots = "." * level
+                old_text = f"from {dots}{module} import"
+                new_text = f"from {absolute} import"
+
+                if old_text in new_content:
+                    new_content = new_content.replace(old_text, new_text, 1)
+                    result.import_rewrites.append(ImportRewrite(
+                        filepath=filepath,
+                        old_import=f"{dots}{module}",
+                        new_import=absolute,
+                    ))
+
+            if new_content != content:
+                generated_files[filepath] = new_content
 
     def _normalize_dep_names(self, deps: List[str]) -> Set[str]:
         """Normalize dependency names to importable top-level module names."""

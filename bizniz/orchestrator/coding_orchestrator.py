@@ -2105,12 +2105,18 @@ class CodingOrchestrator:
 
         result = validator.validate(current_files, declared_dependencies)
 
+        # Write rewritten files to workspace (relative → absolute imports)
+        rewritten_files = {rw.filepath for rw in result.import_rewrites}
+        for fp in rewritten_files:
+            if fp in current_files:
+                self._workspace.write_file(path=fp, content=current_files[fp])
+
         # Write stubs to workspace
         for stub in result.stubs_created:
             self._workspace.write_file(path=stub.filepath, content=stub.content)
             current_files[stub.filepath] = stub.content
 
-        if result.stubs_created or result.issues:
+        if result.import_rewrites or result.stubs_created or result.issues:
             log(result.summary())
 
         return current_files

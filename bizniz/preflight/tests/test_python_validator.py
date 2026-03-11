@@ -57,16 +57,18 @@ class TestImportResolution:
         result = validator.validate(files, [])
         assert result.passed
 
-    def test_missing_relative_import_creates_stub(self, validator):
+    def test_missing_relative_import_normalized_and_resolved(self, validator):
+        """Relative import is normalized to absolute; parent __init__.py satisfies it."""
         files = {
             "pkg/__init__.py": "",
             "pkg/app.py": "from .errors import NotFoundError\n",
         }
         result = validator.validate(files, [])
-        assert len(result.stubs_created) == 1
-        assert result.stubs_created[0].filepath == "pkg/errors.py"
-        assert "NotFoundError" in result.stubs_created[0].content
-        assert "Exception" in result.stubs_created[0].content
+        # Relative import gets rewritten to absolute
+        assert len(result.import_rewrites) == 1
+        assert result.import_rewrites[0].new_import == "pkg.errors"
+        # pkg/__init__.py exists so pkg.errors is considered valid (attr of __init__)
+        assert result.passed
 
     def test_absolute_import_to_workspace_module(self, validator):
         files = {
@@ -86,6 +88,45 @@ class TestImportResolution:
         assert len(result.stubs_created) >= 1
         stub_paths = [s.filepath for s in result.stubs_created]
         assert any("errors.py" in p for p in stub_paths)
+
+    def test_relative_imports_normalized_to_absolute(self, validator):
+        """Relative imports should be rewritten to absolute during preflight."""
+        files = {
+            "myapp/__init__.py": "",
+            "myapp/models/__init__.py": "",
+            "myapp/models/service.py": "class Service: pass\n",
+            "myapp/api/__init__.py": "",
+            "myapp/api/routers/__init__.py": "",
+            "myapp/api/routers/services.py": (
+                "from ...models.service import Service\n"
+                "from ..deps import get_db\n"
+            ),
+        }
+        result = validator.validate(files, [])
+        # Check the file was rewritten
+        rewritten = files["myapp/api/routers/services.py"]
+        assert "from myapp.models.service import Service" in rewritten
+        assert "from myapp.api.deps import get_db" in rewritten
+        # Check rewrites are tracked
+        assert len(result.import_rewrites) == 2
+
+    def test_relative_import_wrong_level_normalized(self, validator):
+        """Wrong-level relative import gets resolved to correct absolute path."""
+        files = {
+            "myapp/__init__.py": "",
+            "myapp/models/__init__.py": "",
+            "myapp/models/service.py": "class Service: pass\n",
+            "myapp/api/__init__.py": "",
+            "myapp/api/routers/__init__.py": "",
+            # Uses .. (level 2) when ... (level 3) was needed
+            "myapp/api/routers/services.py": (
+                "from ..models.service import Service\n"
+            ),
+        }
+        result = validator.validate(files, [])
+        rewritten = files["myapp/api/routers/services.py"]
+        # .. from myapp/api/routers/ resolves to myapp.api.models.service
+        assert "from myapp.api.models.service import Service" in rewritten
 
     def test_no_stub_when_leaf_module_exists_elsewhere(self, validator):
         """Skip stubbing when the leaf module exists at a different path."""
@@ -164,8 +205,7 @@ class TestStubGeneration:
 
     def test_error_class_stub(self, validator):
         files = {
-            "pkg/__init__.py": "",
-            "pkg/app.py": "from .errors import ValidationError, NotFoundError\n",
+            "app.py": "from pkg.errors import ValidationError, NotFoundError\n",
         }
         result = validator.validate(files, [])
         stub = next(s for s in result.stubs_created if s.filepath == "pkg/errors.py")
@@ -174,8 +214,7 @@ class TestStubGeneration:
 
     def test_regular_class_stub(self, validator):
         files = {
-            "pkg/__init__.py": "",
-            "pkg/app.py": "from .models import User\n",
+            "app.py": "from pkg.models import User\n",
         }
         result = validator.validate(files, [])
         stub = next(s for s in result.stubs_created if s.filepath == "pkg/models.py")
@@ -184,8 +223,7 @@ class TestStubGeneration:
 
     def test_function_stub(self, validator):
         files = {
-            "pkg/__init__.py": "",
-            "pkg/app.py": "from .utils import calculate_total\n",
+            "app.py": "from pkg.utils import calculate_total\n",
         }
         result = validator.validate(files, [])
         stub = next(s for s in result.stubs_created if s.filepath == "pkg/utils.py")
@@ -204,8 +242,7 @@ class TestPreflightResult:
 
     def test_summary_output(self, validator):
         files = {
-            "pkg/__init__.py": "",
-            "pkg/app.py": "from .missing import Foo\n",
+            "app.py": "from pkg.missing import Foo\n",
         }
         result = validator.validate(files, [])
         summary = result.summary()
