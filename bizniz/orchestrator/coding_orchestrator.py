@@ -512,6 +512,13 @@ class CodingOrchestrator:
             current_files, self._get_installed_packages(), log,
         )
 
+        # ── Container import validation ────────────────────────────────────
+        # Batch-try all imports in Docker, auto-fix bad paths, pip-install
+        # missing deps, and ask the agent about ambiguous cases.
+        current_files = self._validate_imports_in_container(
+            current_files, current_test_files, architecture_context, log,
+        )
+
         # ── Proactive package installation ───────────────────────────────────
         self._proactive_package_install(current_files, current_test_files, log)
 
@@ -2118,6 +2125,423 @@ class CodingOrchestrator:
 
         if result.import_rewrites or result.stubs_created or result.issues:
             log(result.summary())
+
+        return current_files
+
+    # ── Container import validation ───────────────────────────────────────────
+
+    def _validate_imports_in_container(
+        self,
+        current_files: dict,
+        current_test_files: dict,
+        architecture_context: str,
+        log: Callable,
+    ) -> dict:
+        """Batch-validate all imports inside the Docker container.
+
+        Runs after preflight (relative→absolute normalization) and before tests.
+        Auto-fixes wrong paths, pip-installs missing deps, and asks the agent
+        about ambiguous cases — all before the first test iteration.
+        """
+        if self._language != "python":
+            return current_files
+
+        env = self._find_installable_environment()
+        if env is None or not hasattr(env, '_container_id'):
+            return current_files
+
+        # 1. Collect all imports from source + test files
+        all_code_files = {**current_files, **current_test_files}
+        imports = self._collect_all_imports(all_code_files)
+        if not imports:
+            return current_files
+
+        # 2. Batch-try imports in the container
+        try:
+            failures = self._batch_try_imports_in_container(imports, env, log)
+        except Exception as exc:
+            log(f"Orchestrator: container import validation skipped ({exc})")
+            return current_files
+
+        if not failures:
+            return current_files
+
+        log(f"Orchestrator: {len(failures)} import(s) failed in container")
+
+        # 3. Build workspace export index (static AST on host)
+        export_index = self._build_workspace_export_index()
+        workspace_modules = set(export_index.keys())
+
+        # 4. Triage each failure
+        auto_fixes = []
+        pip_installs = []
+        ambiguous = []
+        for failure in failures:
+            category, detail = self._triage_import_failure(
+                failure, export_index, workspace_modules,
+            )
+            if category == "auto_fix":
+                auto_fixes.append(detail)
+            elif category == "pip_install":
+                pip_installs.append(detail)
+            elif category == "ambiguous":
+                ambiguous.append(detail)
+
+        # 5. Apply auto-fixes
+        if auto_fixes:
+            current_files = self._apply_import_auto_fixes(
+                auto_fixes, current_files, current_test_files, log,
+            )
+
+        # 6. Batch pip-install missing packages
+        if pip_installs:
+            pkg_names = list({d["package"] for d in pip_installs})
+            log(f"Orchestrator: pip-installing {len(pkg_names)} missing package(s): {', '.join(pkg_names)}")
+            self._install_declared_dependencies(pkg_names, log)
+
+        # 7. Resolve ambiguous cases via one LLM call
+        if ambiguous:
+            current_files = self._resolve_ambiguous_imports(
+                ambiguous, current_files, architecture_context, log,
+            )
+
+        return current_files
+
+    def _collect_all_imports(self, files: dict) -> list:
+        """Extract all absolute imports from Python files.
+
+        Returns list of dicts with module, names, filepath, raw_line.
+        Skips stdlib and relative imports (already normalized by preflight).
+        """
+        import ast
+        import sys
+
+        stdlib = set(sys.stdlib_module_names) if hasattr(sys, 'stdlib_module_names') else set()
+        seen = set()
+        result = []
+
+        for filepath, content in files.items():
+            if not filepath.endswith(".py"):
+                continue
+            try:
+                tree = ast.parse(content, filename=filepath)
+            except SyntaxError:
+                continue
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                    top = node.module.split(".")[0]
+                    if top in stdlib:
+                        continue
+                    names = [a.name for a in (node.names or []) if a.name != "*"]
+                    key = (node.module, tuple(sorted(names)))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    result.append({
+                        "filepath": filepath,
+                        "module": node.module,
+                        "names": names,
+                    })
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        top = alias.name.split(".")[0]
+                        if top in stdlib:
+                            continue
+                        key = (alias.name, ())
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        result.append({
+                            "filepath": filepath,
+                            "module": alias.name,
+                            "names": [],
+                        })
+
+        return result
+
+    def _batch_try_imports_in_container(
+        self, imports: list, env, log: Callable,
+    ) -> list:
+        """Generate a Python script that tries every import and run it in Docker.
+
+        Returns list of failure dicts: {module, names, error}.
+        """
+        import json as _json
+        import subprocess as _sp
+
+        # Ensure container is up and workspace is synced
+        env._ensure_container()
+        env._sync_workspace()
+
+        # Build the test script
+        lines = [
+            "import json, sys",
+            "failures = []",
+        ]
+        for imp in imports:
+            mod = imp["module"]
+            names = imp["names"]
+            # Sanitize: only allow valid Python identifiers
+            if not all(part.isidentifier() for part in mod.split(".")):
+                continue
+            if names and all(n.isidentifier() for n in names):
+                names_str = ", ".join(names)
+                stmt = f"from {mod} import {names_str}"
+            else:
+                stmt = f"import {mod}"
+            lines.append("try:")
+            lines.append(f"    {stmt}")
+            lines.append("except (ImportError, ModuleNotFoundError) as e:")
+            lines.append(
+                f'    failures.append({{"module": {mod!r}, '
+                f'"names": {[n for n in names]!r}, '
+                f'"error": str(e)}})'
+            )
+
+        lines.append("print(json.dumps(failures))")
+        script = "\n".join(lines)
+
+        proc = _sp.run(
+            ["docker", "exec", env._container_id, "python3", "-c", script],
+            capture_output=True, text=True, timeout=30,
+        )
+
+        if proc.returncode != 0:
+            # Script itself errored — log and return empty
+            log(f"Orchestrator: container import check script error: {proc.stderr[:200]}")
+            return []
+
+        try:
+            return _json.loads(proc.stdout.strip())
+        except _json.JSONDecodeError:
+            log("Orchestrator: container import check returned invalid JSON")
+            return []
+
+    def _build_workspace_export_index(self) -> dict:
+        """AST-scan workspace files to build {module_path: set(defined_names)}.
+
+        Runs on the host (no container needed). Only scans top-level definitions.
+        """
+        import ast
+        from pathlib import PurePosixPath
+
+        index = {}
+        try:
+            rel_files = self._workspace.list_relative_files()
+        except Exception:
+            return index
+
+        for p in rel_files:
+            p_str = str(p)
+            if not p_str.endswith(".py") or p_str.startswith("."):
+                continue
+
+            # Convert filepath to module path
+            if p_str.endswith("/__init__.py"):
+                module = p_str.replace("/__init__.py", "").replace("/", ".")
+            else:
+                module = p_str.replace("/", ".").replace(".py", "")
+
+            try:
+                content = self._workspace.read_file(p_str)
+            except Exception:
+                continue
+
+            try:
+                tree = ast.parse(content, filename=p_str)
+            except SyntaxError:
+                continue
+
+            names = set()
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    names.add(node.name)
+                elif isinstance(node, ast.ClassDef):
+                    names.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            names.add(target.id)
+
+            index[module] = names
+
+        return index
+
+    def _triage_import_failure(
+        self,
+        failure: dict,
+        export_index: dict,
+        workspace_modules: set,
+    ) -> tuple:
+        """Categorize an import failure as auto_fix, pip_install, or ambiguous.
+
+        Returns (category, detail_dict).
+        """
+        mod = failure["module"]
+        names = failure.get("names", [])
+        leaf = mod.split(".")[-1]
+        top = mod.split(".")[0]
+
+        # Check if the top-level package exists in workspace at all
+        top_in_workspace = any(
+            m == top or m.startswith(f"{top}.") for m in workspace_modules
+        )
+
+        if not top_in_workspace:
+            # Not our code — try pip install
+            from bizniz.preflight.python_validator import _COMMON_ALIASES
+            pip_name = _COMMON_ALIASES.get(top, top)
+            return ("pip_install", {"package": pip_name})
+
+        # Our code but wrong path — search by leaf + exported names
+        # First pass: match leaf AND all requested names
+        exact_candidates = []
+        for m, exports in export_index.items():
+            m_leaf = m.split(".")[-1]
+            if m_leaf == leaf and (not names or all(n in exports for n in names)):
+                exact_candidates.append(m)
+
+        if len(exact_candidates) == 1:
+            return ("auto_fix", {
+                "old_module": mod,
+                "new_module": exact_candidates[0],
+            })
+
+        # Second pass: match leaf only (ignore names)
+        if not exact_candidates:
+            leaf_candidates = [
+                m for m in workspace_modules
+                if m.split(".")[-1] == leaf
+            ]
+            if len(leaf_candidates) == 1:
+                return ("auto_fix", {
+                    "old_module": mod,
+                    "new_module": leaf_candidates[0],
+                })
+            if len(leaf_candidates) > 1:
+                # Multiple leaf matches — build candidate info for the agent
+                candidates = []
+                for c in leaf_candidates:
+                    exports = export_index.get(c, set())
+                    candidates.append({
+                        "module": c,
+                        "exports": sorted(exports)[:20],
+                    })
+                return ("ambiguous", {
+                    "failure": failure,
+                    "candidates": candidates,
+                })
+
+        # Exact candidates > 1 — ambiguous with name matches
+        if len(exact_candidates) > 1:
+            candidates = []
+            for c in exact_candidates:
+                exports = export_index.get(c, set())
+                candidates.append({
+                    "module": c,
+                    "exports": sorted(exports)[:20],
+                })
+            return ("ambiguous", {
+                "failure": failure,
+                "candidates": candidates,
+            })
+
+        # No matches at all — might be a deeply nested path issue
+        # Try broader search: any module containing the leaf somewhere
+        broad_candidates = [
+            m for m in workspace_modules
+            if f".{leaf}" in m or m == leaf
+        ]
+        if len(broad_candidates) == 1:
+            return ("auto_fix", {
+                "old_module": mod,
+                "new_module": broad_candidates[0],
+            })
+
+        # Give up — treat as pip install (maybe a transitive dep)
+        return ("pip_install", {"package": top})
+
+    def _apply_import_auto_fixes(
+        self,
+        auto_fixes: list,
+        current_files: dict,
+        current_test_files: dict,
+        log: Callable,
+    ) -> dict:
+        """Rewrite import paths in source files and write to workspace."""
+        for fix in auto_fixes:
+            old_mod = fix["old_module"]
+            new_mod = fix["new_module"]
+            old_text = f"from {old_mod}"
+            new_text = f"from {new_mod}"
+
+            # Fix in source files
+            for fp in list(current_files.keys()):
+                if old_text in current_files[fp]:
+                    current_files[fp] = current_files[fp].replace(old_text, new_text)
+                    self._workspace.write_file(path=fp, content=current_files[fp])
+                    log(f"Orchestrator: import fix {old_mod} → {new_mod} in {fp}")
+
+            # Fix in test files too
+            for fp in list(current_test_files.keys()):
+                if old_text in current_test_files[fp]:
+                    current_test_files[fp] = current_test_files[fp].replace(
+                        old_text, new_text,
+                    )
+                    self._workspace.write_file(
+                        path=fp, content=current_test_files[fp],
+                    )
+                    log(f"Orchestrator: import fix {old_mod} → {new_mod} in {fp}")
+
+        return current_files
+
+    def _resolve_ambiguous_imports(
+        self,
+        ambiguous: list,
+        current_files: dict,
+        architecture_context: str,
+        log: Callable,
+    ) -> dict:
+        """Send one batched message to the repair agent for all ambiguous imports."""
+        if not ambiguous:
+            return current_files
+
+        lines = [
+            "The following imports have AMBIGUOUS resolution — each has multiple "
+            "workspace modules that could be the correct target. Fix the import "
+            "statements in the source files to use the correct module path.\n",
+        ]
+        for i, case in enumerate(ambiguous, 1):
+            fail = case["failure"]
+            candidates = case["candidates"]
+            names_str = ", ".join(fail["names"]) if fail["names"] else "*"
+            lines.append(
+                f"{i}. `from {fail['module']} import {names_str}` "
+                f"(error: {fail['error']})"
+            )
+            for c in candidates:
+                exports_str = ", ".join(c["exports"][:10])
+                lines.append(f"   - {c['module']} (exports: {exports_str})")
+            lines.append("")
+
+        log(f"Orchestrator: asking agent to resolve {len(ambiguous)} ambiguous import(s)")
+
+        try:
+            repaired = self._autocoder.repair_multi(
+                current_files=current_files,
+                error_message="\n".join(lines),
+                architecture_context=architecture_context,
+            )
+            for ch in repaired.changes:
+                if ch.filepath in current_files:
+                    current_files[ch.filepath] = ch.content
+                    self._workspace.write_file(
+                        path=ch.filepath, content=ch.content,
+                    )
+                    log(f"Orchestrator: agent resolved import in {ch.filepath}")
+        except Exception as exc:
+            log(f"Orchestrator: ambiguous import resolution failed ({exc})")
 
         return current_files
 
