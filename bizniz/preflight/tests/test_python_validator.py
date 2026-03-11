@@ -87,6 +87,25 @@ class TestImportResolution:
         stub_paths = [s.filepath for s in result.stubs_created]
         assert any("errors.py" in p for p in stub_paths)
 
+    def test_no_stub_when_leaf_module_exists_elsewhere(self, validator):
+        """Skip stubbing when the leaf module exists at a different path."""
+        files = {
+            "myapp/__init__.py": "",
+            "myapp/models/__init__.py": "",
+            "myapp/models/appointment.py": "class Appointment: pass\n",
+            "myapp/api/__init__.py": "",
+            "myapp/api/routers/__init__.py": "",
+            # Router wrongly imports from myapp.api.models.appointment
+            "myapp/api/routers/appointments.py": (
+                "from myapp.api.models.appointment import Appointment\n"
+            ),
+        }
+        result = validator.validate(files, [])
+        stub_paths = [s.filepath for s in result.stubs_created]
+        # Should NOT create a stub at myapp/api/models/appointment.py
+        # because the real module exists at myapp/models/appointment.py
+        assert "myapp/api/models/appointment.py" not in stub_paths
+
     def test_dep_with_version_specifier(self, validator):
         files = {
             "app.py": "import fastapi\n",

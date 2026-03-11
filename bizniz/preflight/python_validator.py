@@ -273,7 +273,17 @@ class PythonPreflightValidator(BasePreflightValidator):
         if not target_file or target_file in all_files:
             return None
 
+        # If the leaf module exists elsewhere in the workspace, the import
+        # is just wrong (not truly missing). Skip stubbing — the orchestrator's
+        # auto-fix will rewrite the import path instead.
         import_name = issue.import_name.lstrip(".")
+        leaf = import_name.split(".")[-1] if import_name else ""
+        if leaf:
+            for existing_path in all_files:
+                if existing_path.endswith(f"/{leaf}.py") or existing_path == f"{leaf}.py":
+                    # A real module with this name exists elsewhere — don't stub
+                    return None
+
         stub_content = self._generate_stub(import_name, issue.filepath, all_files)
         return AutoStub(
             filepath=target_file,

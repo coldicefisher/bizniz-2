@@ -1574,6 +1574,21 @@ class CodingOrchestrator:
                         if m.endswith(f".{leaf}") or m == leaf
                     ]
 
+                    # If multiple candidates, filter out auto-generated stubs
+                    if len(candidates) > 1:
+                        real_candidates = []
+                        for c in candidates:
+                            c_path = c.replace(".", "/") + ".py"
+                            content = None
+                            try:
+                                content = self._workspace.read_file(c_path)
+                            except Exception:
+                                pass
+                            if content and "Auto-generated stub" not in content:
+                                real_candidates.append(c)
+                        if real_candidates:
+                            candidates = real_candidates
+
                     if len(candidates) == 1:
                         correct = candidates[0]
                         # Replace the import in the source code
@@ -1582,6 +1597,17 @@ class CodingOrchestrator:
                         if old_import in new_code:
                             new_code = new_code.replace(old_import, new_import)
                             log(f"Orchestrator: auto-fixed import {mod} → {correct} in {fp}")
+                            # Clean up auto-stub at the old (wrong) path
+                            old_path = mod.replace(".", "/") + ".py"
+                            if old_path in current_files:
+                                old_content = current_files[old_path]
+                                if "Auto-generated stub" in old_content:
+                                    del current_files[old_path]
+                                    try:
+                                        self._workspace.delete_file(old_path)
+                                        log(f"Orchestrator: removed stale stub {old_path}")
+                                    except Exception:
+                                        pass
 
             if new_code != code:
                 current_files[fp] = new_code
