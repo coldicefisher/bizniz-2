@@ -1563,12 +1563,30 @@ class CodingOrchestrator:
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.module:
                     mod = node.module
-                    if mod in existing_modules:
+                    level = node.level or 0
+
+                    # Resolve relative imports to absolute module path
+                    if level > 0:
+                        # Compute the package of the current file
+                        fp_module = fp.replace("/", ".").replace(".py", "")
+                        parts = fp_module.split(".")
+                        # Go up `level` packages from the file's directory
+                        # (the file's package is its parent dir)
+                        pkg_parts = parts[:-1]  # remove filename
+                        if level <= len(pkg_parts):
+                            base = ".".join(pkg_parts[:len(pkg_parts) - level + 1])
+                        else:
+                            base = ""
+                        resolved = f"{base}.{mod}" if base else mod
+                    else:
+                        resolved = mod
+
+                    if resolved in existing_modules:
                         continue  # import is valid
 
                     # Try to find the correct module by searching for the
                     # leaf name in existing modules
-                    leaf = mod.split(".")[-1]
+                    leaf = resolved.split(".")[-1]
                     candidates = [
                         m for m in existing_modules
                         if m.endswith(f".{leaf}") or m == leaf
@@ -1591,14 +1609,20 @@ class CodingOrchestrator:
 
                     if len(candidates) == 1:
                         correct = candidates[0]
-                        # Replace the import in the source code
-                        old_import = f"from {mod}"
-                        new_import = f"from {correct}"
+                        # For relative imports, rewrite as absolute import
+                        if level > 0:
+                            dots = "." * level
+                            old_import = f"from {dots}{mod}"
+                            new_import = f"from {correct}"
+                            log(f"Orchestrator: auto-fixed relative import {dots}{mod} → {correct} in {fp}")
+                        else:
+                            old_import = f"from {mod}"
+                            new_import = f"from {correct}"
+                            log(f"Orchestrator: auto-fixed import {mod} → {correct} in {fp}")
                         if old_import in new_code:
                             new_code = new_code.replace(old_import, new_import)
-                            log(f"Orchestrator: auto-fixed import {mod} → {correct} in {fp}")
                             # Clean up auto-stub at the old (wrong) path
-                            old_path = mod.replace(".", "/") + ".py"
+                            old_path = resolved.replace(".", "/") + ".py"
                             if old_path in current_files:
                                 old_content = current_files[old_path]
                                 if "Auto-generated stub" in old_content:
