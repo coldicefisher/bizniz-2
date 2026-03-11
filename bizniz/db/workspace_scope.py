@@ -97,7 +97,7 @@ class WorkspaceScope:
         description: str,
         target_files: List[dict],
         test_files: List[str],
-        depends_on: Optional[List[int]] = None,
+        depends_on: Optional[list] = None,
         suggested_model: Optional[str] = None,
         test_setup_hint: str = "",
     ) -> int:

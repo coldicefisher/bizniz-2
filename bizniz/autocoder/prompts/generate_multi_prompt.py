@@ -10,6 +10,10 @@ Your PRIMARY goal is to produce working code, not to explore exhaustively.
 
 RULES:
 - Return COMPLETE content for every file — no partial snippets.
+- Start every file with a module docstring showing its canonical import path:
+  Example: pet_groomer/models/service.py should begin with a docstring like
+  "pet_groomer.models.service -- Service domain model."
+  This tells other agents exactly how to import from this module.
 - Use relative imports within the package (e.g. `from .models import Expense`).
 - Ensure __init__.py files export the public API.
 - Write clean Python with type hints. No test code in source files.
@@ -31,6 +35,9 @@ Your PRIMARY goal is to produce working code, not to explore exhaustively.
 
 RULES:
 - Return COMPLETE content for every file — no partial snippets.
+- Start every file with a comment: `// <path/to/module> — brief description.`
+  Example: `// src/repositories/servicesRepository.ts — In-memory services repository.`
+  This tells other agents the canonical import path.
 - Use standard ES module imports (e.g. `import {{ Expense }} from './models'`).
 - All files must use .ts or .tsx extensions (tsx for React components).
 - Write clean TypeScript with type annotations. No test code in source files.

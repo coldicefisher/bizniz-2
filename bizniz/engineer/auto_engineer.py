@@ -168,6 +168,7 @@ class AutoEngineer(BaseAIAgent):
                 description=issue["description"],
                 target_files=target_files,
                 test_files=test_files,
+                depends_on=depends_on,
                 suggested_model=suggested_model,
                 test_setup_hint=test_setup_hint,
             )
@@ -181,6 +182,9 @@ class AutoEngineer(BaseAIAgent):
                 suggested_model=suggested_model,
                 test_setup_hint=test_setup_hint,
             ))
+
+        # Step 3b: Validate and backfill test_setup_hint for integration issues
+        self._backfill_test_setup_hints(analysis.issues, plan, log)
 
         # Step 4: Create the workspace package structure
         if self._language == "typescript":
@@ -808,6 +812,89 @@ class AutoEngineer(BaseAIAgent):
 
         return decision
 
+    def _backfill_test_setup_hints(
+        self,
+        issues: list,
+        plan: ArchitecturePlan,
+        log: Callable,
+    ):
+        """
+        Ensure every issue has a test_setup_hint. For issues that look like
+        endpoint/route/integration work, auto-generate a hint from the
+        architecture plan if the LLM left it empty.
+        """
+        # Detect integration keywords in titles/descriptions
+        integration_keywords = [
+            "endpoint", "route", "router", "api", "handler", "controller",
+            "middleware", "view", "fastapi", "express", "flask", "django",
+        ]
+
+        # Find the app factory/entry point from the architecture plan
+        app_entry = ""
+        for mod in plan.modules:
+            fp_lower = mod.filepath.lower()
+            if any(kw in fp_lower for kw in ["app", "main", "server", "factory"]):
+                # Build a hint from the module info
+                if self._language == "python":
+                    pkg = plan.package_name
+                    rel = mod.filepath.replace("/", ".").replace(".py", "")
+                    if mod.class_name:
+                        app_entry = (
+                            f"The app is created in {mod.filepath}. "
+                            f"Tests should: from {rel} import {mod.class_name}; "
+                            f"For FastAPI: from fastapi.testclient import TestClient; "
+                            f"client = TestClient(app)"
+                        )
+                    else:
+                        # Look for create_app or app function
+                        func_names = [m.name for m in mod.methods]
+                        factory = next((f for f in func_names if "app" in f.lower() or "create" in f.lower()), None)
+                        if factory:
+                            app_entry = (
+                                f"The app is created via {factory}() in {mod.filepath}. "
+                                f"Tests should: from {rel} import {factory}; "
+                                f"from fastapi.testclient import TestClient; "
+                                f"client = TestClient({factory}())"
+                            )
+                        else:
+                            app_entry = (
+                                f"The app module is {mod.filepath}. "
+                                f"Tests should import the app object and use TestClient."
+                            )
+                break
+
+        backfilled = 0
+        for issue in issues:
+            if issue.test_setup_hint:
+                continue  # already has a hint
+
+            title_desc = (issue.title + " " + issue.description).lower()
+            is_integration = any(kw in title_desc for kw in integration_keywords)
+
+            if is_integration and app_entry:
+                issue.test_setup_hint = app_entry
+                # Update DB
+                if issue.db_id:
+                    try:
+                        self._workspace.db._execute(
+                            "UPDATE issues SET test_setup_hint=? WHERE id=?",
+                            (app_entry, issue.db_id),
+                        )
+                        self._workspace.db._commit()
+                    except Exception:
+                        try:
+                            self._workspace.db._conn.execute(
+                                "UPDATE issues SET test_setup_hint=? WHERE id=?",
+                                (app_entry, issue.db_id),
+                            )
+                            self._workspace.db._conn.commit()
+                        except Exception:
+                            pass
+                backfilled += 1
+
+        if backfilled:
+            log(f"AutoEngineer: backfilled test_setup_hint for {backfilled} integration issue(s)")
+
     @staticmethod
     def format_architecture_context(plan: ArchitecturePlan) -> str:
         """
@@ -1119,6 +1206,7 @@ class AutoEngineer(BaseAIAgent):
                 description=issue["description"],
                 target_files=target_files,
                 test_files=test_files,
+                depends_on=depends_on,
                 suggested_model=suggested_model,
                 test_setup_hint=test_setup_hint,
             )

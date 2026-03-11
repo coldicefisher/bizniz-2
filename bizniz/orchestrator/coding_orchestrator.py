@@ -490,6 +490,11 @@ class CodingOrchestrator:
         if manifest:
             extra_context += f"\n\nWORKSPACE MANIFEST (existing files and their exports):\n{manifest}\n"
 
+        # ── Enrich test setup hints from actual workspace ────────────────────
+        # Scans disk for app factories and routers, appending verified import
+        # paths so the autotester uses real imports instead of guessing.
+        prompt = self._enrich_test_setup_hint(prompt, test_files, architecture_context, log)
+
         if strategy == CodingStrategy.TDD:
             current_files, current_test_files = self._generate_tdd(
                 prompt, target_files, test_files, architecture_context,
@@ -1713,6 +1718,155 @@ class CodingOrchestrator:
                         signatures.append(target.id)
 
         return signatures[:10]
+
+    def _enrich_test_setup_hint(
+        self,
+        prompt: str,
+        test_files: List[str],
+        architecture_context: str,
+        log: Callable,
+    ) -> str:
+        """
+        Scan the workspace for app factories and routers, appending a few
+        verified import lines to the prompt. Keeps it minimal — the
+        architecture plan and engineer's hint are already in the prompt,
+        this just adds ground-truth imports from files that exist on disk.
+        """
+        # Only enrich for integration/endpoint issues
+        is_integration = any(
+            kw in " ".join(test_files).lower()
+            for kw in ["router", "endpoint", "api", "app", "factory", "integration"]
+        )
+        if not is_integration:
+            prompt_lower = prompt.lower()
+            is_integration = any(
+                kw in prompt_lower
+                for kw in ["endpoint", "route", "router", "api", "handler",
+                            "controller", "middleware", "fastapi", "express",
+                            "flask", "app factory", "testclient"]
+            )
+        if not is_integration:
+            return prompt
+
+        # Scan workspace for app factories and routers
+        app_hints = []
+        router_hints = []
+        try:
+            rel_files = self._workspace.list_relative_files()
+            for rel_path in sorted(str(p) for p in rel_files):
+                if rel_path.startswith(".") or "__pycache__" in rel_path:
+                    continue
+                if "test" in rel_path.lower():
+                    continue
+                if self._language == "python" and rel_path.endswith(".py"):
+                    self._scan_python_for_hints(rel_path, app_hints, router_hints)
+                elif self._language == "typescript" and rel_path.endswith((".ts", ".tsx")):
+                    self._scan_typescript_for_hints(rel_path, app_hints, router_hints)
+        except Exception:
+            return prompt
+
+        if not app_hints and not router_hints:
+            return prompt
+
+        # Build compact hint — just the import lines
+        lines = []
+        for h in app_hints + router_hints:
+            lines.append(f"  {h}")
+        verified = "\n".join(lines)
+
+        if "TEST SETUP HINT:" in prompt:
+            prompt += f"\n\nVERIFIED IMPORTS (from workspace):\n{verified}"
+        else:
+            prompt += f"\n\nTEST SETUP HINT (from workspace):\n{verified}"
+
+        log(f"Orchestrator: enriched test hints ({len(app_hints)} app, {len(router_hints)} router from disk)")
+        return prompt
+
+    def _scan_python_for_hints(self, rel_path: str, app_hints: list, router_hints: list):
+        """Scan a Python file for app factories and router definitions."""
+        import ast
+
+        try:
+            content = self._workspace.read_file(path=rel_path)
+        except Exception:
+            return
+
+        if not content or not content.strip():
+            return
+
+        try:
+            tree = ast.parse(content, filename=rel_path)
+        except SyntaxError:
+            return
+
+        module_path = rel_path.replace("/", ".").replace(".py", "")
+        basename = rel_path.rsplit("/", 1)[-1].replace(".py", "")
+
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.FunctionDef):
+                name_lower = node.name.lower()
+                # App factory functions
+                if any(kw in name_lower for kw in ["create_app", "make_app", "build_app", "app_factory"]):
+                    app_hints.append(
+                        f"from {module_path} import {node.name}; "
+                        f"from fastapi.testclient import TestClient; "
+                        f"client = TestClient({node.name}())"
+                    )
+                # Router builder functions
+                elif "router" in name_lower or "build_router" in name_lower:
+                    app_hints.append(
+                        f"from {module_path} import {node.name}"
+                    )
+
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        name_lower = target.id.lower()
+                        # Module-level app = FastAPI()
+                        if name_lower == "app" and self._is_fastapi_call(node.value):
+                            app_hints.append(
+                                f"from {module_path} import app; "
+                                f"from fastapi.testclient import TestClient; "
+                                f"client = TestClient(app)"
+                            )
+                        # Module-level router = APIRouter()
+                        elif "router" in name_lower:
+                            router_hints.append(
+                                f"from {module_path} import {target.id}"
+                            )
+
+    def _is_fastapi_call(self, node) -> bool:
+        """Check if an AST node is a FastAPI() or similar call."""
+        import ast
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in ("FastAPI", "Flask", "Starlette"):
+                return True
+            if isinstance(node.func, ast.Attribute) and node.func.attr in ("FastAPI", "Flask"):
+                return True
+        return False
+
+    def _scan_typescript_for_hints(self, rel_path: str, app_hints: list, router_hints: list):
+        """Scan a TypeScript file for app/router exports using regex."""
+        import re
+
+        try:
+            content = self._workspace.read_file(path=rel_path)
+        except Exception:
+            return
+
+        if not content or not content.strip():
+            return
+
+        module_path = rel_path.replace(".ts", "").replace(".tsx", "")
+
+        # Look for exported app creation
+        if re.search(r'export\s+(?:const|function)\s+(?:createApp|buildApp|app)', content):
+            for m in re.finditer(r'export\s+(?:const|function)\s+(createApp|buildApp|app)\b', content):
+                app_hints.append(f"import {{ {m.group(1)} }} from './{module_path}'")
+
+        # Look for exported routers
+        for m in re.finditer(r'export\s+(?:const|default)\s+(\w*[Rr]outer\w*)', content):
+            router_hints.append(f"import {{ {m.group(1)} }} from './{module_path}'")
 
     def _get_passing_test_examples(self, max_examples: int = 2) -> str:
         """

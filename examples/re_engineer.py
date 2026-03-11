@@ -23,7 +23,7 @@ load_dotenv()
 
 PROJECT_ROOT = Path("/home/jamey/bizniz_projects/pet_groomer")
 WORKSPACE_DIR = PROJECT_ROOT / "backend"
-PROBLEM_ID = 5  # New problem ID for the fresh run
+PROBLEM_ID = 8  # Fresh issues with test_setup_hint + dependencies
 
 
 def main():
@@ -42,7 +42,7 @@ def main():
 
     workspace = LocalWorkspace(root=WORKSPACE_DIR)
 
-    model = "gpt-4o"
+    model = "gpt-5"
     client_config = ChatGPTClientConfig(default_model=model)
     client = OpenAIChat4GPTClient(
         config=client_config,
@@ -130,11 +130,13 @@ Build ONLY this service. Use python with fastapi. Focus on clean, working code w
         print(f"     Files: {', '.join(targets)}")
         print(f"     Tests: {', '.join(issue.test_files)}")
         print(f"     Model: {issue.suggested_model}")
+        if issue.test_setup_hint:
+            print(f"     Test setup: {issue.test_setup_hint[:120]}...")
 
     # Save for reference
     docs_dir = PROJECT_ROOT / "docs"
     docs_dir.mkdir(exist_ok=True)
-    issues_path = docs_dir / "issues_v5.json"
+    issues_path = docs_dir / "issues_v8.json"
     issues_data = []
     for issue in analysis.issues:
         issues_data.append({
@@ -145,6 +147,7 @@ Build ONLY this service. Use python with fastapi. Focus on clean, working code w
             "test_files": issue.test_files,
             "depends_on": issue.depends_on_titles,
             "suggested_model": issue.suggested_model,
+            "test_setup_hint": issue.test_setup_hint or "",
         })
     with open(issues_path, "w") as f:
         json.dump(issues_data, f, indent=2)

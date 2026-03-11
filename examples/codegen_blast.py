@@ -34,7 +34,7 @@ load_dotenv()
 PROJECT_ROOT = Path("/home/jamey/bizniz_projects/pet_groomer")
 WORKSPACE_DIR = PROJECT_ROOT / "backend"
 DOCKER_IMAGE = "pet_groomer-backend:dev"
-PROBLEM_ID = 5  # Single-responsibility issues (64-72)
+PROBLEM_ID = 8  # Issues with test_setup_hint + dependencies + model escalation
 MAX_FAILURES = 3  # Stop after this many failed issues
 MAX_ITERATIONS = 10  # Per-issue iteration cap
 
@@ -201,6 +201,7 @@ def main():
     from bizniz.agentic_debugger.agentic_debugger import AgenticDebugger
     from bizniz.engineer.auto_engineer import AutoEngineer
     from bizniz.engineer.types import ArchitecturePlan
+    from bizniz.orchestrator.model_progression import ModelProgression
 
     print("=" * 60)
     print("  Code Generation Blast Test")
@@ -249,6 +250,17 @@ def main():
             "suggested_model": row["suggested_model"],
             "test_setup_hint": row["test_setup_hint"] if "test_setup_hint" in row.keys() else "",
         })
+
+    # Resolve title-based dependencies to IDs
+    title_to_id = {iss["title"]: iss["id"] for iss in issues}
+    for iss in issues:
+        resolved = []
+        for dep in iss.get("depends_on", []):
+            if isinstance(dep, str) and dep in title_to_id:
+                resolved.append(title_to_id[dep])
+            elif isinstance(dep, int):
+                resolved.append(dep)
+        iss["depends_on"] = resolved
 
     # Sort issues using Kahn's algorithm (topological order by dependencies)
     issues = _topological_sort(issues)
@@ -370,6 +382,13 @@ def main():
                     api_key=os.environ["OPENAI_API_KEY"],
                 )
 
+                def make_client(model_name):
+                    cfg = ChatGPTClientConfig(default_model=model_name)
+                    return OpenAIChat4GPTClient(
+                        config=cfg,
+                        api_key=os.environ["OPENAI_API_KEY"],
+                    )
+
                 autocoder = Autocoder(
                     client=client,
                     environment=env,
@@ -384,11 +403,17 @@ def main():
                     on_status_message=status_cb,
                 )
 
+                # Model escalation on stall: matches bizniz.yaml repair_models
+                progression = ModelProgression(["gpt-4o", "gpt-5"])
+
                 orchestrator = CodingOrchestrator(
                     autocoder=autocoder,
                     autotester=autotester,
                     test_environment=env,
                     workspace=workspace,
+                    client=client,
+                    client_factory=make_client,
+                    model_progression=progression,
                     max_iterations=MAX_ITERATIONS,
                     stall_threshold=3,
                     agentic_debug_threshold=5,
