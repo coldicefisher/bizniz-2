@@ -107,6 +107,7 @@ def run_tool_loop(
     start_time = time.time()
     parse_failures = 0
     max_parse_failures = 5
+    rate_limit_backoff = 0.0  # accumulates across turns to prevent rapid re-hitting
 
     for turn in range(1, max_turns + 1):
         elapsed = time.time() - start_time
@@ -121,7 +122,13 @@ def run_tool_loop(
                 ),
             })
 
-        # Call LLM (with rate-limit retry)
+        # If we recently hit a rate limit, wait before the next call
+        if rate_limit_backoff > 0:
+            log(f"{agent_name}: rate limit cooldown — waiting {rate_limit_backoff:.1f}s")
+            time.sleep(rate_limit_backoff)
+            rate_limit_backoff = 0.0  # reset after waiting
+
+        # Call LLM (with rate-limit retry + exponential backoff)
         try:
             text, _, _ = client.get_text(
                 messages=messages,
@@ -135,7 +142,7 @@ def run_tool_loop(
                 wait = _parse_retry_after(str(e))
                 log(f"{agent_name}: rate limited — waiting {wait:.1f}s")
                 time.sleep(wait + 1.0)
-                # Retry this turn without counting as a failure
+                # Retry once
                 try:
                     text, _, _ = client.get_text(
                         messages=messages,
@@ -144,7 +151,13 @@ def run_tool_loop(
                         schema=action_schema,
                     )
                 except Exception as retry_e:
-                    log(f"{agent_name}: retry failed ({type(retry_e).__name__}: {retry_e})")
+                    from bizniz.clients.chatgpt.errors import OpenAIRateLimit as RL2
+                    if isinstance(retry_e, RL2):
+                        # Still rate limited — set escalating backoff for next turn
+                        rate_limit_backoff = min(wait * 2, 60.0)
+                        log(f"{agent_name}: still rate limited, will wait {rate_limit_backoff:.1f}s next turn")
+                    else:
+                        log(f"{agent_name}: retry failed ({type(retry_e).__name__}: {retry_e})")
                     parse_failures += 1
                     if parse_failures >= max_parse_failures:
                         raise ToolLoopBadResponseError(

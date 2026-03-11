@@ -134,6 +134,8 @@ class CodingOrchestrator:
             consecutive_fail_threshold=stall_threshold,
         )
         self._stall_cycle_count = 0
+        self._editable_install_failed = False  # skip pip install -e . after first failure
+        self._test_scaffold = ""  # cached scaffold from autocoder for test regeneration
 
         # Override system prompts for non-Python languages
         if language == "typescript":
@@ -803,7 +805,7 @@ class CodingOrchestrator:
                             )
                             current_files = {ch.filepath: ch.code for ch in code_result.changes}
                             test_result = self._autotester.generate_multi(
-                                problem_statement=prompt,
+                                problem_statement=prompt + self._get_scaffold_context(),
                                 test_files=list(current_test_files.keys()),
                                 source_code=current_files,
                                 architecture_context=architecture_context,
@@ -822,7 +824,7 @@ class CodingOrchestrator:
 
                 log("Orchestrator: test collection error — regenerating tests...")
                 enriched_prompt = (
-                    f"{prompt}\n\n"
+                    f"{prompt}{self._get_scaffold_context()}\n\n"
                     f"CURRENT CODE:\n"
                     + "\n".join(f"── {fp} ──\n```{self._code_fence_lang}\n{code}\n```" for fp, code in current_files.items())
                     + f"\n\nThe previous tests had collection errors:\n{error_detail}\n"
@@ -961,6 +963,7 @@ class CodingOrchestrator:
             # Capture test scaffold from autocoder (last non-empty one wins)
             if code_result.test_scaffold:
                 test_scaffold = code_result.test_scaffold
+                self._test_scaffold = test_scaffold
         log(f"Orchestrator [CODE_FIRST]: code generation done in {time.time() - t0:.1f}s ({len(current_files)} files)")
 
         # Step 2: Generate tests one file at a time, sending only the relevant source
@@ -1092,7 +1095,7 @@ class CodingOrchestrator:
                 self._strategy = CodingStrategy.CODE_FIRST
                 # Regenerate tests from spec only (no source blob — architecture context is in the prompt)
                 test_result = self._autotester.generate_multi(
-                    problem_statement=prompt + f"\n\nPrevious failures:\n{failure_output}",
+                    problem_statement=prompt + self._get_scaffold_context() + f"\n\nPrevious failures:\n{failure_output}",
                     test_files=test_files,
                     source_code=None,
                 )
@@ -1103,7 +1106,7 @@ class CodingOrchestrator:
                 self._strategy = CodingStrategy.TDD
                 # Regenerate tests from spec (TDD style, no source code)
                 test_result = self._autotester.generate_multi(
-                    problem_statement=prompt,
+                    problem_statement=prompt + self._get_scaffold_context(),
                     test_files=test_files,
                     source_code=None,
                 )
@@ -1148,8 +1151,11 @@ class CodingOrchestrator:
                     existing_code={},
                 )
                 new_files = {ch.filepath: ch.code for ch in code_result.changes}
+                # Update scaffold from fresh code generation
+                if code_result.test_scaffold:
+                    self._test_scaffold = code_result.test_scaffold
                 test_result = self._autotester.generate_multi(
-                    problem_statement=prompt,
+                    problem_statement=prompt + self._get_scaffold_context(),
                     test_files=test_files,
                     source_code=new_files,
                 )
@@ -1180,7 +1186,7 @@ class CodingOrchestrator:
             if diagnosis and fix_target in ("tests", "both"):
                 log("Orchestrator: diagnosis recommends fixing tests — regenerating...")
                 enriched_prompt = (
-                    f"{prompt}\n\n"
+                    f"{prompt}{self._get_scaffold_context()}\n\n"
                     f"DIAGNOSIS:\n{diagnosis_text}\n\n"
                     f"FIX PLAN:\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(fix_plan)) + "\n\n"
                     f"APPROACH: {suggested_approach}\n\n"
@@ -1260,7 +1266,7 @@ class CodingOrchestrator:
                 # Code-first mode: regenerate tests from spec (no source blob)
                 log("Orchestrator: regenerating tests after stall...")
                 test_result = self._autotester.generate_multi(
-                    problem_statement=prompt + f"\n\nPrevious failures:\n{failure_output}",
+                    problem_statement=prompt + self._get_scaffold_context() + f"\n\nPrevious failures:\n{failure_output}",
                     test_files=test_files,
                     source_code=None,
                 )
@@ -1745,6 +1751,15 @@ class CodingOrchestrator:
             + "\n\n".join(examples) + "\n"
         )
 
+    def _get_scaffold_context(self) -> str:
+        """Return formatted test scaffold context string, or empty string."""
+        if not self._test_scaffold:
+            return ""
+        return (
+            f"\n\nTEST SCAFFOLD (from the code author — use this as your starting point):\n"
+            f"```{self._code_fence_lang}\n{self._test_scaffold}\n```\n"
+        )
+
     def _run_preflight(
         self,
         current_files: dict,
@@ -1777,7 +1792,11 @@ class CodingOrchestrator:
         """
         Run `pip install -e .` in the Docker container if a pyproject.toml or setup.py exists.
         This makes the project's own package importable (e.g. `from pet_groomer.api import app`).
+        Skips silently after first failure to avoid wasting ~2s per iteration.
         """
+        if self._editable_install_failed:
+            return
+
         env = self._find_installable_environment()
         if env is None or not hasattr(env, '_container_id') or not hasattr(env, '_workspace_root'):
             return
@@ -1802,7 +1821,8 @@ class CodingOrchestrator:
         if proc.returncode == 0:
             log("Orchestrator: project installed in editable mode.")
         else:
-            log(f"Orchestrator: pip install -e . failed: {proc.stderr[:200]}")
+            self._editable_install_failed = True
+            log(f"Orchestrator: pip install -e . failed (will skip future attempts): {proc.stderr[:200]}")
 
     def _proactive_package_install(
         self,
