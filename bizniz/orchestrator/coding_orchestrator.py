@@ -698,50 +698,58 @@ class CodingOrchestrator:
                     collection_error_count = 0
                     continue
 
-                # If collection error is an ImportError in source code (not tests),
-                # repair the source code instead of just regenerating tests
-                if "ImportError" in error_detail and collection_error_count <= 2:
-                    # Check if the import error traces back to a source file (not a test file)
-                    source_import_error = False
-                    for fp in current_files:
-                        basename = fp.rsplit("/", 1)[-1] if "/" in fp else fp
-                        module = basename.replace(".py", "")
-                        if basename in error_detail or module in error_detail:
-                            source_import_error = True
-                            break
-                    if source_import_error:
-                        log("Orchestrator: collection error caused by source code import — repairing code...")
-                        all_files = {**current_files}
-                        for fp, tests in current_test_files.items():
-                            all_files[fp] = tests
-                        try:
-                            repaired = self._autocoder.repair_multi(
-                                current_files=all_files,
-                                error_message=(
-                                    f"Test collection failed with ImportError. "
-                                    f"IMPORTANT: Trace the FULL import chain — the error may be in a transitive dependency, "
-                                    f"not the file directly mentioned. Read each imported module to find the broken link.\n\n"
-                                    f"FULL ERROR:\n{error_detail}"
-                                ),
-                                architecture_context=architecture_context,
-                            )
-                            if repaired.dependencies:
-                                self._install_declared_dependencies(repaired.dependencies, log)
-                            for ch in repaired.changes:
-                                if ch.filepath in current_test_files:
-                                    current_test_files[ch.filepath] = ch.code
-                                else:
-                                    current_files[ch.filepath] = ch.code
-                                    self._workspace.write_file(path=ch.filepath, content=ch.code)
-                            # Re-install project after code changes
-                            self._install_project_editable(log)
-                            stale_count = 0
-                            previous_code_hash = None
-                            continue
-                        except AIInsufficientFunds:
-                            raise
-                        except Exception as e:
-                            log(f"Orchestrator: code repair for import error failed ({type(e).__name__}: {e})")
+                # If collection error involves our source files, repair the source
+                # code instead of just regenerating tests. Detects: ImportError,
+                # ModuleNotFoundError, or any traceback that chains through our
+                # source files.
+                source_import_error = self._is_source_import_error(
+                    error_detail, current_files,
+                )
+                if source_import_error and collection_error_count <= 3:
+                    log("Orchestrator: collection error caused by source code import — repairing code...")
+
+                    # First, try auto-fixing imports directly from the workspace
+                    auto_fixed = self._auto_fix_source_imports(current_files, error_detail, log)
+                    if auto_fixed:
+                        stale_count = 0
+                        previous_code_hash = None
+                        continue
+
+                    # Fall back to LLM repair
+                    all_files = {**current_files}
+                    for fp, tests in current_test_files.items():
+                        all_files[fp] = tests
+                    try:
+                        repaired = self._autocoder.repair_multi(
+                            current_files=all_files,
+                            error_message=(
+                                f"Test collection failed because our SOURCE CODE has broken imports. "
+                                f"The test imports our module, and our module tries to import "
+                                f"from a path that does not exist.\n\n"
+                                f"IMPORTANT: Use discovery tools to check what modules actually "
+                                f"exist in the workspace. The import paths in our source code may "
+                                f"be wrong — for example, importing from pet_groomer.api.models "
+                                f"when the actual module is at pet_groomer.models.\n\n"
+                                f"FULL ERROR:\n{error_detail}"
+                            ),
+                            architecture_context=architecture_context,
+                        )
+                        if repaired.dependencies:
+                            self._install_declared_dependencies(repaired.dependencies, log)
+                        for ch in repaired.changes:
+                            if ch.filepath in current_test_files:
+                                current_test_files[ch.filepath] = ch.code
+                            else:
+                                current_files[ch.filepath] = ch.code
+                                self._workspace.write_file(path=ch.filepath, content=ch.code)
+                        self._install_project_editable(log)
+                        stale_count = 0
+                        previous_code_hash = None
+                        continue
+                    except AIInsufficientFunds:
+                        raise
+                    except Exception as e:
+                        log(f"Orchestrator: code repair for import error failed ({type(e).__name__}: {e})")
 
                 # After 3 consecutive collection errors, escalate model and clear history
                 if collection_error_count >= self._stall_threshold:
@@ -1466,6 +1474,121 @@ class CodingOrchestrator:
             current_files.pop(old_path, None)
 
         return fixed
+
+    # ── Source import error detection and auto-fix ────────────────────────────
+
+    def _is_source_import_error(self, error_detail: str, current_files: dict) -> bool:
+        """
+        Detect if a collection error is caused by broken imports in our source
+        code (not the test file). Broadened detection: checks for ImportError,
+        ModuleNotFoundError, 'No module named', or any traceback chaining
+        through our source files.
+        """
+        # Explicit import error keywords
+        import_keywords = [
+            "ImportError", "ModuleNotFoundError", "No module named",
+            "cannot import name",
+        ]
+        has_import_keyword = any(kw in error_detail for kw in import_keywords)
+
+        # Check if any of our source files appear in the error traceback
+        source_in_traceback = False
+        for fp in current_files:
+            # Convert filepath to module path for matching
+            module = fp.replace("/", ".").replace(".py", "")
+            basename = fp.rsplit("/", 1)[-1] if "/" in fp else fp
+            if basename in error_detail or module in error_detail:
+                source_in_traceback = True
+                break
+
+        if has_import_keyword and source_in_traceback:
+            return True
+
+        # Even without explicit ImportError text, if the test tries to import
+        # our source file and collection fails, it's likely an import issue
+        # in the source. Check for "from <our_module> import" pattern.
+        for fp in current_files:
+            module = fp.replace("/", ".").replace(".py", "")
+            if f"from {module} import" in error_detail:
+                return True
+            # Also check partial module path (e.g., "pet_groomer.api.routers.appointments")
+            parts = module.split(".")
+            if len(parts) >= 2:
+                short = ".".join(parts[-2:])
+                if f"from {short}" in error_detail or f"import {short}" in error_detail:
+                    return True
+
+        return False
+
+    def _auto_fix_source_imports(
+        self, current_files: dict, error_detail: str, log: Callable,
+    ) -> bool:
+        """
+        Attempt to fix broken imports in source files by scanning the actual
+        workspace for the correct module paths. This handles the common case
+        where the autocoder generates 'from pkg.api.models.X import Y' but
+        the actual module is at 'from pkg.models.X import Y'.
+
+        Returns True if any fixes were applied.
+        """
+        import ast
+        import re
+
+        # Build a map of what actually exists in the workspace
+        try:
+            rel_files = self._workspace.list_relative_files()
+        except Exception:
+            return False
+
+        existing_modules = set()
+        for p in rel_files:
+            p_str = str(p)
+            if p_str.endswith(".py") and not p_str.startswith("."):
+                module = p_str.replace("/", ".").replace(".py", "")
+                existing_modules.add(module)
+                # Also add the package path (for 'from pkg.models import X')
+                if "." in module:
+                    existing_modules.add(module.rsplit(".", 1)[0])
+
+        fixed_any = False
+        for fp, code in list(current_files.items()):
+            if not fp.endswith(".py"):
+                continue
+            try:
+                tree = ast.parse(code, filename=fp)
+            except SyntaxError:
+                continue
+
+            new_code = code
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    mod = node.module
+                    if mod in existing_modules:
+                        continue  # import is valid
+
+                    # Try to find the correct module by searching for the
+                    # leaf name in existing modules
+                    leaf = mod.split(".")[-1]
+                    candidates = [
+                        m for m in existing_modules
+                        if m.endswith(f".{leaf}") or m == leaf
+                    ]
+
+                    if len(candidates) == 1:
+                        correct = candidates[0]
+                        # Replace the import in the source code
+                        old_import = f"from {mod}"
+                        new_import = f"from {correct}"
+                        if old_import in new_code:
+                            new_code = new_code.replace(old_import, new_import)
+                            log(f"Orchestrator: auto-fixed import {mod} → {correct} in {fp}")
+
+            if new_code != code:
+                current_files[fp] = new_code
+                self._workspace.write_file(path=fp, content=new_code)
+                fixed_any = True
+
+        return fixed_any
 
     # ── Config file cleanup ────────────────────────────────────────────────────
 
