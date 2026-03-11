@@ -24,6 +24,14 @@ from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.environment.types import ExecutionCallSpec
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.utils.json import clean_llm_json
+from bizniz.tools.discovery_tools import (
+    tool_view_file,
+    tool_list_directory,
+    tool_search_files,
+    build_filtered_file_tree,
+    TREE_EXCLUDE_DIRS,
+    TREE_MAX_FILES,
+)
 
 from bizniz.agentic_debugger.types import (
     AgenticDiagnosis,
@@ -321,70 +329,13 @@ class AgenticDebugger:
     # ── Tool implementations ──────────────────────────────────────────────────
 
     def _tool_view_file(self, path: str) -> str:
-        """Read a file from the workspace."""
-        try:
-            if not path:
-                return "ERROR: No path provided."
-            content = self._workspace.read_file(path=path)
-            if content is None:
-                return f"ERROR: File '{path}' not found or empty."
-            # Truncate very large files
-            lines = content.split("\n")
-            if len(lines) > 500:
-                return "\n".join(lines[:500]) + f"\n\n... (truncated, {len(lines)} total lines)"
-            return content
-        except Exception as e:
-            return f"ERROR: Could not read '{path}': {e}"
+        return tool_view_file(self._workspace, path)
 
     def _tool_list_directory(self, path: str) -> str:
-        """List files in a directory or the full workspace tree."""
-        try:
-            if not path or path == ".":
-                # Return full tree
-                tree = self._workspace.tree()
-                if tree:
-                    if isinstance(tree, list):
-                        return "\n".join(str(f) for f in sorted(tree))
-                    return str(tree)
-                # Fallback to file listing
-                files = self._workspace.list_relative_files()
-                return "\n".join(str(f) for f in sorted(files))
-
-            # List files under a specific path
-            all_files = self._workspace.list_relative_files()
-            prefix = path.rstrip("/") + "/"
-            matching = [str(f) for f in all_files if str(f).startswith(prefix) or str(f) == path]
-            if matching:
-                return "\n".join(sorted(matching))
-            return f"No files found under '{path}'."
-        except Exception as e:
-            return f"ERROR: Could not list directory '{path}': {e}"
+        return tool_list_directory(self._workspace, path)
 
     def _tool_search_files(self, pattern: str) -> str:
-        """Search for a regex pattern across all workspace files."""
-        try:
-            if not pattern:
-                return "ERROR: No search pattern provided."
-            workspace_root = str(self._workspace.root)
-            result = subprocess.run(
-                ["grep", "-rn", "--include=*.py", "-E", pattern, "."],
-                cwd=workspace_root,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            output = result.stdout.strip()
-            if not output:
-                return f"No matches found for pattern '{pattern}'."
-            # Truncate if too many results
-            lines = output.split("\n")
-            if len(lines) > 100:
-                return "\n".join(lines[:100]) + f"\n\n... ({len(lines)} total matches, showing first 100)"
-            return output
-        except subprocess.TimeoutExpired:
-            return "ERROR: Search timed out after 30 seconds."
-        except Exception as e:
-            return f"ERROR: Search failed: {e}"
+        return tool_search_files(self._workspace, pattern)
 
     def _tool_run_command(self, command: str) -> str:
         """Execute a shell command in the workspace directory."""
@@ -458,97 +409,51 @@ class AgenticDebugger:
         architecture_context: str,
         repair_history: List[str],
     ) -> str:
-        """Build the initial context message for the debugger."""
+        """Build the initial context message for the debugger.
+
+        Sends only file paths, a filtered file tree, and error output.
+        The debugger is expected to use view_file / search_files to inspect
+        file contents on demand.
+        """
         parts = []
 
-        # File tree
+        # Filtered file tree — exclude noisy directories, capped
         parts.append("## Workspace File Tree")
-        try:
-            tree = self._workspace.tree()
-            if tree:
-                if isinstance(tree, list):
-                    parts.append("\n".join(str(f) for f in sorted(tree)))
-                else:
-                    parts.append(str(tree))
-            else:
-                files = self._workspace.list_relative_files()
-                parts.append("\n".join(str(f) for f in sorted(files)))
-        except Exception:
-            parts.append("(could not list workspace)")
+        parts.append(build_filtered_file_tree(self._workspace))
 
-        # Architecture context
-        if architecture_context:
-            parts.append("\n## Architecture Context")
-            parts.append(architecture_context)
+        # Architecture context — do NOT include the blob; point to tools instead
+        parts.append("\n## Architecture Context")
+        parts.append(
+            "Architecture plan is available via: view_file('.bizniz/architecture.md') "
+            "if it exists, or use search_files to find architectural patterns."
+        )
 
-        # Only include files mentioned in the error output to stay within context limits.
-        # The debugger can use view_file to inspect other files if needed.
-        mentioned_source = {}
-        mentioned_test = {}
-        for filepath, content in source_files.items():
-            basename = filepath.rsplit("/", 1)[-1] if "/" in filepath else filepath
-            module = basename.replace(".py", "").replace(".ts", "").replace(".tsx", "")
-            if filepath in error_output or basename in error_output or module in error_output:
-                mentioned_source[filepath] = content
-        for filepath, content in test_files.items():
-            basename = filepath.rsplit("/", 1)[-1] if "/" in filepath else filepath
-            if filepath in error_output or basename in error_output:
-                mentioned_test[filepath] = content
-
-        # If no files matched, include the first test file and its likely source
-        if not mentioned_test and test_files:
-            first_test = next(iter(test_files))
-            mentioned_test[first_test] = test_files[first_test]
-        if not mentioned_source and source_files:
-            # Include up to 3 source files to give context
-            for fp, content in list(source_files.items())[:3]:
-                mentioned_source[fp] = content
-
-        # Truncate file content to prevent context overflow
-        max_lines_per_file = 200
-
-        # Source files
+        # Source file paths only (no content)
         parts.append("\n## Source Files Under Test")
-        if mentioned_source:
-            for filepath, content in mentioned_source.items():
-                parts.append(f"\n--- {filepath} ---")
-                lines = content.splitlines()
-                if len(lines) > max_lines_per_file:
-                    parts.append("\n".join(lines[:max_lines_per_file]))
-                    parts.append(f"\n... ({len(lines) - max_lines_per_file} more lines, use view_file to see full content)")
-                else:
-                    parts.append(content)
-            # List other source files available for inspection
-            other_source = [fp for fp in source_files if fp not in mentioned_source]
-            if other_source:
-                parts.append(f"\nOther source files (use view_file to inspect): {', '.join(other_source)}")
+        if source_files:
+            source_paths = list(source_files.keys())
+            parts.append(f"Source files (use view_file to inspect): {', '.join(source_paths)}")
         else:
             parts.append("(none provided)")
 
-        # Test files
+        # Test file paths only (no content)
         parts.append("\n## Test Files")
-        for filepath, content in mentioned_test.items():
-            parts.append(f"\n--- {filepath} ---")
-            lines = content.splitlines()
-            if len(lines) > max_lines_per_file:
-                parts.append("\n".join(lines[:max_lines_per_file]))
-                parts.append(f"\n... ({len(lines) - max_lines_per_file} more lines, use view_file to see full content)")
-            else:
-                parts.append(content)
-        other_test = [fp for fp in test_files if fp not in mentioned_test]
-        if other_test:
-            parts.append(f"\nOther test files (use view_file to inspect): {', '.join(other_test)}")
+        if test_files:
+            test_paths = list(test_files.keys())
+            parts.append(f"Test files (use view_file to inspect): {', '.join(test_paths)}")
+        else:
+            parts.append("(none provided)")
 
-        # Error output (truncate if very large)
+        # Error output — truncate to 4000 chars (first 2000 + last 2000)
         parts.append("\n## Error Output")
-        if len(error_output) > 8000:
-            parts.append(error_output[:4000])
-            parts.append(f"\n... ({len(error_output) - 8000} chars truncated) ...")
-            parts.append(error_output[-4000:])
+        if len(error_output) > 4000:
+            parts.append(error_output[:2000])
+            parts.append(f"\n... ({len(error_output) - 4000} chars truncated) ...")
+            parts.append(error_output[-2000:])
         else:
             parts.append(error_output)
 
-        # Repair history
+        # Repair history (kept as-is — it's small)
         if repair_history:
             parts.append("\n## Previous Repair Attempts")
             for i, entry in enumerate(repair_history, 1):
@@ -556,8 +461,8 @@ class AgenticDebugger:
 
         parts.append(
             "\n## Instructions\n"
-            "Diagnose this test failure. Use view_file to inspect any files referenced "
-            "in imports or errors. Use list_directory to explore the project structure. "
+            "Diagnose this test failure. Use view_file to read the source and test files "
+            "listed above. Use search_files and list_directory to explore the project structure. "
             "When you understand the root cause, use submit_fix with your diagnosis "
             "and optionally include direct code_fixes."
         )

@@ -17,6 +17,43 @@ def make_response(response_json):
     return text, "mock_job_id", [{"role": "assistant", "content": text}]
 
 
+# Tool-action envelope: the tool loop expects these fields
+MULTI_GENERATE_RESPONSE = {
+    "thinking": "Generating code for the issue",
+    "action": "submit_code",
+    "path": "",
+    "changes": [
+        {
+            "filepath": "pkg/models.py",
+            "code": "class Expense:\n    pass\n",
+            "action": "create",
+        },
+        {
+            "filepath": "pkg/__init__.py",
+            "code": "from .models import Expense\n",
+            "action": "modify",
+        },
+    ],
+    "dependencies": [],
+}
+
+MULTI_REPAIR_RESPONSE = {
+    "thinking": "Fixing the import error",
+    "action": "submit_code",
+    "path": "",
+    "analysis": "Missing import in __init__.py",
+    "fix_plan": "Add the import statement",
+    "changes": [
+        {
+            "filepath": "pkg/__init__.py",
+            "code": "from .models import Expense\nfrom .cli import main\n",
+            "action": "modify",
+        },
+    ],
+    "dependencies": [],
+}
+
+
 @pytest.fixture
 def mock_client():
     return MagicMock(spec=BaseAIClient)
@@ -44,34 +81,6 @@ def autocoder(mock_client, mock_environment, mock_workspace):
         workspace=mock_workspace,
         max_retries=3,
     )
-
-
-MULTI_GENERATE_RESPONSE = {
-    "changes": [
-        {
-            "filepath": "pkg/models.py",
-            "code": "class Expense:\n    pass\n",
-            "action": "create",
-        },
-        {
-            "filepath": "pkg/__init__.py",
-            "code": "from .models import Expense\n",
-            "action": "modify",
-        },
-    ]
-}
-
-MULTI_REPAIR_RESPONSE = {
-    "analysis": "Missing import in __init__.py",
-    "fix_plan": "Add the import statement",
-    "changes": [
-        {
-            "filepath": "pkg/__init__.py",
-            "code": "from .models import Expense\nfrom .cli import main\n",
-            "action": "modify",
-        },
-    ]
-}
 
 
 class TestGenerateMulti:
@@ -112,33 +121,30 @@ class TestGenerateMulti:
         assert calls[1][1]["path"] == "pkg/__init__.py"
         assert "from .models import Expense" in calls[1][1]["content"]
 
-    def test_passes_architecture_context(self, autocoder, mock_client):
-        mock_client.get_text.return_value = make_response(MULTI_GENERATE_RESPONSE)
+    def test_uses_tool_loop_with_discovery(self, autocoder, mock_client, mock_workspace):
+        """Verify the tool loop processes discovery tool calls before terminal action."""
+        # First call: LLM asks to list directory
+        list_response = {
+            "thinking": "Let me see the workspace",
+            "action": "list_directory",
+            "path": ".",
+            "changes": [],
+            "dependencies": [],
+        }
+        # Second call: LLM submits code
+        mock_client.get_text.side_effect = [
+            make_response(list_response),
+            make_response(MULTI_GENERATE_RESPONSE),
+        ]
+        mock_workspace.list_relative_files.return_value = ["pkg/models.py"]
 
-        autocoder.generate_multi(
+        result = autocoder.generate_multi(
             issue_description="Create models",
             target_files=[{"filepath": "pkg/models.py", "action": "create"}],
-            architecture_context="Package: expense_tracker\nNamespace: expense_tracker.models",
         )
 
-        # Verify the prompt sent to AI includes the architecture context
-        sent_messages = mock_client.get_text.call_args[1].get("messages") or mock_client.get_text.call_args[0][0]
-        # The architecture context should appear in the user message that was added to history
-        user_messages = [m for m in sent_messages if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"]
-        assert any("expense_tracker" in (m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) for m in user_messages)
-
-    def test_passes_existing_code(self, autocoder, mock_client):
-        mock_client.get_text.return_value = make_response(MULTI_GENERATE_RESPONSE)
-
-        autocoder.generate_multi(
-            issue_description="Add CLI",
-            target_files=[{"filepath": "pkg/cli.py", "action": "create"}],
-            existing_code={"pkg/models.py": "class Expense:\n    pass\n"},
-        )
-
-        sent_messages = mock_client.get_text.call_args[1].get("messages") or mock_client.get_text.call_args[0][0]
-        user_messages = [m for m in sent_messages if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"]
-        assert any("class Expense" in (m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) for m in user_messages)
+        assert len(result.changes) == 2
+        assert mock_client.get_text.call_count == 2
 
     def test_raises_on_empty_response(self, autocoder, mock_client):
         mock_client.get_text.return_value = ("", "jid", [{"role": "assistant", "content": ""}])
@@ -150,7 +156,14 @@ class TestGenerateMulti:
             )
 
     def test_raises_on_empty_changes(self, autocoder, mock_client):
-        mock_client.get_text.return_value = make_response({"changes": []})
+        empty_response = {
+            "thinking": "Nothing to do",
+            "action": "submit_code",
+            "path": "",
+            "changes": [],
+            "dependencies": [],
+        }
+        mock_client.get_text.return_value = make_response(empty_response)
 
         with pytest.raises(AutocoderBadAIResponseError):
             autocoder.generate_multi(

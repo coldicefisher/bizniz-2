@@ -180,6 +180,9 @@ class AutoArchitect(BaseAIAgent):
             description=f"Initial decomposition: {len(architecture.services)} services",
         )
 
+        # Save human-readable architecture docs
+        _save_architecture_docs(project.root, architecture)
+
         # Step 3: Create service workspaces and Docker configs
         # Source code goes in project_root/<service>/
         # Docker configs go in dockerfiles/development/<service>/
@@ -246,19 +249,24 @@ class AutoArchitect(BaseAIAgent):
                 project.db.log_build_event(service.name, "image_build", False, str(e))
                 log(f"AutoArchitect: image build failed for '{service.name}': {e}")
 
-        # Step 6: Dispatch engineers for application services
+        # Step 6: Dispatch engineers for application services (in dependency order)
         app_services = [s for s in architecture.services if s.name in service_workspaces]
+        service_layers = _sort_services_by_dependency(app_services)
+        log(f"AutoArchitect: {len(app_services)} services in {len(service_layers)} dependency layer(s)")
 
-        if parallel and len(app_services) > 1:
-            log(f"AutoArchitect: dispatching {len(app_services)} services in parallel (max_workers={max_workers})...")
-            service_results = self._dispatch_engineers_parallel(
-                app_services, service_workspaces, problem_statement, architecture, project, max_workers, layered,
-            )
-        else:
-            log("AutoArchitect: dispatching engineers for application services...")
-            service_results = self._dispatch_engineers_sequential(
-                app_services, service_workspaces, problem_statement, architecture, project, layered,
-            )
+        service_results = []
+        for layer_idx, layer in enumerate(service_layers):
+            layer_names = [s.name for s in layer]
+            log(f"AutoArchitect: dispatching layer {layer_idx + 1} ({', '.join(layer_names)})...")
+            if parallel and len(layer) > 1:
+                layer_results = self._dispatch_engineers_parallel(
+                    layer, service_workspaces, problem_statement, architecture, project, max_workers, layered,
+                )
+            else:
+                layer_results = self._dispatch_engineers_sequential(
+                    layer, service_workspaces, problem_statement, architecture, project, layered,
+                )
+            service_results.extend(layer_results)
 
         compose_path = str(project.dev_root / "docker-compose.yml")
         return ArchitectResult(
@@ -717,3 +725,77 @@ class AutoArchitect(BaseAIAgent):
                 ])
 
         return "\n".join(lines) + "\n"
+
+
+def _sort_services_by_dependency(services):
+    """
+    Sort services into dependency layers using topological sort.
+
+    Services with no dependencies (or only infrastructure dependencies) go first.
+    Services that depend on other app services go in later layers.
+    Services within the same layer can be dispatched in parallel.
+
+    Returns a list of layers, where each layer is a list of ServiceDefinition.
+    """
+    app_names = {s.name for s in services}
+    service_map = {s.name: s for s in services}
+
+    # Build adjacency: only track deps on other app services
+    deps = {}
+    for s in services:
+        deps[s.name] = [d for d in s.depends_on if d in app_names]
+
+    layers = []
+    resolved = set()
+
+    while len(resolved) < len(services):
+        # Find services whose deps are all resolved
+        layer = [
+            name for name in deps
+            if name not in resolved and all(d in resolved for d in deps[name])
+        ]
+        if not layer:
+            # Circular dependency — dump remaining services into one layer
+            layer = [name for name in deps if name not in resolved]
+        layers.append([service_map[name] for name in layer])
+        resolved.update(layer)
+
+    return layers
+
+
+def _save_architecture_docs(project_root: Path, architecture: SystemArchitecture):
+    """Save a human-readable architecture overview to docs/architecture.md."""
+    docs_dir = project_root / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    lines = [
+        f"# {architecture.project_name} — Architecture",
+        "",
+        architecture.description,
+        "",
+        f"## Services ({len(architecture.services)})",
+        "",
+    ]
+
+    for svc in architecture.services:
+        lines.append(f"### {svc.name}")
+        lines.append(f"- **Type:** {svc.service_type}")
+        lines.append(f"- **Framework:** {svc.framework}")
+        lines.append(f"- **Language:** {svc.language}")
+        if svc.port:
+            lines.append(f"- **Port:** {svc.port}")
+        if svc.depends_on:
+            lines.append(f"- **Depends on:** {', '.join(svc.depends_on)}")
+        lines.append(f"- **Description:** {svc.description}")
+        if svc.requirements:
+            lines.append(f"- **Packages:** {', '.join(svc.requirements)}")
+        lines.append("")
+
+    lines.append("## Docker Compose")
+    lines.append("")
+    lines.append("```yaml")
+    lines.append(architecture.docker_compose)
+    lines.append("```")
+    lines.append("")
+
+    (docs_dir / "architecture.md").write_text("\n".join(lines), encoding="utf-8")

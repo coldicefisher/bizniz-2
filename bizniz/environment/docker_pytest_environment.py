@@ -26,9 +26,7 @@ The workspace root is bind-mounted at ``/workspace`` inside the container and
 ``PYTHONPATH=/workspace`` is set so plain ``import module_name`` works.
 """
 
-import os
 import subprocess
-import time
 import traceback
 import uuid
 from pathlib import Path
@@ -84,23 +82,7 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
                 capture_output=True, text=True,
             )
             if check.returncode == 0 and "true" in check.stdout.strip().lower():
-                # Verify bind mount is still valid (host dir may have been recreated)
-                # Create a probe file on host, check if container can see it
-                probe = self._workspace_root / ".bizniz_mount_probe"
-                try:
-                    probe.write_text("ok")
-                    mount_check = subprocess.run(
-                        ["docker", "exec", self._container_id,
-                         "cat", "/workspace/.bizniz_mount_probe"],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    probe.unlink(missing_ok=True)
-                    if mount_check.returncode == 0 and "ok" in mount_check.stdout:
-                        return
-                except Exception:
-                    probe.unlink(missing_ok=True)
-                # Mount is stale — restart container
-                self.stop()
+                return
             else:
                 self._container_id = None
 
@@ -110,7 +92,6 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
         cmd = [
             "docker", "run", "-d",
             "--name", self._container_name,
-            "-v", f"{self._workspace_root}:/workspace",
             "-w", "/workspace",
             "-e", "PYTHONPATH=/workspace",
         ]
@@ -127,15 +108,61 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
             )
         self._container_id = proc.stdout.strip()
 
+        # Create /workspace dir and sync files into container
+        subprocess.run(
+            ["docker", "exec", self._container_id, "mkdir", "-p", "/workspace"],
+            capture_output=True, timeout=10,
+        )
+        self._sync_workspace()
+
+    def _sync_workspace(self):
+        """Copy workspace files into the container via docker cp."""
+        if self._container_id is None:
+            return
+        # docker cp requires trailing /. to copy contents (not the dir itself)
+        src = f"{self._workspace_root}/."
+        proc = subprocess.run(
+            ["docker", "cp", src, f"{self._container_id}:/workspace/"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Failed to sync workspace to container: {proc.stderr.strip()}"
+            )
+
     def stop(self):
         """Stop and remove the persistent container."""
         if self._container_id is not None:
-            self._fix_permissions()
+            self._sync_workspace_from_container()
             subprocess.run(
                 ["docker", "rm", "-f", self._container_id],
                 capture_output=True, timeout=10,
             )
             self._container_id = None
+
+    def _sync_workspace_from_container(self):
+        """Copy workspace files back from container to host (e.g. generated files).
+
+        Excludes .bizniz/ directory since the workspace DB is managed by the
+        host process, not the container.
+        """
+        if self._container_id is None:
+            return
+        try:
+            # Use tar to exclude .bizniz/ dir when copying back
+            proc = subprocess.run(
+                ["docker", "exec", self._container_id,
+                 "tar", "-cf", "-", "--exclude=.bizniz", "-C", "/workspace", "."],
+                capture_output=True, timeout=60,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                import tarfile
+                import io
+                tar = tarfile.open(fileobj=io.BytesIO(proc.stdout))
+                tar.extractall(path=str(self._workspace_root))
+                tar.close()
+        except Exception:
+            pass
 
     def __del__(self):
         try:
@@ -178,6 +205,19 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
                     stage="container_start",
                     type=type(e).__name__,
                     message=str(e),
+                ),
+            )
+
+        # Sync latest workspace files into container before running tests
+        try:
+            self._sync_workspace()
+        except Exception as e:
+            return ExecutionEnvironmentResult(
+                success=False,
+                error=ExecutionEnvironmentErrorDetails(
+                    stage="workspace_sync",
+                    type=type(e).__name__,
+                    message=f"Failed to sync workspace: {e}",
                 ),
             )
 
@@ -342,22 +382,6 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
             return True
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return False
-
-    # ── Permissions ────────────────────────────────────────────────────────────
-
-    def _fix_permissions(self):
-        """Fix file ownership after Docker runs (containers run as root)."""
-        if self._container_id is None:
-            return
-        try:
-            subprocess.run(
-                ["docker", "exec", self._container_id,
-                 "chown", "-R", f"{os.getuid()}:{os.getgid()}", "/workspace/.bizniz"],
-                capture_output=True,
-                timeout=10,
-            )
-        except Exception:
-            pass
 
     # ── Describe ───────────────────────────────────────────────────────────────
 

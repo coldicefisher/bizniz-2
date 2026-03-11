@@ -17,14 +17,16 @@ WORKSPACE FILES:
 ──────────────────────────────────────────────────────────────
 {workspace_files}
 
-{related_file_contents}
+RELATED FILES (paths only):
+──────────────────────────────────────────────────────────────
+{related_files_listing}
 
 Analyze the error, identify the root cause, and produce your diagnosis.
+Related files are listed below. The diagnosis should focus on the code and test files provided.
 
 Pay special attention to:
 - Import errors (wrong module name, missing symbol, circular imports)
 - Interface mismatches (tests expect a different function/class signature than the code provides)
-- Missing dependencies on other workspace modules — check the RELATED FILE CONTENTS above
 - Dependency chains: if module A imports module B which imports module C, a bug in C can surface in A
 - Package structure: check that __init__.py files export the right symbols
 - Logic errors in the implementation vs what the tests expect
@@ -36,7 +38,7 @@ When identifying relevant_files, include:
 - __init__.py files that re-export symbols used by the code
 - Any file mentioned in the traceback
 
-The FULL untruncated error output is provided above. Use every detail in the traceback.
+Use every detail in the traceback.
 
 Return ONLY valid JSON matching the schema. No markdown, no code fences.
 """

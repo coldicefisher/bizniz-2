@@ -101,8 +101,14 @@ class Autodebugger(BaseAIAgent):
         log("Autodebugger: scanning workspace for related files...")
         self.emit(AutodebuggerOnEventCallback(stage="scan", status="start"))
 
+        # Filter out noisy directories from workspace listing
+        _EXCLUDED_DIRS = {"node_modules", "__pycache__", ".git", ".bizniz", "dist", "build", ".next"}
         workspace_files = self._workspace.list_relative_files()
-        workspace_listing = "\n".join(str(f) for f in workspace_files)
+        filtered_files = [
+            str(f) for f in workspace_files
+            if not any(part in _EXCLUDED_DIRS for part in str(f).split("/"))
+        ]
+        workspace_listing = "\n".join(filtered_files[:30])
 
         # Find files referenced in error output or imports
         related = self._find_related_files(
@@ -114,28 +120,28 @@ class Autodebugger(BaseAIAgent):
             workspace_files=[str(f) for f in workspace_files],
         )
 
-        related_contents = self._read_related_files(related)
         self.emit(AutodebuggerOnEventCallback(stage="scan", status="success"))
 
-        # Step 2: Build the related file contents section
-        related_section = ""
-        if related_contents:
-            parts = ["RELATED FILE CONTENTS:", "─" * 62]
-            for fname, content in related_contents.items():
-                parts.append(f"\n── {fname} ──")
-                parts.append(content)
-            related_section = "\n".join(parts)
+        # Step 2: Build the related files listing (paths only, no contents)
+        related_listing = ""
+        if related:
+            related_listing = "\n".join(related)
 
-        # Step 3: Ask the AI for a diagnosis
-        log(f"Autodebugger: diagnosing failure ({len(related_contents)} related files found)...")
+        # Step 3: Truncate error output to cap token usage
+        truncated_error = error_output
+        if len(error_output) > 3000:
+            truncated_error = error_output[:1500] + "\n\n... [truncated] ...\n\n" + error_output[-1500:]
+
+        # Step 4: Ask the AI for a diagnosis
+        log(f"Autodebugger: diagnosing failure ({len(related)} related files found)...")
         user_prompt = DIAGNOSE_PROMPT_TEMPLATE.format(
-            error_output=error_output,
+            error_output=truncated_error,
             code=code,
             code_filename=code_filename,
             test_code=test_code,
             test_filename=test_filename,
             workspace_files=workspace_listing,
-            related_file_contents=related_section,
+            related_files_listing=related_listing,
         )
 
         diagnosis = self._get_diagnosis(user_prompt)

@@ -28,15 +28,39 @@ TESTS_MODELS = "import pytest\ndef test_expense():\n    from pkg.models import E
 TESTS_CLI = "import pytest\ndef test_main():\n    from pkg.cli import main\n    assert main() is None\n"
 
 
+def _autocoder_generate_side_effect(**kwargs):
+    """Return per-file results based on which target file is requested."""
+    target_files = kwargs.get("target_files", [])
+    changes = []
+    for tf in target_files:
+        fp = tf["filepath"]
+        if fp == "pkg/models.py":
+            changes.append(FileChange(filepath=fp, code=CODE_MODELS, action="create"))
+        elif fp == "pkg/cli.py":
+            changes.append(FileChange(filepath=fp, code=CODE_CLI, action="create"))
+        else:
+            changes.append(FileChange(filepath=fp, code="# generated\n", action="create"))
+    return AutocoderProcessResult(changes=changes)
+
+
+def _autotester_generate_side_effect(**kwargs):
+    """Return per-file results based on which test file is requested."""
+    test_files = kwargs.get("test_files", [])
+    result_files = []
+    for tf in test_files:
+        if tf == "tests/test_models.py":
+            result_files.append(GeneratedTestFile(filepath=tf, tests=TESTS_MODELS))
+        elif tf == "tests/test_cli.py":
+            result_files.append(GeneratedTestFile(filepath=tf, tests=TESTS_CLI))
+        else:
+            result_files.append(GeneratedTestFile(filepath=tf, tests="def test_placeholder(): pass\n"))
+    return AutotesterResult(test_files=result_files, mode="from_prompt", success=True)
+
+
 @pytest.fixture
 def mock_autocoder():
     ac = MagicMock(spec=Autocoder)
-    ac.generate_multi.return_value = AutocoderProcessResult(
-        changes=[
-            FileChange(filepath="pkg/models.py", code=CODE_MODELS, action="create"),
-            FileChange(filepath="pkg/cli.py", code=CODE_CLI, action="create"),
-        ]
-    )
+    ac.generate_multi.side_effect = _autocoder_generate_side_effect
     ac.repair_multi.return_value = AutocoderProcessResult(
         changes=[
             FileChange(filepath="pkg/models.py", code=CODE_MODELS + "# fixed\n", action="modify"),
@@ -48,14 +72,7 @@ def mock_autocoder():
 @pytest.fixture
 def mock_autotester():
     at = MagicMock(spec=Autotester)
-    at.generate_multi.return_value = AutotesterResult(
-        test_files=[
-            GeneratedTestFile(filepath="tests/test_models.py", tests=TESTS_MODELS),
-            GeneratedTestFile(filepath="tests/test_cli.py", tests=TESTS_CLI),
-        ],
-        mode="from_prompt",
-        success=True,
-    )
+    at.generate_multi.side_effect = _autotester_generate_side_effect
     return at
 
 
@@ -107,10 +124,10 @@ class TestRunMultiSuccess:
 
         assert result.success is True
         assert result.iterations == 1
-        assert len(result.changes) == 2
+        assert len(result.changes) >= 2  # May include auto-stubbed __init__.py
         assert len(result.test_files) == 2
 
-    def test_calls_generate_multi(self, orchestrator, mock_autocoder):
+    def test_calls_generate_multi_per_file(self, orchestrator, mock_autocoder):
         orchestrator.run_multi(
             prompt="Build expense tracker",
             target_files=TARGET_FILES,
@@ -118,24 +135,29 @@ class TestRunMultiSuccess:
             architecture_context="Package: pkg",
         )
 
-        mock_autocoder.generate_multi.assert_called_once()
-        call_kwargs = mock_autocoder.generate_multi.call_args[1]
-        # In TDD mode, prompt includes test context
-        assert "Build expense tracker" in call_kwargs["issue_description"]
-        assert call_kwargs["architecture_context"] == "Package: pkg"
+        # Per-file generation: 2 target files = 2 code gen calls
+        assert mock_autocoder.generate_multi.call_count == 2
+        # Each call should have one target file and include the prompt
+        for c in mock_autocoder.generate_multi.call_args_list:
+            kwargs = c[1]
+            assert len(kwargs["target_files"]) == 1
+            assert "Build expense tracker" in kwargs["issue_description"]
+            assert kwargs["architecture_context"] == "Package: pkg"
 
-    def test_calls_generate_multi_tests(self, orchestrator, mock_autotester):
+    def test_calls_generate_multi_tests_per_file(self, orchestrator, mock_autotester):
         orchestrator.run_multi(
             prompt="Build expense tracker",
             target_files=TARGET_FILES,
             test_files=TEST_FILES,
         )
 
-        mock_autotester.generate_multi.assert_called_once()
-        call_kwargs = mock_autotester.generate_multi.call_args[1]
-        assert call_kwargs["test_files"] == TEST_FILES
-        # In TDD mode, tests are generated without source code
-        assert call_kwargs["source_code"] is None
+        # Per-file generation: 2 test files = 2 test gen calls
+        assert mock_autotester.generate_multi.call_count == 2
+        for c in mock_autotester.generate_multi.call_args_list:
+            kwargs = c[1]
+            assert len(kwargs["test_files"]) == 1
+            # In TDD mode, tests are generated without source code
+            assert kwargs["source_code"] is None
 
     def test_loads_existing_code_for_modify_actions(self, orchestrator, mock_workspace, mock_autocoder):
         mock_workspace.exists.side_effect = lambda path: path == "pkg/models.py"
@@ -152,8 +174,11 @@ class TestRunMultiSuccess:
             test_files=TEST_FILES,
         )
 
-        call_kwargs = mock_autocoder.generate_multi.call_args[1]
-        assert call_kwargs["existing_code"] == {"pkg/models.py": "# existing code"}
+        # The models.py call should include existing_code for that file
+        models_call = [c for c in mock_autocoder.generate_multi.call_args_list
+                       if c[1]["target_files"][0]["filepath"] == "pkg/models.py"][0]
+        assert "pkg/models.py" in models_call[1]["existing_code"]
+        assert models_call[1]["existing_code"]["pkg/models.py"] == "# existing code"
 
 
 class TestRunMultiRepair:
@@ -252,8 +277,8 @@ class TestRunMultiCollectionError:
         )
 
         assert result.success is True
-        # generate_multi called twice: initial + regeneration
-        assert mock_autotester.generate_multi.call_count == 2
+        # generate_multi called: 2 initial per-file + at least 1 regeneration
+        assert mock_autotester.generate_multi.call_count >= 3
 
 
 class TestDriftDetection:
@@ -282,13 +307,15 @@ class TestDriftDetection:
         assert drift == []
 
     def test_drift_flag_set_in_result(self, orchestrator, mock_autocoder):
-        # Autocoder creates an unplanned file
-        mock_autocoder.generate_multi.return_value = AutocoderProcessResult(
-            changes=[
-                FileChange(filepath="pkg/models.py", code=CODE_MODELS, action="create"),
-                FileChange(filepath="pkg/utils.py", code="# unplanned", action="create"),
-            ]
-        )
+        # Autocoder creates an unplanned file alongside the planned one
+        def drift_side_effect(**kwargs):
+            return AutocoderProcessResult(
+                changes=[
+                    FileChange(filepath="pkg/models.py", code=CODE_MODELS, action="create"),
+                    FileChange(filepath="pkg/utils.py", code="# unplanned", action="create"),
+                ]
+            )
+        mock_autocoder.generate_multi.side_effect = drift_side_effect
 
         result = orchestrator.run_multi(
             prompt="Build tracker",

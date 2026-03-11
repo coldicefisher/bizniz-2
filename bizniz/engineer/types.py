@@ -106,6 +106,7 @@ class EngineeringIssue(BaseModel):
     depends_on_issues: List[int] = []
     depends_on_titles: List[str] = []
     suggested_model: Optional[str] = None
+    test_setup_hint: Optional[str] = None
 
 
 class DependencyLayer(BaseModel):

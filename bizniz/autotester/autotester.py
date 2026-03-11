@@ -28,6 +28,8 @@ from bizniz.autotester.prompts.generate_multi_prompt import (
     get_generate_multi_user_prompt,
 )
 from bizniz.autotester.prompts.schema import AutotesterSchema
+from bizniz.autotester.prompts.tool_action_schema import AutotesterGenerateActionSchema
+from bizniz.tools.tool_loop import run_tool_loop, ToolLoopError
 
 
 class Autotester(BaseAIAgent):
@@ -264,18 +266,10 @@ class Autotester(BaseAIAgent):
         on_status_message: Optional[Callable[[str], None]] = None,
     ) -> AutotesterResult:
         """
-        Generate test suites across multiple test files for a multi-file project.
+        Generate test suites using agentic tool loop.
 
-        Parameters
-        ----------
-        problem_statement:
-            The issue/task description.
-        test_files:
-            List of test file paths to generate (e.g. ["tests/test_models.py", "tests/test_cli.py"]).
-        source_code:
-            Dict mapping filepath → source code content for the modules under test.
-        architecture_context:
-            Formatted string describing the architecture plan.
+        The LLM discovers source code via tools instead of receiving
+        everything inline, keeping prompts small and token-efficient.
         """
         self._update_callbacks(on_event, on_status_message)
 
@@ -285,45 +279,66 @@ class Autotester(BaseAIAgent):
 
         source_code = source_code or {}
 
-        # Build source code section
-        source_parts = []
-        for fp, content in source_code.items():
-            source_parts.append(f"── {fp} ──\n{content}")
-        source_str = "\n\n".join(source_parts) if source_parts else "(no source code provided)"
-
         # Build test files description
         test_desc = "\n".join(f"- {tf}" for tf in test_files)
+
+        # Inline small source files directly; list large ones for tool discovery
+        source_parts = []
+        for fp, content in source_code.items():
+            if content and len(content) < 4000:
+                source_parts.append(f"── {fp} ──\n{content}")
+            else:
+                source_parts.append(f"- {fp} (use view_file to read)")
+        source_files = "\n\n".join(source_parts) if source_parts else "(use list_directory to find source files)"
 
         # Detect language from test file extensions
         has_ts = any(tf.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx")) for tf in test_files)
         lang = "typescript" if has_ts else "python"
 
-        # Build project root description with file tree
-        project_root_parts = []
-        if hasattr(self._workspace, 'root'):
-            project_root_parts.append(f"Workspace path: {self._workspace.root}")
-        # List all files in workspace so the LLM knows the directory structure
-        try:
-            all_files = sorted(str(f) for f in self._workspace.list_relative_files())
-            if all_files:
-                project_root_parts.append("Files in workspace:\n" + "\n".join(f"  {f}" for f in all_files))
-        except Exception:
-            pass
-        # Also include source file paths if provided
-        if source_code:
-            project_root_parts.append("Source files provided:\n" + "\n".join(f"  {fp}" for fp in source_code.keys()))
-        project_root = "\n".join(project_root_parts) if project_root_parts else "(unknown)"
+        system_prompt = get_generate_multi_system_prompt(lang)
 
         user_prompt = get_generate_multi_user_prompt(lang).format(
             problem_statement=problem_statement,
-            architecture_context=architecture_context or "(none)",
-            source_code=source_str,
             test_files_description=test_desc,
-            project_root=project_root,
+            source_files=source_files,
         )
 
         log(f"Requesting multi-file test generation ({len(test_files)} test files)...")
-        result_files, dependencies = self._generate_multi_tests(user_prompt)
+
+        try:
+            action = run_tool_loop(
+                client=self._client,
+                workspace=self._workspace,
+                system_prompt=system_prompt,
+                initial_user_message=user_prompt,
+                action_schema=AutotesterGenerateActionSchema,
+                terminal_action="submit_tests",
+                max_turns=10,
+                timeout_seconds=300,
+                on_status_message=self._on_status_message,
+                agent_name="Autotester",
+            )
+        except ToolLoopError as e:
+            raise AutotesterBadAIResponseError(f"Tool loop failed: {e}")
+
+        # Parse test files from the terminal action
+        test_files_raw = action.get("test_files", [])
+        result_files = []
+        for tf_raw in test_files_raw:
+            tests_raw = tf_raw.get("tests", "")
+            if "\n" not in tests_raw and "\\n" in tests_raw:
+                tests_raw = tests_raw.replace("\\n", "\n")
+            tests = self._strip_code_block(tests_raw)
+            if tests and tests.strip():
+                result_files.append(GeneratedTestFile(
+                    filepath=tf_raw["filepath"],
+                    tests=tests,
+                ))
+
+        if not result_files:
+            raise AutotesterBadAIResponseError("Tool loop returned no test files")
+
+        dependencies = action.get("dependencies", [])
 
         # Save all test files
         for tf in result_files:

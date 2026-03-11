@@ -32,6 +32,26 @@ def _completed(returncode=0, stdout="", stderr=""):
     )
 
 
+def _container_start_side_effects(container_id="container123"):
+    """Side effects for _ensure_container: docker run, mkdir, docker cp."""
+    return [
+        _completed(returncode=0, stdout=container_id),  # docker run -d
+        _completed(),  # docker exec mkdir -p /workspace
+        _completed(),  # docker cp (initial sync)
+    ]
+
+
+def _execute_side_effects(container_id="container123", test_result=None):
+    """Side effects for a full execute() call (first call, container not started)."""
+    if test_result is None:
+        test_result = _completed(stdout="Tests: 2 passed")
+    return [
+        *_container_start_side_effects(container_id),
+        _completed(),  # docker cp (pre-test sync)
+        test_result,   # docker exec jest
+    ]
+
+
 # ── execute() ─────────────────────────────────────────────────────────────────
 
 
@@ -39,11 +59,8 @@ class TestExecuteCommand:
     """execute() constructs the correct docker exec command."""
 
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
-    def test_correct_docker_command_with_mount(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),  # docker run -d
-            _completed(stdout="Tests: 2 passed"),  # docker exec jest
-        ]
+    def test_correct_docker_command_with_docker_cp(self, mock_run, tmp_path):
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path)
 
         test_file = tmp_path / "tests" / "App.test.tsx"
@@ -53,15 +70,18 @@ class TestExecuteCommand:
         spec = ExecutionCallSpec(symbol="jest", args=[str(test_file)])
         env.execute(code="", call_spec=spec)
 
-        # First call starts container with volume mount
+        # First call starts container (no -v bind mount)
         start_cmd = mock_run.call_args_list[0][0][0]
-        assert "-v" in start_cmd
-        vol_idx = start_cmd.index("-v")
-        assert start_cmd[vol_idx + 1] == f"{tmp_path}:/workspace"
+        assert "-v" not in start_cmd
         assert "myservice:latest" in start_cmd
 
-        # Second call runs jest via exec
-        exec_cmd = mock_run.call_args_list[1][0][0]
+        # docker cp used for sync
+        cp_cmd = mock_run.call_args_list[2][0][0]
+        assert "docker" in cp_cmd
+        assert "cp" in cp_cmd
+
+        # Last call runs jest via exec
+        exec_cmd = mock_run.call_args_list[-1][0][0]
         assert "exec" in exec_cmd
         assert "npx" in exec_cmd
         assert "jest" in exec_cmd
@@ -69,10 +89,10 @@ class TestExecuteCommand:
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_container_reused_on_second_call(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),  # docker run -d
-            _completed(stdout="pass 1"),  # docker exec jest (1st)
+            *_execute_side_effects(),
             _completed(returncode=0, stdout="true"),  # docker inspect
-            _completed(stdout="pass 2"),  # docker exec jest (2nd)
+            _completed(),                              # docker cp (pre-test sync)
+            _completed(stdout="pass 2"),               # docker exec jest (2nd)
         ]
         env = _make_env(tmp_path)
         spec = ExecutionCallSpec(symbol="jest", args=["test_a.test.ts"])
@@ -86,10 +106,7 @@ class TestExecuteCommand:
 
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_network_enabled_by_default(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path)
         spec = ExecutionCallSpec(symbol="jest", args=["test_a.test.ts"])
         env.execute(code="", call_spec=spec)
@@ -99,10 +116,7 @@ class TestExecuteCommand:
 
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_network_disabled(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path, network_enabled=False)
         spec = ExecutionCallSpec(symbol="jest", args=["test_a.test.ts"])
         env.execute(code="", call_spec=spec)
@@ -118,31 +132,25 @@ class TestExecutePathConversion:
 
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_absolute_path_converted(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path)
 
         abs_path = str(tmp_path / "tests" / "App.test.tsx")
         spec = ExecutionCallSpec(symbol="jest", args=[abs_path])
         env.execute(code="", call_spec=spec)
 
-        exec_cmd = mock_run.call_args_list[1][0][0]
+        exec_cmd = mock_run.call_args_list[-1][0][0]
         assert "/workspace/tests/App.test.tsx" in exec_cmd
 
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_relative_path_used_as_is(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path)
 
         spec = ExecutionCallSpec(symbol="jest", args=["tests/App.test.tsx"])
         env.execute(code="", call_spec=spec)
 
-        exec_cmd = mock_run.call_args_list[1][0][0]
+        exec_cmd = mock_run.call_args_list[-1][0][0]
         found = [c for c in exec_cmd if "App.test.tsx" in c]
         assert len(found) == 1
 
@@ -152,10 +160,9 @@ class TestExecuteResults:
 
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_success_on_zero_exit(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(returncode=0, stdout="Tests: 2 passed", stderr=""),
-        ]
+        mock_run.side_effect = _execute_side_effects(
+            test_result=_completed(returncode=0, stdout="Tests: 2 passed", stderr=""),
+        )
         env = _make_env(tmp_path)
         spec = ExecutionCallSpec(symbol="jest", args=["test_a.test.ts"])
 
@@ -167,10 +174,9 @@ class TestExecuteResults:
 
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_failure_on_nonzero_exit(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(returncode=1, stdout="", stderr="FAIL tests/App.test.tsx"),
-        ]
+        mock_run.side_effect = _execute_side_effects(
+            test_result=_completed(returncode=1, stdout="", stderr="FAIL tests/App.test.tsx"),
+        )
         env = _make_env(tmp_path)
         spec = ExecutionCallSpec(symbol="jest", args=["test_a.test.ts"])
 
@@ -184,10 +190,9 @@ class TestExecuteResults:
 
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_stderr_included_in_failure_traceback(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(returncode=1, stdout="", stderr="FAIL src/App.test.tsx\n  TypeError: x is not a function"),
-        ]
+        mock_run.side_effect = _execute_side_effects(
+            test_result=_completed(returncode=1, stdout="", stderr="FAIL src/App.test.tsx\n  TypeError: x is not a function"),
+        )
         env = _make_env(tmp_path)
         spec = ExecutionCallSpec(symbol="jest", args=["test_a.test.ts"])
 
@@ -198,7 +203,8 @@ class TestExecuteResults:
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_timeout_handling(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
+            *_container_start_side_effects(),
+            _completed(),  # docker cp (pre-test sync)
             subprocess.TimeoutExpired(cmd="docker", timeout=10, output="partial", stderr="err"),
         ]
         env = _make_env(tmp_path, timeout=10)
@@ -233,10 +239,7 @@ class TestExecuteResults:
 
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_dict_call_spec_converted(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path)
 
         result = env.execute(
@@ -248,16 +251,13 @@ class TestExecuteResults:
 
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_extra_jest_args_appended(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path, extra_jest_args=["--coverage", "--silent"])
 
         spec = ExecutionCallSpec(symbol="jest", args=["test_a.test.ts"])
         env.execute(code="", call_spec=spec)
 
-        exec_cmd = mock_run.call_args_list[1][0][0]
+        exec_cmd = mock_run.call_args_list[-1][0][0]
         assert "--coverage" in exec_cmd
         assert "--silent" in exec_cmd
 
@@ -270,23 +270,24 @@ class TestInstallPackages:
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_install_runs_npm_in_container(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),  # start
+            *_container_start_side_effects(),
             _completed(returncode=0, stdout="added 1 package"),  # docker exec npm
             _completed(returncode=0),  # docker commit
         ]
         env = _make_env(tmp_path)
         env.install_packages(["@testing-library/react"])
 
-        calls = mock_run.call_args_list
-        # npm install
-        npm_cmd = calls[1][0][0]
+        # Find npm install call
+        npm_cmds = [c[0][0] for c in mock_run.call_args_list if "npm" in c[0][0]]
+        assert len(npm_cmds) == 1
+        npm_cmd = npm_cmds[0]
         assert "exec" in npm_cmd
-        assert "npm" in npm_cmd
         assert "install" in npm_cmd
         assert "@testing-library/react" in npm_cmd
+
         # docker commit
-        commit_cmd = calls[2][0][0]
-        assert "commit" in commit_cmd
+        commit_cmds = [c[0][0] for c in mock_run.call_args_list if "commit" in c[0][0]]
+        assert len(commit_cmds) == 1
 
         assert env.image == "myservice:latest"
 
@@ -302,7 +303,7 @@ class TestInstallPackages:
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_npm_failure_does_not_update_packages(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),  # start
+            *_container_start_side_effects(),
             _completed(returncode=1, stderr="ERR! 404 Not Found"),  # npm fail
         ]
         env = _make_env(tmp_path)
@@ -320,8 +321,8 @@ class TestStop:
     @patch("bizniz.environment.docker_jest_environment.subprocess.run")
     def test_stop_removes_container(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),  # start
-            _completed(),  # exec (fix permissions)
+            *_container_start_side_effects(),
+            _completed(),  # docker cp (sync back from container)
             _completed(),  # docker rm -f
         ]
         env = _make_env(tmp_path)

@@ -99,12 +99,14 @@ class WorkspaceScope:
         test_files: List[str],
         depends_on: Optional[List[int]] = None,
         suggested_model: Optional[str] = None,
+        test_setup_hint: str = "",
     ) -> int:
         cur = self._execute(
             """INSERT INTO issues
                (project_id, service_name, problem_id, title, description,
-                target_files_json, test_files_json, depends_on_json, suggested_model, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                target_files_json, test_files_json, depends_on_json, suggested_model,
+                test_setup_hint, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 self._project_id, self._service_name,
                 problem_id, title, description,
@@ -112,6 +114,7 @@ class WorkspaceScope:
                 json.dumps(test_files),
                 json.dumps(depends_on or []),
                 suggested_model,
+                test_setup_hint,
                 _now(),
             ),
         )
@@ -137,6 +140,13 @@ class WorkspaceScope:
                 (self._project_id, self._service_name),
             )
         return cur.fetchall()
+
+    def update_issue_depends_on(self, issue_id: int, depends_on: List[int]):
+        self._execute(
+            "UPDATE issues SET depends_on_json = ? WHERE id = ? AND project_id = ? AND service_name = ?",
+            (json.dumps(depends_on), issue_id, self._project_id, self._service_name),
+        )
+        self._commit()
 
     def update_issue_status(self, issue_id: int, status: str):
         self._execute(

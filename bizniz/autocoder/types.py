@@ -25,6 +25,7 @@ class FileChange(BaseModel):
 class AutocoderProcessResult(BaseModel):
     changes: List[FileChange] = []
     dependencies: List[str] = []
+    test_scaffold: str = ""
     output: Optional[Any] = None
 
 

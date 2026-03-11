@@ -17,7 +17,11 @@ def make_response(response_json):
     return text, "mock_job_id", [{"role": "assistant", "content": text}]
 
 
+# Tool-action envelope: the tool loop expects these fields
 MULTI_TEST_RESPONSE = {
+    "thinking": "Generating tests for the issue",
+    "action": "submit_tests",
+    "path": "",
     "test_files": [
         {
             "filepath": "tests/test_models.py",
@@ -29,6 +33,7 @@ MULTI_TEST_RESPONSE = {
         },
     ],
     "notes": "Tests for models and CLI modules.",
+    "dependencies": [],
 }
 
 
@@ -85,8 +90,6 @@ class TestGenerateMulti:
         )
 
         assert mock_workspace.write_file.call_count == 2
-        filepaths = [c.kwargs.get("path") or c.args[0] for c in mock_workspace.write_file.call_args_list]
-        # write_file is called with keyword args
         written_paths = [c[1].get("path") if len(c) > 1 else c[0][0] for c in [
             (mock_workspace.write_file.call_args_list[i].args, mock_workspace.write_file.call_args_list[i].kwargs)
             for i in range(2)
@@ -94,27 +97,29 @@ class TestGenerateMulti:
         assert "tests/test_models.py" in written_paths
         assert "tests/test_cli.py" in written_paths
 
-    def test_passes_source_code_to_prompt(self, autotester, mock_client):
-        autotester.generate_multi(
+    def test_uses_tool_loop_with_discovery(self, autotester, mock_client, mock_workspace):
+        """Verify the tool loop processes discovery tool calls before terminal action."""
+        list_response = {
+            "thinking": "Let me see the workspace",
+            "action": "list_directory",
+            "path": ".",
+            "test_files": [],
+            "notes": "",
+            "dependencies": [],
+        }
+        mock_client.get_text.side_effect = [
+            make_response(list_response),
+            make_response(MULTI_TEST_RESPONSE),
+        ]
+        mock_workspace.list_relative_files.return_value = ["pkg/models.py"]
+
+        result = autotester.generate_multi(
             problem_statement="Build tracker",
             test_files=["tests/test_models.py"],
-            source_code={"pkg/models.py": "class Expense:\n    pass\n"},
         )
 
-        sent_messages = mock_client.get_text.call_args[1].get("messages") or mock_client.get_text.call_args[0][0]
-        user_messages = [m for m in sent_messages if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"]
-        assert any("class Expense" in (m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) for m in user_messages)
-
-    def test_passes_architecture_context(self, autotester, mock_client):
-        autotester.generate_multi(
-            problem_statement="Build tracker",
-            test_files=["tests/test_models.py"],
-            architecture_context="Package: expense_tracker",
-        )
-
-        sent_messages = mock_client.get_text.call_args[1].get("messages") or mock_client.get_text.call_args[0][0]
-        user_messages = [m for m in sent_messages if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"]
-        assert any("expense_tracker" in (m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) for m in user_messages)
+        assert len(result.test_files) >= 1
+        assert mock_client.get_text.call_count == 2
 
     def test_raises_on_empty_response(self, autotester, mock_client):
         mock_client.get_text.return_value = ("", "jid", [{"role": "assistant", "content": ""}])
@@ -126,7 +131,15 @@ class TestGenerateMulti:
             )
 
     def test_raises_on_empty_test_files(self, autotester, mock_client):
-        mock_client.get_text.return_value = make_response({"test_files": [], "notes": ""})
+        empty_response = {
+            "thinking": "Nothing to test",
+            "action": "submit_tests",
+            "path": "",
+            "test_files": [],
+            "notes": "",
+            "dependencies": [],
+        }
+        mock_client.get_text.return_value = make_response(empty_response)
 
         with pytest.raises(AutotesterBadAIResponseError):
             autotester.generate_multi(

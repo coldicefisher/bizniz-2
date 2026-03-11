@@ -13,8 +13,16 @@ from bizniz.autocoder.prompts.generate_multi_prompt import (
     GENERATE_MULTI_USER_PROMPT_TEMPLATE,
     get_generate_multi_system_prompt,
 )
-from bizniz.autocoder.prompts.repair_multi_prompt import REPAIR_MULTI_PROMPT_TEMPLATE
+from bizniz.autocoder.prompts.repair_multi_prompt import (
+    REPAIR_MULTI_PROMPT_TEMPLATE,
+    REPAIR_MULTI_SYSTEM_PROMPT,
+)
 from bizniz.autocoder.prompts.prompt_schemas import GeneratePromptSchema, RepairPromptSchema
+from bizniz.autocoder.prompts.tool_action_schema import (
+    AutocoderGenerateActionSchema,
+    AutocoderRepairActionSchema,
+)
+from bizniz.tools.tool_loop import run_tool_loop, ToolLoopError
 from bizniz.autocoder.types import (
     AutocoderProcessError,
     AutocoderBadAIResponseError,
@@ -404,18 +412,10 @@ class Autocoder(BaseAIAgent):
         on_status_message: Optional[Callable[[str], None]] = None,
     ) -> AutocoderProcessResult:
         """
-        Generate code across multiple files for a single issue.
+        Generate code across multiple files using agentic tool loop.
 
-        Parameters
-        ----------
-        issue_description:
-            The issue/task description.
-        target_files:
-            List of {"filepath": "...", "action": "create"|"modify"} dicts.
-        architecture_context:
-            Formatted string describing the architecture plan.
-        existing_code:
-            Dict mapping filepath → current file content for files being modified.
+        The LLM discovers file contents via tools instead of receiving
+        everything inline, keeping prompts small and token-efficient.
         """
         if on_status_message is not None:
             self._on_status_message = on_status_message
@@ -424,42 +424,51 @@ class Autocoder(BaseAIAgent):
             if self._on_status_message:
                 self._on_status_message(msg)
 
-        existing_code = existing_code or {}
-
         # Build target files description
         target_desc = "\n".join(
             f"- {tf['filepath']} ({tf.get('action', 'create')})"
             for tf in target_files
         )
 
-        # Build existing code section
-        existing_parts = []
-        for fp, content in existing_code.items():
-            existing_parts.append(f"── {fp} ──\n{content}")
-        existing_str = "\n\n".join(existing_parts) if existing_parts else "(no existing code)"
-
-        # Build project root description with file tree
-        project_root_parts = []
-        if hasattr(self._workspace, 'root'):
-            project_root_parts.append(f"Workspace path: {self._workspace.root}")
-        try:
-            all_files = sorted(str(f) for f in self._workspace.list_relative_files())
-            if all_files:
-                project_root_parts.append("Files in workspace:\n" + "\n".join(f"  {f}" for f in all_files))
-        except Exception:
-            pass
-        project_root = "\n".join(project_root_parts) if project_root_parts else "(unknown)"
-
         user_prompt = GENERATE_MULTI_USER_PROMPT_TEMPLATE.format(
             issue_description=issue_description,
-            architecture_context=architecture_context or "(none)",
             target_files_description=target_desc,
-            existing_code=existing_str,
-            project_root=project_root,
+        )
+
+        # Detect language from target files
+        has_ts = any(
+            tf["filepath"].endswith((".ts", ".tsx"))
+            for tf in target_files
+        )
+        lang = "typescript" if has_ts else "python"
+
+        system_prompt = get_generate_multi_system_prompt(lang).format(
+            evaluation_environment=self._environment.describe(),
         )
 
         log(f"Requesting multi-file code generation ({len(target_files)} files)...")
-        changes, dependencies = self._generate_multi_code(user_prompt)
+
+        try:
+            action = run_tool_loop(
+                client=self._client,
+                workspace=self._workspace,
+                system_prompt=system_prompt,
+                initial_user_message=user_prompt,
+                action_schema=AutocoderGenerateActionSchema,
+                terminal_action="submit_code",
+                max_turns=6,
+                timeout_seconds=300,
+                on_status_message=self._on_status_message,
+                agent_name="Autocoder",
+            )
+        except ToolLoopError as e:
+            raise AutocoderBadAIResponseError(f"Tool loop failed: {e}")
+
+        changes = self._parse_changes(action)
+        if not changes:
+            raise AutocoderBadAIResponseError("Tool loop returned no file changes")
+        dependencies = action.get("dependencies", [])
+        test_scaffold = action.get("test_scaffold", "")
 
         # Save all files to workspace
         for change in changes:
@@ -469,7 +478,9 @@ class Autocoder(BaseAIAgent):
         if dependencies:
             log(f"Autocoder: LLM declared dependencies: {', '.join(dependencies)}")
 
-        return AutocoderProcessResult(changes=changes, dependencies=dependencies)
+        return AutocoderProcessResult(
+            changes=changes, dependencies=dependencies, test_scaffold=test_scaffold,
+        )
 
     def repair_multi(
         self,
@@ -479,16 +490,10 @@ class Autocoder(BaseAIAgent):
         on_status_message: Optional[Callable[[str], None]] = None,
     ) -> AutocoderProcessResult:
         """
-        Repair code across multiple files given an error.
+        Repair code across multiple files using agentic tool loop.
 
-        Parameters
-        ----------
-        current_files:
-            Dict mapping filepath → current file content.
-        error_message:
-            The error output from pytest or execution.
-        architecture_context:
-            Formatted string describing the architecture plan.
+        The LLM discovers file contents via tools instead of receiving
+        everything inline, keeping prompts small and token-efficient.
         """
         if on_status_message is not None:
             self._on_status_message = on_status_message
@@ -497,30 +502,34 @@ class Autocoder(BaseAIAgent):
             if self._on_status_message:
                 self._on_status_message(msg)
 
-        # Build current files section
-        files_parts = []
-        for fp, content in current_files.items():
-            files_parts.append(f"── {fp} ──\n{content}")
-        files_str = "\n\n".join(files_parts)
-
-        # Build workspace files listing
-        workspace_files = "(unknown)"
-        try:
-            all_files = sorted(str(f) for f in self._workspace.list_relative_files())
-            if all_files:
-                workspace_files = "\n".join(f"  {f}" for f in all_files)
-        except Exception:
-            pass
+        # List failing file paths (LLM reads them via tools)
+        failing_files = "\n".join(f"- {fp}" for fp in current_files.keys())
 
         repair_prompt = REPAIR_MULTI_PROMPT_TEMPLATE.format(
-            architecture_context=architecture_context or "(none)",
             error_message=error_message,
-            current_files=files_str,
-            workspace_files=workspace_files,
+            failing_files=failing_files,
         )
 
         log("Requesting multi-file repair...")
-        changes, dependencies = self._repair_multi_code(repair_prompt)
+
+        try:
+            action = run_tool_loop(
+                client=self._client,
+                workspace=self._workspace,
+                system_prompt=REPAIR_MULTI_SYSTEM_PROMPT,
+                initial_user_message=repair_prompt,
+                action_schema=AutocoderRepairActionSchema,
+                terminal_action="submit_code",
+                max_turns=6,
+                timeout_seconds=300,
+                on_status_message=self._on_status_message,
+                agent_name="Autocoder",
+            )
+        except ToolLoopError as e:
+            raise AutocoderBadAIResponseError(f"Tool loop failed: {e}")
+
+        changes = self._parse_changes(action)
+        dependencies = action.get("dependencies", [])
 
         # Save all changed files to workspace
         for change in changes:

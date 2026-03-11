@@ -21,15 +21,33 @@ Produce a JSON response with:
     - "suggested_model": the AI model to start with for this issue based on complexity.
       AVAILABLE MODELS (ordered cheapest to most capable): {available_models}
       Choose the cheapest model that can reliably solve the task. Use cheaper models for simple tasks (data classes, enums, basic CRUD). Use more capable models for complex tasks (multi-module, complex algorithms). Only pick from the list above.
+    - "test_setup_hint": how to set up tests for this issue. CRITICAL for endpoint/route issues.
 
-RULES FOR ISSUES:
+RULES FOR ISSUES — SINGLE RESPONSIBILITY IS MANDATORY:
+- Each issue MUST have exactly ONE focused responsibility.
+- Each issue should touch 1-2 target files max (plus __init__.py if needed).
+- Each issue MUST have its OWN dedicated test file — do NOT share test files between issues.
+  Example: "Implement ServicesRepository" → tests/test_services_repository.py
+           "Implement AppointmentsRepository" → tests/test_appointments_repository.py
+  NEVER assign the same test file to multiple issues.
+- If a task has multiple concerns, split it: "Create app factory and DI providers" → 2 issues.
 - All file paths must be inside the package namespace or tests/ directory.
 - Domain model issues come FIRST — they define shared types other issues depend on.
 - An issue can create multiple files (e.g. a domain model file + its __init__.py update).
 - test_files paths should start with "tests/".
 - Order issues by dependency graph — if issue B depends on issue A, A comes first.
 - depends_on references issues by their title string.
-- Prefer cohesive issues: group related functionality together.
+- Do NOT group related functionality — each class/module gets its own issue.
+
+TEST SETUP HINTS — REQUIRED for endpoint/route/integration issues:
+- For each issue, provide a "test_setup_hint" explaining how tests should be set up.
+- For endpoint/route issues: explain how the app is constructed, how to import it for
+  testing, and how to create a test client. Example:
+    "The FastAPI app is created via create_app() in pet_groomer/app.py. Tests should:
+     from pet_groomer.app import create_app; from fastapi.testclient import TestClient;
+     client = TestClient(create_app())"
+- For issues that integrate with other components: explain import paths and required mocks.
+- For standalone units (data classes, pure functions): use empty string "".
 """
 
 _ANALYZE_PROMPT_TYPESCRIPT = """
@@ -56,15 +74,31 @@ Produce a JSON response with:
     - "suggested_model": the AI model to start with for this issue based on complexity.
       AVAILABLE MODELS (ordered cheapest to most capable): {available_models}
       Choose the cheapest model that can reliably solve the task. Use cheaper models for simple tasks (interfaces, enums, basic CRUD). Use more capable models for complex tasks (multi-module, complex algorithms). Only pick from the list above.
+    - "test_setup_hint": how to set up tests for this issue. CRITICAL for endpoint/route issues.
 
-RULES FOR ISSUES:
+RULES FOR ISSUES — SINGLE RESPONSIBILITY IS MANDATORY:
+- Each issue MUST have exactly ONE focused responsibility.
+- Each issue should touch 1-2 target files max.
+- Each issue MUST have its OWN dedicated test file — do NOT share test files between issues.
+  NEVER assign the same test file to multiple issues.
+- If a task has multiple concerns, split it into separate issues.
 - All file paths must use .ts or .tsx extensions.
 - Test files must end in .test.ts or .test.tsx (Jest convention).
 - Domain model issues come FIRST — they define shared types other issues depend on.
 - An issue can create multiple files (e.g. a component file + its test file).
 - Order issues by dependency graph — if issue B depends on issue A, A comes first.
 - depends_on references issues by their title string.
-- Prefer cohesive issues: group related functionality together.
+- Do NOT group related functionality — each class/module gets its own issue.
+
+TEST SETUP HINTS — REQUIRED for endpoint/route/integration issues:
+- For each issue, provide a "test_setup_hint" explaining how tests should be set up.
+- For endpoint/route issues: explain how the app is constructed, how to import it for
+  testing, and how to create a test client. Example for Express:
+    "The Express app is exported from src/app.ts. Tests should:
+     import app from '../app'; import request from 'supertest';
+     const response = await request(app).get('/api/services')"
+- For issues that integrate with other components: explain import paths and required mocks.
+- For standalone units (interfaces, pure functions): use empty string "".
 """
 
 

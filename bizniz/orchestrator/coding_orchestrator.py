@@ -49,6 +49,7 @@ from bizniz.clients.errors import AIInsufficientFunds
 from bizniz.autocoder.types import FileChange
 from bizniz.autotester.types import GeneratedTestFile
 from bizniz.orchestrator.strategy import CodingStrategy
+from bizniz.preflight.registry import get_validator
 from bizniz.orchestrator.types import (
     OrchestratorResult,
     OrchestratorStalledError,
@@ -105,8 +106,8 @@ class CodingOrchestrator:
         autocoder_progression: Optional[ModelProgression] = None,
         autotester_progression: Optional[ModelProgression] = None,
         repair_progression: Optional[ModelProgression] = None,
-        stall_threshold: int = 3,
-        agentic_debug_threshold: int = 5,
+        stall_threshold: int = 2,
+        agentic_debug_threshold: int = 2,
         max_iterations: int = 20,
         on_status_message: Optional[Callable[[str], None]] = None,
         language: str = "python",
@@ -481,6 +482,12 @@ class CodingOrchestrator:
                 + "\n\n".join(ctx_parts) + "\n"
             )
 
+        # ── Auto-build workspace manifest ────────────────────────────────────
+        # Lightweight summary of existing files so LLM doesn't waste turns exploring
+        manifest = self._build_workspace_manifest()
+        if manifest:
+            extra_context += f"\n\nWORKSPACE MANIFEST (existing files and their exports):\n{manifest}\n"
+
         if strategy == CodingStrategy.TDD:
             current_files, current_test_files = self._generate_tdd(
                 prompt, target_files, test_files, architecture_context,
@@ -491,6 +498,12 @@ class CodingOrchestrator:
                 prompt, target_files, test_files, architecture_context,
                 existing_code, extra_context, log,
             )
+
+        # ── Pre-flight validation ─────────────────────────────────────────────
+        # Check import resolution and auto-stub missing modules before tests
+        current_files = self._run_preflight(
+            current_files, self._get_installed_packages(), log,
+        )
 
         # ── Proactive package installation ───────────────────────────────────
         self._proactive_package_install(current_files, current_test_files, log)
@@ -697,7 +710,12 @@ class CodingOrchestrator:
                         try:
                             repaired = self._autocoder.repair_multi(
                                 current_files=all_files,
-                                error_message=f"Test collection failed with ImportError. Fix the source code imports.\n\n{error_detail}",
+                                error_message=(
+                                    f"Test collection failed with ImportError. "
+                                    f"IMPORTANT: Trace the FULL import chain — the error may be in a transitive dependency, "
+                                    f"not the file directly mentioned. Read each imported module to find the broken link.\n\n"
+                                    f"FULL ERROR:\n{error_detail}"
+                                ),
                                 architecture_context=architecture_context,
                             )
                             if repaired.dependencies:
@@ -729,7 +747,7 @@ class CodingOrchestrator:
                     # collection errors, use debugger to diagnose the structural issue
                     # and regenerate code from scratch
                     has_debugger = self._debugger_factory is not None
-                    if not escalated and total_collection_errors >= 6 and has_debugger:
+                    if not escalated and total_collection_errors >= 3 and has_debugger:
                         try:
                             log("Orchestrator: persistent collection errors — running diagnosis...")
                             self._autocoder.clear_message_history()
@@ -746,7 +764,6 @@ class CodingOrchestrator:
                                     error_output=error_detail,
                                     source_files=current_files,
                                     test_files=current_test_files,
-                                    architecture_context=architecture_context,
                                 )
                                 log(f"Orchestrator: agentic diagnosis — {ad.root_cause_category}, "
                                     f"fix_target={ad.fix_target}")
@@ -764,7 +781,6 @@ class CodingOrchestrator:
                                     else:
                                         current_files[fix.filepath] = fix.new_content
                                         self._workspace.write_file(path=fix.filepath, content=fix.new_content)
-                                total_collection_errors = 0
                                 stale_count = 0
                                 previous_code_hash = None
                                 continue
@@ -793,7 +809,6 @@ class CodingOrchestrator:
                                 architecture_context=architecture_context,
                             )
                             current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
-                            total_collection_errors = 0  # reset after full regeneration
                             stale_count = 0
                             previous_code_hash = None
                             continue
@@ -860,44 +875,59 @@ class CodingOrchestrator:
         self, prompt, target_files, test_files, architecture_context,
         existing_code, extra_context, log,
     ):
-        """TDD: generate tests first (no source code), then code to pass them."""
-        # Step 1: Generate tests from the spec only (no source code)
+        """TDD: generate tests per file (no source code), then code per file."""
+        # Step 1: Generate tests one file at a time from spec only
         log(f"Orchestrator [TDD]: generating {len(test_files)} test file(s) from spec...")
         t0 = time.time()
-        test_prompt = self._language_prefix + prompt + extra_context
-        test_result = self._autotester.generate_multi(
-            problem_statement=test_prompt,
-            test_files=test_files,
-            source_code=None,  # TDD: no source code, tests define the contract
-            architecture_context=architecture_context,
-        )
-        current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+        test_examples = self._get_passing_test_examples()
+        test_prompt = self._language_prefix + prompt + extra_context + test_examples
+        current_test_files = {}
+        all_deps = []
+        for test_fp in test_files:
+            test_result = self._autotester.generate_multi(
+                problem_statement=test_prompt,
+                test_files=[test_fp],
+                source_code=None,  # TDD: no source code, tests define the contract
+            )
+            for tf in test_result.test_files:
+                current_test_files[tf.filepath] = tf.tests
+            all_deps.extend(test_result.dependencies)
         log(f"Orchestrator [TDD]: test generation done in {time.time() - t0:.1f}s")
 
-        # Step 2: Generate code to pass the tests
+        # Step 2: Generate code one file at a time to pass the tests
         log(f"Orchestrator [TDD]: generating code for {len(target_files)} file(s) to pass tests...")
-        test_context = "\n\n".join(
-            f"── {fp} ──\n```{self._code_fence_lang}\n{tests}\n```"
-            for fp, tests in current_test_files.items()
-        )
-        code_prompt = (
-            f"{self._language_prefix}{prompt}{extra_context}\n\n"
-            f"YOUR CODE MUST PASS THESE TESTS:\n{test_context}"
-        )
         t0 = time.time()
-        code_result = self._autocoder.generate_multi(
-            issue_description=code_prompt,
-            target_files=target_files,
-            architecture_context=architecture_context,
-            existing_code=existing_code,
-        )
-        current_files = {ch.filepath: ch.code for ch in code_result.changes}
+        current_files = {}
+        ordered_targets = _order_by_dependencies(target_files)
+        for tf in ordered_targets:
+            fp = tf["filepath"]
+            # Find the test file(s) relevant to this source file
+            related_tests = _find_tests_for_source(fp, current_test_files)
+            test_context = "\n\n".join(
+                f"── {tfp} ──\n```{self._code_fence_lang}\n{tests}\n```"
+                for tfp, tests in related_tests.items()
+            )
+            ctx_code = dict(current_files)
+            if fp in existing_code:
+                ctx_code[fp] = existing_code[fp]
+            code_prompt = (
+                f"{self._language_prefix}{prompt}{extra_context}\n\n"
+                f"YOUR CODE MUST PASS THESE TESTS:\n{test_context}"
+            )
+            code_result = self._autocoder.generate_multi(
+                issue_description=code_prompt,
+                target_files=[tf],
+                architecture_context=architecture_context,
+                existing_code=ctx_code,
+            )
+            for ch in code_result.changes:
+                current_files[ch.filepath] = ch.code
+            all_deps.extend(code_result.dependencies)
         log(f"Orchestrator [TDD]: code generation done in {time.time() - t0:.1f}s ({len(current_files)} files)")
 
         # Install LLM-declared dependencies
-        all_deps = list(set(test_result.dependencies + code_result.dependencies))
         if all_deps:
-            self._install_declared_dependencies(all_deps, log)
+            self._install_declared_dependencies(list(set(all_deps)), log)
 
         return current_files, current_test_files
 
@@ -905,35 +935,61 @@ class CodingOrchestrator:
         self, prompt, target_files, test_files, architecture_context,
         existing_code, extra_context, log,
     ):
-        """Code-first: generate code, then tests based on the code."""
-        # Step 1: Generate code
+        """Code-first: generate code per file, then tests per file."""
+        # Step 1: Generate code one file at a time in dependency order
         log(f"Orchestrator [CODE_FIRST]: generating code for {len(target_files)} file(s)...")
         t0 = time.time()
-        code_result = self._autocoder.generate_multi(
-            issue_description=self._language_prefix + prompt + extra_context,
-            target_files=target_files,
-            architecture_context=architecture_context,
-            existing_code=existing_code,
-        )
-        current_files = {ch.filepath: ch.code for ch in code_result.changes}
+        current_files = {}
+        all_deps = []
+        test_scaffold = ""
+        ordered_targets = _order_by_dependencies(target_files)
+        for tf in ordered_targets:
+            # Context: only already-generated files + existing code for this file
+            ctx_code = dict(current_files)
+            fp = tf["filepath"]
+            if fp in existing_code:
+                ctx_code[fp] = existing_code[fp]
+            code_result = self._autocoder.generate_multi(
+                issue_description=self._language_prefix + prompt + extra_context,
+                target_files=[tf],
+                architecture_context=architecture_context,
+                existing_code=ctx_code,
+            )
+            for ch in code_result.changes:
+                current_files[ch.filepath] = ch.code
+            all_deps.extend(code_result.dependencies)
+            # Capture test scaffold from autocoder (last non-empty one wins)
+            if code_result.test_scaffold:
+                test_scaffold = code_result.test_scaffold
         log(f"Orchestrator [CODE_FIRST]: code generation done in {time.time() - t0:.1f}s ({len(current_files)} files)")
 
-        # Step 2: Generate tests based on the code
+        # Step 2: Generate tests one file at a time, sending only the relevant source
         log(f"Orchestrator [CODE_FIRST]: generating {len(test_files)} test file(s)...")
         t0 = time.time()
-        test_result = self._autotester.generate_multi(
-            problem_statement=self._language_prefix + prompt + extra_context,
-            test_files=test_files,
-            source_code=current_files,
-            architecture_context=architecture_context,
-        )
-        current_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+        current_test_files = {}
+        test_examples = self._get_passing_test_examples()
+        scaffold_context = ""
+        if test_scaffold:
+            scaffold_context = (
+                f"\n\nTEST SCAFFOLD (from the code author — use this as your starting point):\n"
+                f"```{self._code_fence_lang}\n{test_scaffold}\n```\n"
+            )
+        for test_fp in test_files:
+            related_source = _find_source_for_test(test_fp, current_files)
+            test_prompt = self._language_prefix + prompt + extra_context + test_examples + scaffold_context
+            test_result = self._autotester.generate_multi(
+                problem_statement=test_prompt,
+                test_files=[test_fp],
+                source_code=related_source,
+            )
+            for tf in test_result.test_files:
+                current_test_files[tf.filepath] = tf.tests
+            all_deps.extend(test_result.dependencies)
         log(f"Orchestrator [CODE_FIRST]: test generation done in {time.time() - t0:.1f}s")
 
         # Install LLM-declared dependencies
-        all_deps = list(set(code_result.dependencies + test_result.dependencies))
         if all_deps:
-            self._install_declared_dependencies(all_deps, log)
+            self._install_declared_dependencies(list(set(all_deps)), log)
 
         return current_files, current_test_files
 
@@ -980,7 +1036,6 @@ class CodingOrchestrator:
                         error_output=failure_output,
                         source_files=current_files,
                         test_files=current_test_files,
-                        architecture_context=architecture_context,
                         repair_history=self._stall_detector.repair_history,
                     )
                     log(f"Orchestrator: agentic diagnosis — {agentic_diagnosis.root_cause_category}, "
@@ -1035,12 +1090,11 @@ class CodingOrchestrator:
             if self._stall_cycle_count == 2 and is_tdd:
                 log("Orchestrator: flipping from TDD to CODE_FIRST — tests can now be modified")
                 self._strategy = CodingStrategy.CODE_FIRST
-                # Regenerate tests based on current code (now code-first style)
+                # Regenerate tests from spec only (no source blob — architecture context is in the prompt)
                 test_result = self._autotester.generate_multi(
                     problem_statement=prompt + f"\n\nPrevious failures:\n{failure_output}",
                     test_files=test_files,
-                    source_code=current_files,
-                    architecture_context=architecture_context,
+                    source_code=None,
                 )
                 new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
                 return current_files, new_test_files, 0, None
@@ -1052,22 +1106,23 @@ class CodingOrchestrator:
                     problem_statement=prompt,
                     test_files=test_files,
                     source_code=None,
-                    architecture_context=architecture_context,
                 )
                 new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
-                # Regenerate code to pass the new tests
-                test_context = "\n\n".join(
-                    f"── {fp} ──\n```{self._code_fence_lang}\n{t}\n```" for fp, t in new_test_files.items()
-                )
-                code_result = self._autocoder.generate_multi(
-                    issue_description=(
-                        f"{prompt}\n\nYOUR CODE MUST PASS THESE TESTS:\n{test_context}"
-                    ),
-                    target_files=target_files,
-                    architecture_context=architecture_context,
-                    existing_code={},
-                )
-                new_files = {ch.filepath: ch.code for ch in code_result.changes}
+                # Regenerate code to pass the new tests — feed test files one at a time
+                # to avoid a massive token blob
+                new_files = {}
+                for fp, t in new_test_files.items():
+                    test_context = f"── {fp} ──\n```{self._code_fence_lang}\n{t}\n```"
+                    code_result = self._autocoder.generate_multi(
+                        issue_description=(
+                            f"{prompt}\n\nYOUR CODE MUST PASS THIS TEST:\n{test_context}"
+                        ),
+                        target_files=target_files,
+                        architecture_context=architecture_context,
+                        existing_code=new_files,
+                    )
+                    for ch in code_result.changes:
+                        new_files[ch.filepath] = ch.code
                 return new_files, new_test_files, 0, None
 
             # After multiple stall cycles without progress, do a full regeneration
@@ -1097,7 +1152,6 @@ class CodingOrchestrator:
                     problem_statement=prompt,
                     test_files=test_files,
                     source_code=new_files,
-                    architecture_context=architecture_context,
                 )
                 new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
                 return new_files, new_test_files, 0, None
@@ -1136,7 +1190,6 @@ class CodingOrchestrator:
                     problem_statement=enriched_prompt,
                     test_files=test_files,
                     source_code=current_files,
-                    architecture_context=architecture_context,
                 )
                 new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
 
@@ -1204,23 +1257,22 @@ class CodingOrchestrator:
                 new_files = {ch.filepath: ch.code for ch in code_result.changes}
                 return new_files, current_test_files, 0, None
             else:
-                # Code-first mode: regenerate tests
+                # Code-first mode: regenerate tests from spec (no source blob)
                 log("Orchestrator: regenerating tests after stall...")
                 test_result = self._autotester.generate_multi(
                     problem_statement=prompt + f"\n\nPrevious failures:\n{failure_output}",
                     test_files=test_files,
-                    source_code=current_files,
-                    architecture_context=architecture_context,
+                    source_code=None,
                 )
                 new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
                 return current_files, new_test_files, 0, None
 
-        # Not stalled — standard repair
-        # Only send files relevant to the failure (not ALL files)
-        relevant_files = _extract_relevant_files(
+        # Not stalled — one-shot minimal repair
+        # Send only the single failing source file + its test file
+        relevant_files = _extract_failing_pair(
             failure_output, current_files, current_test_files,
         )
-        log(f"Orchestrator: repairing {len(relevant_files)} relevant file(s) (of {len(current_files) + len(current_test_files)} total)...")
+        log(f"Orchestrator: one-shot repair with {len(relevant_files)} file(s)...")
 
         # Truncate error output to prevent massive prompts that cause JSON parse failures
         truncated_error = _truncate_error(failure_output)
@@ -1562,6 +1614,164 @@ class CodingOrchestrator:
         log(f"Orchestrator: installing {len(to_install)} LLM-declared dependency(ies): {', '.join(sorted(to_install))}")
         for pkg in to_install:
             self._install_package(pkg, log)
+
+    def _get_installed_packages(self) -> list:
+        """Read declared dependencies from requirements.txt if it exists."""
+        try:
+            req_path = self._workspace.path("requirements.txt")
+            if req_path.exists():
+                content = req_path.read_text()
+                return [
+                    line.strip() for line in content.splitlines()
+                    if line.strip() and not line.strip().startswith("#")
+                ]
+        except Exception:
+            pass
+        return []
+
+    def _build_workspace_manifest(self) -> str:
+        """
+        Build a lightweight manifest of existing workspace files.
+
+        Extracts file paths, class names, function signatures, and exports
+        so the LLM can understand the codebase without spending turns exploring.
+        Language-agnostic: reads .py, .ts, .js, .cs files.
+        """
+        import ast
+
+        manifest_lines = []
+        try:
+            rel_files = self._workspace.list_relative_files()
+        except Exception:
+            return ""
+
+        for rel_path in sorted(str(p) for p in rel_files):
+            if rel_path.startswith(".") or "__pycache__" in rel_path:
+                continue
+            if not any(rel_path.endswith(ext) for ext in (".py", ".ts", ".tsx", ".js", ".jsx", ".cs")):
+                continue
+            # Skip test files — those are separate
+            if "test" in rel_path.lower() and rel_path.startswith("tests"):
+                continue
+
+            try:
+                content = self._workspace.read_file(path=rel_path)
+            except Exception:
+                continue
+
+            if not content or not content.strip():
+                continue
+
+            signatures = self._extract_signatures(rel_path, content)
+            if signatures:
+                manifest_lines.append(f"  {rel_path}: {', '.join(signatures)}")
+            else:
+                manifest_lines.append(f"  {rel_path}")
+
+        if not manifest_lines:
+            return ""
+        return "\n".join(manifest_lines)
+
+    def _extract_signatures(self, filepath: str, content: str) -> list:
+        """Extract class/function signatures from a source file."""
+        import ast
+        signatures = []
+
+        if not filepath.endswith(".py"):
+            # For non-Python, use simple regex
+            import re
+            for match in re.finditer(r'(?:export\s+)?(?:class|interface|function|const|def)\s+(\w+)', content):
+                signatures.append(match.group(1))
+            return signatures[:10]
+
+        try:
+            tree = ast.parse(content, filename=filepath)
+        except SyntaxError:
+            return []
+
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ClassDef):
+                methods = []
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef):
+                        args = ", ".join(a.arg for a in item.args.args)
+                        methods.append(f"{item.name}({args})")
+                methods_str = f" [{', '.join(methods[:5])}]" if methods else ""
+                signatures.append(f"class {node.name}{methods_str}")
+            elif isinstance(node, ast.FunctionDef):
+                args = ", ".join(a.arg for a in node.args.args)
+                signatures.append(f"def {node.name}({args})")
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id.isupper():
+                        signatures.append(target.id)
+
+        return signatures[:10]
+
+    def _get_passing_test_examples(self, max_examples: int = 2) -> str:
+        """
+        Get content of existing passing test files as examples for the autotester.
+
+        Returns formatted string with test file contents, or empty string.
+        """
+        try:
+            rel_files = self._workspace.list_relative_files()
+        except Exception:
+            return ""
+
+        test_files = sorted(
+            str(p) for p in rel_files
+            if str(p).startswith("tests/") and str(p).endswith(".py")
+            and "test_" in str(p) and "__pycache__" not in str(p)
+        )
+
+        if not test_files:
+            return ""
+
+        examples = []
+        for tf in test_files[:max_examples]:
+            try:
+                content = self._workspace.read_file(path=tf)
+                if content and content.strip() and len(content) < 3000:
+                    examples.append(f"── {tf} ──\n{content}")
+            except Exception:
+                continue
+
+        if not examples:
+            return ""
+
+        return (
+            "\n\nEXISTING PASSING TESTS (follow these patterns):\n"
+            + "\n\n".join(examples) + "\n"
+        )
+
+    def _run_preflight(
+        self,
+        current_files: dict,
+        declared_dependencies: list,
+        log: Callable,
+    ) -> dict:
+        """
+        Run pre-flight validation on generated code.
+
+        Checks import resolution and auto-stubs missing modules.
+        Returns updated current_files dict with any stubs added.
+        """
+        validator = get_validator(self._language, self._workspace)
+        if validator is None:
+            return current_files
+
+        result = validator.validate(current_files, declared_dependencies)
+
+        # Write stubs to workspace
+        for stub in result.stubs_created:
+            self._workspace.write_file(path=stub.filepath, content=stub.content)
+            current_files[stub.filepath] = stub.content
+
+        if result.stubs_created or result.issues:
+            log(result.summary())
+
+        return current_files
 
     def _install_project_editable(self, log: Callable):
         """
@@ -1931,7 +2141,7 @@ def _extract_tests(test_files: list, filename: str) -> Optional[str]:
 
 
 def _build_failure_message_multi(eval_result, test_files: dict) -> str:
-    """Build failure message including all test file contents for multi-file mode."""
+    """Build failure message from test output. Only includes failing test files."""
     parts = []
     if eval_result.error:
         parts.append(f"Error: {eval_result.error.type}: {eval_result.error.message}")
@@ -1945,10 +2155,17 @@ def _build_failure_message_multi(eval_result, test_files: dict) -> str:
         parts.append(f"stdout:\n{eval_result.stdout}")
     if eval_result.stderr:
         parts.append(f"stderr:\n{eval_result.stderr}")
+
+    # Only include test files that are mentioned in the error output
+    # (not ALL test files — that bloats the prompt unnecessarily)
     if test_files:
-        parts.append("\n\nTEST FILES (the tests your code must pass):")
-        for fp, tests in test_files.items():
-            parts.append(f"── {fp} ──\n{tests}")
+        error_text = "\n".join(parts)
+        failing = {fp: code for fp, code in test_files.items() if fp in error_text}
+        if failing:
+            parts.append("\n\nFAILING TEST FILES:")
+            for fp, tests in failing.items():
+                parts.append(f"── {fp} ──\n{tests}")
+
     return "\n".join(parts) or "Tests failed with no additional output."
 
 
@@ -1958,6 +2175,129 @@ def _strip_source_ext(path: str) -> str:
         if path.endswith(ext):
             return path[:-len(ext)]
     return path
+
+
+def _order_by_dependencies(target_files: List[dict]) -> List[dict]:
+    """
+    Order target files so foundational files (models, types, config) come first.
+
+    Uses simple heuristics based on common naming patterns rather than
+    parsing imports, since the files haven't been generated yet.
+    """
+    def _priority(tf: dict) -> int:
+        fp = tf["filepath"].lower()
+        name = fp.rsplit("/", 1)[-1] if "/" in fp else fp
+        # Foundational files first
+        if "model" in name or "type" in name or "schema" in name:
+            return 0
+        if "config" in name or "setting" in name or "constant" in name:
+            return 1
+        if "repo" in name or "db" in name or "database" in name:
+            return 2
+        if "service" in name or "domain" in name:
+            return 3
+        if "route" in name or "endpoint" in name or "api" in name or "router" in name:
+            return 4
+        if "app" in name or "main" in name or "factory" in name:
+            return 5
+        return 3  # default: mid-priority
+
+    return sorted(target_files, key=_priority)
+
+
+def _find_source_for_test(test_filepath: str, source_files: dict) -> dict:
+    """
+    Given a test file path, find the source file(s) it likely tests.
+
+    Returns a dict of {filepath: content} with just the relevant source file(s).
+    Falls back to all source files if no match found (but this should be rare).
+    """
+    test_name = test_filepath.rsplit("/", 1)[-1] if "/" in test_filepath else test_filepath
+    # Strip test prefix/suffix: test_models.py → models, models.test.ts → models
+    base = _strip_source_ext(test_name)
+    base = re.sub(r'^test_', '', base)
+    base = re.sub(r'\.test$', '', base)
+    base = re.sub(r'\.spec$', '', base)
+    base = re.sub(r'_test$', '', base)
+
+    matched = {}
+    for fp, content in source_files.items():
+        source_name = _strip_source_ext(fp.rsplit("/", 1)[-1] if "/" in fp else fp)
+        if source_name == base or base in source_name or source_name in base:
+            matched[fp] = content
+
+    # If no match, send all (fallback for unusual naming)
+    return matched if matched else dict(source_files)
+
+
+def _find_tests_for_source(source_filepath: str, test_files: dict) -> dict:
+    """
+    Given a source file path, find the test file(s) that test it.
+
+    Returns a dict of {filepath: test_content}.
+    Falls back to all test files if no match found.
+    """
+    source_name = source_filepath.rsplit("/", 1)[-1] if "/" in source_filepath else source_filepath
+    base = _strip_source_ext(source_name)
+
+    matched = {}
+    for fp, content in test_files.items():
+        test_name = _strip_source_ext(fp.rsplit("/", 1)[-1] if "/" in fp else fp)
+        # test_models → models, models.test → models
+        clean = re.sub(r'^test_', '', test_name)
+        clean = re.sub(r'\.test$', '', clean)
+        clean = re.sub(r'\.spec$', '', clean)
+        clean = re.sub(r'_test$', '', clean)
+        if clean == base or base in clean or clean in base:
+            matched[fp] = content
+
+    return matched if matched else dict(test_files)
+
+
+def _extract_failing_pair(
+    failure_output: str,
+    current_files: dict,
+    current_test_files: dict,
+) -> dict:
+    """
+    Extract the single failing test file + the source file it tests.
+
+    Keeps the repair prompt minimal (one source + one test) so it fits
+    within tight TPM limits. Falls back to _extract_relevant_files if
+    we can't identify a single pair.
+    """
+    # Find the first test file mentioned in the error output
+    failing_test_fp = None
+    for test_fp in current_test_files:
+        if test_fp in failure_output:
+            failing_test_fp = test_fp
+            break
+        module_path = _strip_source_ext(test_fp.replace("/", "."))
+        if module_path in failure_output:
+            failing_test_fp = test_fp
+            break
+
+    if not failing_test_fp:
+        # Can't identify the failing test — fall back to relevant files
+        return _extract_relevant_files(failure_output, current_files, current_test_files)
+
+    # Find the source file that this test imports
+    result = {failing_test_fp: current_test_files[failing_test_fp]}
+    test_content = current_test_files[failing_test_fp]
+    for code_fp in current_files:
+        base_name = _strip_source_ext(code_fp.replace("/", ".")).split(".")[-1]
+        if base_name in test_content or code_fp in failure_output:
+            result[code_fp] = current_files[code_fp]
+            break  # Only one source file
+
+    # If no source file matched, include the first source file mentioned in the error
+    if len(result) == 1:
+        for code_fp in current_files:
+            if code_fp in failure_output:
+                result[code_fp] = current_files[code_fp]
+                break
+
+    return result
 
 
 def _extract_relevant_files(
@@ -2113,8 +2453,8 @@ def _filter_third_party_packages(
         }
 
 
-def _truncate_error(error_output: str, max_chars: int = 8000) -> str:
-    """Truncate error output to prevent massive prompts that cause AI JSON parse failures."""
+def _truncate_error(error_output: str, max_chars: int = 4000) -> str:
+    """Truncate error output to prevent massive prompts that blow TPM limits."""
     if len(error_output) <= max_chars:
         return error_output
     # Keep the first part (error summary) and last part (most relevant failures)

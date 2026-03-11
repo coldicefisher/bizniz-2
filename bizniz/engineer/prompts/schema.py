@@ -63,9 +63,13 @@ AutoEngineerSchema = {
                         "suggested_model": {
                             "type": "string",
                             "description": "Suggested starting AI model for this issue based on complexity. Use cheaper models (gpt-4o-mini) for simple tasks like data classes, enums, simple CRUD. Use stronger models (gpt-4o) for complex logic, multi-dependency modules, CLI parsing. Use the strongest (gpt-5) only for highly complex architectural work."
+                        },
+                        "test_setup_hint": {
+                            "type": "string",
+                            "description": "How to set up tests for this issue. For endpoints/routes: explain how the app is constructed, how to import it, and how to create a test client. For modules that integrate with other components: explain the import path and any required mocks/fixtures. Empty string for standalone units that need no special test setup."
                         }
                     },
-                    "required": ["title", "description", "target_files", "test_files", "depends_on", "suggested_model"],
+                    "required": ["title", "description", "target_files", "test_files", "depends_on", "suggested_model", "test_setup_hint"],
                     "additionalProperties": False
                 }
             }

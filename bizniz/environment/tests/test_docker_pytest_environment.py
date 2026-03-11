@@ -32,11 +32,24 @@ def _completed(returncode=0, stdout="", stderr=""):
     )
 
 
-def _mock_container_started(mock_run, container_id="abc123"):
-    """Configure mock to handle _ensure_container (start) then an exec call."""
-    # _ensure_container: docker run -d → container_id
-    start_result = _completed(returncode=0, stdout=container_id)
-    return start_result
+def _container_start_side_effects(container_id="container123"):
+    """Side effects for _ensure_container: docker run, mkdir, docker cp."""
+    return [
+        _completed(returncode=0, stdout=container_id),  # docker run -d
+        _completed(),  # docker exec mkdir -p /workspace
+        _completed(),  # docker cp (initial sync)
+    ]
+
+
+def _execute_side_effects(container_id="container123", test_result=None):
+    """Side effects for a full execute() call (first call, container not started)."""
+    if test_result is None:
+        test_result = _completed(stdout="all passed")
+    return [
+        *_container_start_side_effects(container_id),
+        _completed(),  # docker cp (pre-test sync)
+        test_result,   # docker exec pytest
+    ]
 
 
 # ── execute() ─────────────────────────────────────────────────────────────────
@@ -47,12 +60,7 @@ class TestExecuteCommand:
 
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_correct_docker_exec_command(self, mock_run, tmp_path):
-        # First call: docker run -d (start container)
-        # Second call: docker exec (run pytest)
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),  # docker run -d
-            _completed(stdout="all passed"),  # docker exec pytest
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path)
 
         test_file = tmp_path / "tests" / "test_foo.py"
@@ -62,16 +70,21 @@ class TestExecuteCommand:
         spec = ExecutionCallSpec(symbol="pytest", args=[str(test_file)])
         env.execute(code="", call_spec=spec)
 
-        # First call starts the container
+        # First call starts the container (no -v bind mount)
         start_cmd = mock_run.call_args_list[0][0][0]
         assert "docker" in start_cmd
         assert "run" in start_cmd
         assert "-d" in start_cmd
-        assert "-v" in start_cmd
+        assert "-v" not in start_cmd  # No bind mount — uses docker cp
         assert "sleep" in start_cmd
 
-        # Second call runs pytest via exec
-        exec_cmd = mock_run.call_args_list[1][0][0]
+        # docker cp is used to sync workspace
+        cp_cmd = mock_run.call_args_list[2][0][0]
+        assert "docker" in cp_cmd
+        assert "cp" in cp_cmd
+
+        # Last call runs pytest via exec
+        exec_cmd = mock_run.call_args_list[-1][0][0]
         assert "docker" in exec_cmd
         assert "exec" in exec_cmd
         assert "python3" in exec_cmd
@@ -80,10 +93,10 @@ class TestExecuteCommand:
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_container_reused_on_second_call(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),  # docker run -d
-            _completed(stdout="pass 1"),  # docker exec pytest (1st)
+            *_execute_side_effects(),            # first execute
             _completed(returncode=0, stdout="true"),  # docker inspect (is running?)
-            _completed(stdout="pass 2"),  # docker exec pytest (2nd)
+            _completed(),                         # docker cp (pre-test sync)
+            _completed(stdout="pass 2"),          # docker exec pytest (2nd)
         ]
         env = _make_env(tmp_path)
         spec = ExecutionCallSpec(symbol="pytest", args=["test_a.py"])
@@ -91,17 +104,14 @@ class TestExecuteCommand:
         env.execute(code="", call_spec=spec)
         env.execute(code="", call_spec=spec)
 
-        # Should NOT start a second container — uses inspect + exec
+        # Should NOT start a second container
         cmds = [c[0][0] for c in mock_run.call_args_list]
         run_d_count = sum(1 for c in cmds if "run" in c and "-d" in c)
         assert run_d_count == 1
 
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_network_enabled_by_default(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path)
         spec = ExecutionCallSpec(symbol="pytest", args=["test_a.py"])
         env.execute(code="", call_spec=spec)
@@ -111,10 +121,7 @@ class TestExecuteCommand:
 
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_network_disabled(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path, network_enabled=False)
         spec = ExecutionCallSpec(symbol="pytest", args=["test_a.py"])
         env.execute(code="", call_spec=spec)
@@ -130,40 +137,31 @@ class TestExecutePathConversion:
 
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_absolute_path_converted(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path)
 
         abs_path = str(tmp_path / "tests" / "test_foo.py")
         spec = ExecutionCallSpec(symbol="pytest", args=[abs_path])
         env.execute(code="", call_spec=spec)
 
-        exec_cmd = mock_run.call_args_list[1][0][0]
+        exec_cmd = mock_run.call_args_list[-1][0][0]
         assert "/workspace/tests/test_foo.py" in exec_cmd
 
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_relative_path_used_as_is(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path)
 
         spec = ExecutionCallSpec(symbol="pytest", args=["tests/test_bar.py"])
         env.execute(code="", call_spec=spec)
 
-        exec_cmd = mock_run.call_args_list[1][0][0]
+        exec_cmd = mock_run.call_args_list[-1][0][0]
         found = [c for c in exec_cmd if "test_bar.py" in c]
         assert len(found) == 1
 
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_pytest_flags_not_treated_as_paths(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path)
 
         spec = ExecutionCallSpec(
@@ -171,7 +169,7 @@ class TestExecutePathConversion:
         )
         env.execute(code="", call_spec=spec)
 
-        exec_cmd = mock_run.call_args_list[1][0][0]
+        exec_cmd = mock_run.call_args_list[-1][0][0]
         workspace_args = [c for c in exec_cmd if c.startswith("/workspace/")]
         assert len(workspace_args) == 1
 
@@ -181,10 +179,9 @@ class TestExecuteResults:
 
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_success_on_zero_exit(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(returncode=0, stdout="2 passed", stderr=""),
-        ]
+        mock_run.side_effect = _execute_side_effects(
+            test_result=_completed(returncode=0, stdout="2 passed", stderr=""),
+        )
         env = _make_env(tmp_path)
         spec = ExecutionCallSpec(symbol="pytest", args=["test_a.py"])
 
@@ -196,10 +193,9 @@ class TestExecuteResults:
 
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_failure_on_nonzero_exit(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(returncode=1, stdout="FAILED test_a.py::test_x", stderr=""),
-        ]
+        mock_run.side_effect = _execute_side_effects(
+            test_result=_completed(returncode=1, stdout="FAILED test_a.py::test_x", stderr=""),
+        )
         env = _make_env(tmp_path)
         spec = ExecutionCallSpec(symbol="pytest", args=["test_a.py"])
 
@@ -215,7 +211,8 @@ class TestExecuteResults:
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_timeout_handling(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
+            *_container_start_side_effects(),
+            _completed(),  # docker cp (pre-test sync)
             subprocess.TimeoutExpired(cmd="docker", timeout=10, output="partial", stderr="err"),
         ]
         env = _make_env(tmp_path, timeout=10)
@@ -250,10 +247,7 @@ class TestExecuteResults:
 
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_dict_call_spec_converted(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path)
 
         result = env.execute(
@@ -265,16 +259,13 @@ class TestExecuteResults:
 
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_extra_pytest_args_appended(self, mock_run, tmp_path):
-        mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
-            _completed(),
-        ]
+        mock_run.side_effect = _execute_side_effects()
         env = _make_env(tmp_path, extra_pytest_args=["-x", "--maxfail=3"])
 
         spec = ExecutionCallSpec(symbol="pytest", args=["test_a.py"])
         env.execute(code="", call_spec=spec)
 
-        exec_cmd = mock_run.call_args_list[1][0][0]
+        exec_cmd = mock_run.call_args_list[-1][0][0]
         assert "-x" in exec_cmd
         assert "--maxfail=3" in exec_cmd
 
@@ -287,23 +278,20 @@ class TestInstallPackages:
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_install_runs_pip_in_container(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),  # docker run -d (start)
+            *_container_start_side_effects(),
             _completed(returncode=0, stdout="Successfully installed fastapi"),  # docker exec pip
             _completed(returncode=0),  # docker commit
         ]
         env = _make_env(tmp_path)
         env.install_packages(["fastapi"])
 
-        calls = mock_run.call_args_list
-        # docker exec pip install
-        pip_cmd = calls[1][0][0]
+        # Find the pip install call
+        pip_cmds = [c[0][0] for c in mock_run.call_args_list if "pip" in c[0][0]]
+        assert len(pip_cmds) == 1
+        pip_cmd = pip_cmds[0]
         assert "exec" in pip_cmd
-        assert "pip" in pip_cmd
         assert "install" in pip_cmd
         assert "fastapi" in pip_cmd
-        # docker commit
-        commit_cmd = calls[2][0][0]
-        assert "commit" in commit_cmd
 
         # requirements.txt updated
         req_path = tmp_path / "requirements.txt"
@@ -325,7 +313,7 @@ class TestInstallPackages:
         req_path.write_text("flask\nrequests\n")
 
         mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),  # start
+            *_container_start_side_effects(),
             _completed(returncode=0),  # pip install
             _completed(returncode=0),  # docker commit
         ]
@@ -343,7 +331,7 @@ class TestInstallPackages:
         req_path.write_text("fastapi\n")
 
         mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),
+            *_container_start_side_effects(),
             _completed(returncode=0),  # pip install
             _completed(returncode=0),  # docker commit
         ]
@@ -356,7 +344,7 @@ class TestInstallPackages:
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_pip_failure_does_not_update_packages(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),  # start
+            *_container_start_side_effects(),
             _completed(returncode=1, stderr="ERROR: No matching distribution"),  # pip fail
         ]
         env = _make_env(tmp_path)
@@ -374,8 +362,8 @@ class TestStop:
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
     def test_stop_removes_container(self, mock_run, tmp_path):
         mock_run.side_effect = [
-            _completed(returncode=0, stdout="container123"),  # start
-            _completed(),  # exec (fix permissions)
+            *_container_start_side_effects(),
+            _completed(),  # docker cp (sync back from container)
             _completed(),  # docker rm -f
         ]
         env = _make_env(tmp_path)

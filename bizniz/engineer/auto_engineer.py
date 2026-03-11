@@ -161,6 +161,7 @@ class AutoEngineer(BaseAIAgent):
             test_files = issue.get("test_files", [])
             depends_on = issue.get("depends_on", [])
             suggested_model = issue.get("suggested_model")
+            test_setup_hint = issue.get("test_setup_hint", "")
             db_id = self._workspace.db.save_issue(
                 problem_id=problem_id,
                 title=issue["title"],
@@ -168,6 +169,7 @@ class AutoEngineer(BaseAIAgent):
                 target_files=target_files,
                 test_files=test_files,
                 suggested_model=suggested_model,
+                test_setup_hint=test_setup_hint,
             )
             analysis.issues.append(EngineeringIssue(
                 db_id=db_id,
@@ -177,6 +179,7 @@ class AutoEngineer(BaseAIAgent):
                 test_files=test_files,
                 depends_on_titles=depends_on,
                 suggested_model=suggested_model,
+                test_setup_hint=test_setup_hint,
             ))
 
         # Step 4: Create the workspace package structure
@@ -196,6 +199,10 @@ class AutoEngineer(BaseAIAgent):
             f"{len(plan.domain_models)} domain models, "
             f"{len(plan.modules)} modules)."
         )
+
+        # Save human-readable engineering docs
+        _save_engineering_docs(self._workspace.root, analysis)
+
         return analysis
 
     def dispatch(
@@ -241,6 +248,8 @@ class AutoEngineer(BaseAIAgent):
         if plan_row:
             try:
                 plan_data = json.loads(plan_row["plan_json"])
+                plan_data.pop("db_id", None)
+                plan_data.pop("problem_id", None)
                 plan = ArchitecturePlan(problem_id=row["problem_id"], **plan_data)
                 arch_context = self.format_architecture_context(plan)
             except Exception:
@@ -327,6 +336,13 @@ class AutoEngineer(BaseAIAgent):
         orchestrator = self._orchestrator_factory(suggested_model=suggested_model)
         prompt = prompt_override or row["description"]
 
+        # Append test setup hint if available — helps autotester write correct test scaffolding
+        test_setup_hint = row.get("test_setup_hint", "") if hasattr(row, "get") else ""
+        if not test_setup_hint and "test_setup_hint" in (row.keys() if hasattr(row, "keys") else []):
+            test_setup_hint = row["test_setup_hint"] or ""
+        if test_setup_hint:
+            prompt += f"\n\nTEST SETUP HINT:\n{test_setup_hint}"
+
         try:
             return orchestrator.run_multi(
                 prompt=prompt,
@@ -369,6 +385,8 @@ class AutoEngineer(BaseAIAgent):
             if plan_row:
                 try:
                     plan_data = json.loads(plan_row["plan_json"])
+                    plan_data.pop("db_id", None)
+                    plan_data.pop("problem_id", None)
                     plan = ArchitecturePlan(
                         db_id=plan_row["id"],
                         problem_id=row["problem_id"],
@@ -512,6 +530,13 @@ class AutoEngineer(BaseAIAgent):
 
         # Resolve title-based dependencies to db_id-based
         resolve_dependencies(analysis.issues)
+
+        # Persist resolved dependencies to DB
+        for issue in analysis.issues:
+            if issue.depends_on_issues and issue.db_id is not None:
+                self._workspace.db.update_issue_depends_on(
+                    issue.db_id, issue.depends_on_issues
+                )
 
         # Sort into layers
         try:
@@ -1086,6 +1111,7 @@ class AutoEngineer(BaseAIAgent):
             test_files = issue.get("test_files", [])
             depends_on = issue.get("depends_on", [])
             suggested_model = issue.get("suggested_model")
+            test_setup_hint = issue.get("test_setup_hint", "")
 
             db_id = self._workspace.db.save_issue(
                 problem_id=problem_id,
@@ -1094,6 +1120,7 @@ class AutoEngineer(BaseAIAgent):
                 target_files=target_files,
                 test_files=test_files,
                 suggested_model=suggested_model,
+                test_setup_hint=test_setup_hint,
             )
             issues.append(EngineeringIssue(
                 db_id=db_id,
@@ -1103,6 +1130,7 @@ class AutoEngineer(BaseAIAgent):
                 test_files=test_files,
                 depends_on_titles=depends_on,
                 suggested_model=suggested_model,
+                test_setup_hint=test_setup_hint,
             ))
 
         return EngineeringAnalysis(
@@ -1111,3 +1139,113 @@ class AutoEngineer(BaseAIAgent):
             use_cases=use_cases,
             issues=issues,
         )
+
+
+def _save_engineering_docs(workspace_root, analysis: EngineeringAnalysis):
+    """Save human-readable engineering analysis to docs/engineering.md in the workspace."""
+    from pathlib import Path
+
+    docs_dir = Path(workspace_root) / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    lines = ["# Engineering Analysis", ""]
+
+    # Requirements
+    if analysis.requirements:
+        lines.append("## Requirements")
+        lines.append("")
+        for req in analysis.requirements:
+            lines.append(f"- **[{req.type}]** {req.text}")
+        lines.append("")
+
+    # Use Cases
+    if analysis.use_cases:
+        lines.append("## Use Cases")
+        lines.append("")
+        for uc in analysis.use_cases:
+            lines.append(f"### {uc.title}")
+            lines.append(uc.description)
+            lines.append("")
+
+    # Architecture Plan
+    plan = analysis.architecture
+    if plan:
+        lines.append("## Architecture Plan")
+        lines.append("")
+        lines.append(f"- **Package:** {plan.package_name}")
+        lines.append(f"- **Root namespace:** {plan.root_namespace}")
+        lines.append("")
+
+        if plan.namespaces:
+            lines.append("### Namespaces")
+            lines.append("")
+            for ns in plan.namespaces:
+                lines.append(f"- `{ns.namespace_path}` — {ns.purpose}")
+            lines.append("")
+
+        if plan.domain_models:
+            lines.append("### Domain Models")
+            lines.append("")
+            for dm in plan.domain_models:
+                lines.append(f"#### {dm.class_name} (`{dm.filepath}`)")
+                if dm.docstring:
+                    lines.append(f"> {dm.docstring}")
+                if dm.fields:
+                    lines.append("")
+                    lines.append("| Field | Type | Description |")
+                    lines.append("|-------|------|-------------|")
+                    for f in dm.fields:
+                        lines.append(f"| {f.name} | `{f.type_hint}` | {f.description} |")
+                if dm.methods:
+                    lines.append("")
+                    for m in dm.methods:
+                        lines.append(f"- `{m.signature}` — {m.description}")
+                lines.append("")
+
+        if plan.modules:
+            lines.append("### Modules")
+            lines.append("")
+            for mod in plan.modules:
+                name = mod.class_name or "(module-level)"
+                lines.append(f"#### {name} (`{mod.filepath}`)")
+                if mod.docstring:
+                    lines.append(f"> {mod.docstring}")
+                if mod.methods:
+                    lines.append("")
+                    for m in mod.methods:
+                        lines.append(f"- `{m.signature}` — {m.description}")
+                lines.append("")
+
+        if plan.dependencies:
+            lines.append("### Dependencies")
+            lines.append("")
+            for dep in plan.dependencies:
+                symbols = ", ".join(dep.import_symbols) if dep.import_symbols else "*"
+                lines.append(f"- `{dep.source_filepath}` → `{dep.target_filepath}` [{symbols}]")
+            lines.append("")
+
+    # Issues
+    if analysis.issues:
+        lines.append("## Issues")
+        lines.append("")
+        for i, issue in enumerate(analysis.issues, 1):
+            lines.append(f"### {i}. {issue.title}")
+            lines.append(issue.description)
+            lines.append("")
+            if issue.target_files:
+                lines.append("**Target files:**")
+                for tf in issue.target_files:
+                    lines.append(f"- `{tf.filepath}` ({tf.action})")
+            if issue.test_files:
+                lines.append("**Test files:**")
+                for tf in issue.test_files:
+                    lines.append(f"- `{tf}`")
+            if issue.depends_on_titles:
+                lines.append(f"**Depends on:** {', '.join(issue.depends_on_titles)}")
+            if issue.suggested_model:
+                lines.append(f"**Suggested model:** {issue.suggested_model}")
+            if issue.test_setup_hint:
+                lines.append(f"**Test setup:** {issue.test_setup_hint}")
+            lines.append("")
+
+    (docs_dir / "engineering.md").write_text("\n".join(lines), encoding="utf-8")

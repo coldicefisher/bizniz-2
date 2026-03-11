@@ -60,6 +60,8 @@ Submit your final diagnosis and optional code fixes. This ends the debugging ses
 
 ## Important
 
+- You must use view_file to read file contents — files are NOT included in the initial context. Only file paths and error output are provided upfront.
+- Architecture context may be available in the workspace DB or via search_files for architectural patterns.
 - The `path` field is ALWAYS required (use "" when not needed for submit_fix)
 - All fields in the response are required — use empty strings/arrays for fields not relevant to your current action
 - You have a limited number of turns — be efficient, don't repeat yourself

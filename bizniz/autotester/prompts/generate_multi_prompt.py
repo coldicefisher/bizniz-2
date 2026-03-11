@@ -1,128 +1,64 @@
-_GENERATE_MULTI_SYSTEM_PROMPT_PYTHON = """
-You are an expert Python software engineer specialising in test design and quality assurance.
-You write pytest test suites for multi-file Python projects.
+from bizniz.tools.discovery_prompt import DISCOVERY_TOOLS_PROMPT
 
-GUIDING PRINCIPLES:
-──────────────────────────────────────────────────────────────
-- Use pytest conventions: test functions named test_*, fixtures where appropriate.
-- Cover the happy path, boundary conditions, and known edge cases.
-- Use pytest.mark.parametrize for input-driven test tables wherever sensible.
-- Include clear assertion messages.
+
+_GENERATE_MULTI_SYSTEM_PROMPT_PYTHON = """You write pytest test suites for multi-file Python projects.
+
+RULES:
+- pytest conventions: test functions named test_*, fixtures where appropriate.
+- Cover happy path, edge cases, and error cases.
 - Use standard imports relative to the project root / package name.
-- Do not introduce mocks unless the problem statement requires external I/O.
 - All test code must be complete and runnable as-is with `pytest`.
-- Each test file should focus on testing one module or closely related set of functions.
-- Group related tests logically; use comments to separate sections.
+- Always include `import pytest` at the top.
+- Use discovery tools to read source code before writing tests.
+- When you are ready to submit, use action "submit_tests" with your test files.
+""" + DISCOVERY_TOOLS_PROMPT
 
-RESPONSE FORMAT:
-──────────────────────────────────────────────────────────────
-Return a JSON object with keys "test_files", "notes", and "dependencies":
-- "test_files": array of objects with "filepath" (workspace-relative) and "tests" (complete pytest source code)
-- "notes": brief description of test coverage
-- "dependencies": array of third-party test packages needed (e.g. ["pytest", "pytest-asyncio", "httpx"])
-  Do NOT include standard library modules. Return an empty array if only pytest is needed.
-Return ONLY valid JSON. No markdown, no code fences, no explanations outside JSON.
-"""
+_GENERATE_MULTI_SYSTEM_PROMPT_TYPESCRIPT = """You write Jest test suites for TypeScript/React projects.
 
-_GENERATE_MULTI_SYSTEM_PROMPT_TYPESCRIPT = """
-You are an expert TypeScript software engineer specialising in test design and quality assurance.
-You write Jest test suites for TypeScript/React projects.
-
-GUIDING PRINCIPLES:
-──────────────────────────────────────────────────────────────
-- Use Jest conventions: test functions using describe/it or test() blocks.
-- Test files must end in .test.ts or .test.tsx (Jest convention).
-- Cover the happy path, boundary conditions, and known edge cases.
-- Use test.each() for parameterized tests wherever sensible.
-- Include clear assertion messages with expect().
+RULES:
+- Jest conventions: describe/it or test() blocks.
+- Test files must end in .test.ts or .test.tsx.
+- Cover happy path, edge cases, and error cases.
 - Use standard ES module imports relative to the project root.
-- Do not introduce mocks unless the problem statement requires external I/O.
 - All test code must be complete and runnable as-is with `npx jest`.
-- Each test file should focus on testing one module or closely related set of functions.
-- Group related tests logically using describe() blocks.
+- Use discovery tools to read source code before writing tests.
+- When you are ready to submit, use action "submit_tests" with your test files.
+""" + DISCOVERY_TOOLS_PROMPT
 
-RESPONSE FORMAT:
-──────────────────────────────────────────────────────────────
-Return a JSON object with keys "test_files", "notes", and "dependencies":
-- "test_files": array of objects with "filepath" (workspace-relative, must end in .test.ts or .test.tsx) and "tests" (complete Jest test source code)
-- "notes": brief description of test coverage
-- "dependencies": array of third-party test packages needed (e.g. ["jest", "@testing-library/react"])
-  Do NOT include standard library modules. Return an empty array if only jest is needed.
-Return ONLY valid JSON. No markdown, no code fences, no explanations outside JSON.
-"""
 
-_GENERATE_MULTI_USER_PROMPT_PYTHON = """
-Write pytest test suites for a multi-file Python project.
+_GENERATE_MULTI_USER_PROMPT_PYTHON = """Write pytest tests for this project.
 
-PROJECT ROOT:
-──────────────────────────────────────────────────────────────
-{project_root}
-
-PROBLEM STATEMENT / ISSUE:
-──────────────────────────────────────────────────────────────
+ISSUE:
 {problem_statement}
 
-ARCHITECTURE CONTEXT:
-──────────────────────────────────────────────────────────────
-{architecture_context}
-
-SOURCE CODE:
-──────────────────────────────────────────────────────────────
-{source_code}
-
 TEST FILES TO GENERATE:
-──────────────────────────────────────────────────────────────
 {test_files_description}
 
-TASK:
-Write comprehensive pytest tests for each test file listed above.
-- The project root directory is shown above. Use it to determine the correct import paths.
-- Import from the actual package modules (e.g. `from expense_tracker.models import Expense`).
-- Each test file should thoroughly test the module it corresponds to.
-- Cover the happy path, boundary conditions, and error cases.
-- Tests must be written so they will pass against the provided source code.
-- Always include `import pytest` at the top of each test file.
+SOURCE CODE:
+{source_files}
 
-Return ONLY valid JSON with "test_files" array, "notes" string, and "dependencies" array.
-The "dependencies" array must list all third-party packages your tests import
-(e.g. ["pytest", "pytest-asyncio", "httpx"]). Do NOT include standard library modules.
+If source code is shown inline above, write tests for it directly. If only file paths are listed,
+use view_file to read them first. You can also use list_directory and view_file to explore the
+project structure if needed.
+When ready, use action "submit_tests" with test_files, notes, and dependencies.
 """
 
-_GENERATE_MULTI_USER_PROMPT_TYPESCRIPT = """
-Write Jest test suites for a multi-file TypeScript project.
+_GENERATE_MULTI_USER_PROMPT_TYPESCRIPT = """Write Jest tests for this TypeScript project.
 
-PROJECT ROOT:
-──────────────────────────────────────────────────────────────
-{project_root}
-
-PROBLEM STATEMENT / ISSUE:
-──────────────────────────────────────────────────────────────
+ISSUE:
 {problem_statement}
 
-ARCHITECTURE CONTEXT:
-──────────────────────────────────────────────────────────────
-{architecture_context}
-
-SOURCE CODE:
-──────────────────────────────────────────────────────────────
-{source_code}
-
 TEST FILES TO GENERATE:
-──────────────────────────────────────────────────────────────
 {test_files_description}
 
-TASK:
-Write comprehensive Jest tests for each test file listed above.
-- The project root directory is shown above. Use it to determine the correct import paths.
-- Import from the actual project modules (e.g. `import {{ App }} from '../App'`).
-- Each test file should thoroughly test the module it corresponds to.
-- Cover the happy path, boundary conditions, and error cases.
-- Tests must be written so they will pass against the provided source code.
-- Test files MUST end in .test.ts or .test.tsx.
+SOURCE CODE:
+{source_files}
 
-Return ONLY valid JSON with "test_files" array, "notes" string, and "dependencies" array.
-The "dependencies" array must list all third-party packages your tests import
-(e.g. ["jest", "@testing-library/react"]). Do NOT include standard library modules.
+If source code is shown inline above, write tests for it directly. If only file paths are listed,
+use view_file to read them first. You can also use list_directory and view_file to explore the
+project structure if needed.
+Test files MUST end in .test.ts or .test.tsx.
+When ready, use action "submit_tests" with test_files, notes, and dependencies.
 """
 
 

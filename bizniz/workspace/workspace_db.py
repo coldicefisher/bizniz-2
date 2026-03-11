@@ -92,6 +92,7 @@ class WorkspaceDB:
                 test_files_json       TEXT    NOT NULL DEFAULT '[]',
                 depends_on_json       TEXT    NOT NULL DEFAULT '[]',
                 suggested_model       TEXT,
+                test_setup_hint       TEXT    NOT NULL DEFAULT '',
                 created_at            TEXT    NOT NULL,
                 closed_at             TEXT
             );
@@ -243,17 +244,20 @@ class WorkspaceDB:
         test_files: List[str],
         depends_on: Optional[List[int]] = None,
         suggested_model: Optional[str] = None,
+        test_setup_hint: str = "",
     ) -> int:
         cur = self._conn.execute(
             """INSERT INTO issues
-               (problem_id, title, description, target_files_json, test_files_json, depends_on_json, suggested_model, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (problem_id, title, description, target_files_json, test_files_json,
+                depends_on_json, suggested_model, test_setup_hint, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 problem_id, title, description,
                 json.dumps(target_files),
                 json.dumps(test_files),
                 json.dumps(depends_on or []),
                 suggested_model,
+                test_setup_hint,
                 _now(),
             ),
         )
@@ -277,6 +281,13 @@ class WorkspaceDB:
                 "SELECT * FROM issues WHERE status = 'open'"
             )
         return cur.fetchall()
+
+    def update_issue_depends_on(self, issue_id: int, depends_on: List[int]):
+        self._conn.execute(
+            "UPDATE issues SET depends_on_json = ? WHERE id = ?",
+            (json.dumps(depends_on), issue_id),
+        )
+        self._conn.commit()
 
     def update_issue_status(self, issue_id: int, status: str):
         self._conn.execute(

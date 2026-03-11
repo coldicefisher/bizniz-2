@@ -1,71 +1,30 @@
-REPAIR_MULTI_PROMPT_TEMPLATE = """
-The project code failed with errors. You must fix the code across one or more files
-to address the error and produce valid code that meets the original requirements.
+from bizniz.tools.discovery_prompt import DISCOVERY_TOOLS_PROMPT
 
-IMPORTANT CONTEXT:
-- Your code is being executed and tested automatically with pytest.
-- Read the error output and test code carefully to understand what is expected.
-- Your code must define the exact function/class signatures that tests import and call.
+
+REPAIR_MULTI_SYSTEM_PROMPT = """You are an expert debugger. Fix failing code by analyzing errors and producing corrected files.
+
+WORKFLOW:
+1. Read the error carefully. For ImportErrors, trace the FULL import chain — the broken module may be a transitive dependency.
+2. Use discovery tools to read the relevant files (1-3 calls max).
+3. Submit your fix with action "submit_code". The "changes" array MUST be non-empty.
+
+RULES:
+- Return COMPLETE file content for every file you change.
+- Only include files that actually need changes.
 - Respect the package structure — use relative imports within the package.
-- Do NOT import modules that don't exist in the workspace. Check the file list below.
-- If a function or class is missing, create it — don't import it from a non-existent module.
+- If a module is missing, CREATE it. If an import path is wrong, fix the import.
+""" + DISCOVERY_TOOLS_PROMPT
 
-COMMON MISTAKES TO AVOID:
-- Importing from modules that don't exist (e.g. utils.validation when no utils/ directory exists)
-- Wrong function signatures or return types that don't match what tests expect
-- Forgetting to export classes/functions in __init__.py
-- Using absolute imports when relative imports are needed (or vice versa)
 
-Perform these steps carefully:
-1. Read the error output and any test code carefully.
-2. Identify the root cause — is it a logic error, missing function, wrong signature,
-   import issue, or missing dependency between modules?
-3. Check the WORKSPACE FILES list to verify all imports reference existing modules.
-4. Determine which files need changes.
-5. Return the COMPLETE content for every file you change.
+REPAIR_MULTI_PROMPT_TEMPLATE = """Fix the code to address the error below.
 
-WORKSPACE FILES:
-──────────────────────────────────────────────────────────────
-{workspace_files}
-
-ARCHITECTURE CONTEXT:
-──────────────────────────────────────────────────────────────
-{architecture_context}
-
-ERROR OUTPUT:
-──────────────────────────────────────────────────────────────
-Note: The error output may include a DEEP DIAGNOSIS section with a comprehensive
-root cause analysis and fix plan from a separate debugging agent. If present,
-follow the fix plan steps carefully — they are based on analysis of the full
-project context and repair history.
-
+ERROR:
 {error_message}
 
-CURRENT FILES:
-──────────────────────────────────────────────────────────────
-{current_files}
+FAILING FILES:
+{failing_files}
 
-RESPONSE FORMAT:
-──────────────────────────────────────────────────────────────
-Return ONLY valid JSON:
-
-{{
-    "analysis": "<analysis of what went wrong>",
-    "fix_plan": "<description of the minimal fix across files>",
-    "changes": [
-        {{
-            "filepath": "pkg/module.py",
-            "code": "<complete corrected file content>",
-            "action": "modify"
-        }}
-    ],
-    "dependencies": ["fastapi", "pydantic"]
-}}
-
-Each change must include the COMPLETE file content, not a diff.
-Only include files that actually need changes.
-
-The "dependencies" array must list ALL third-party packages your code imports.
-Do NOT include standard library modules. Include the pip-installable package name.
-Return an empty array if no third-party packages are needed.
+Use discovery tools to read the file contents and any related files you need.
+When ready, use action "submit_code" with analysis, fix_plan, changes, and dependencies.
+"dependencies": list ALL third-party pip packages your code imports (empty array if none).
 """

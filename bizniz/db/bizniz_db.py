@@ -164,6 +164,7 @@ class BiznizDB:
                 test_files_json     TEXT NOT NULL DEFAULT '[]',
                 depends_on_json     TEXT NOT NULL DEFAULT '[]',
                 suggested_model     VARCHAR(64),
+                test_setup_hint     TEXT NOT NULL DEFAULT '',
                 created_at          VARCHAR(64) NOT NULL,
                 closed_at           VARCHAR(64)
             )""",
