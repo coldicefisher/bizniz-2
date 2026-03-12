@@ -462,6 +462,7 @@ class CodingOrchestrator:
         self._stall_cycle_count = 0
         last_failure_output = ""
         _attempted_packages: dict = {}  # package_name -> attempt count
+        _container_rebuilt = False
         _wall_clock_start = time.time()
 
         # ── Load existing code for files being modified ──────────────────────
@@ -690,6 +691,34 @@ class CodingOrchestrator:
                     error_detail += f"\nstderr: {eval_result.stderr}"
 
                 log(f"Orchestrator: collection error detail: {error_detail[:500]}")
+
+                # Container rebuild: if we've had 3+ collection errors and
+                # a declared package can't be imported, the container state
+                # is stale. Rebuild from scratch.
+                if collection_error_count >= 3 and not _container_rebuilt:
+                    env = self._find_installable_environment()
+                    if env and hasattr(env, 'stop') and hasattr(env, '_ensure_container'):
+                        # Check if a requirements.txt package is failing
+                        try:
+                            pkgs = self._workspace.db.get_packages()
+                            declared = {r["package"].lower() for r in pkgs} if pkgs else set()
+                        except Exception:
+                            declared = set()
+                        pkg_missing = any(
+                            pkg in error_detail.lower() for pkg in declared
+                        )
+                        if pkg_missing:
+                            log("Orchestrator: container state stale — rebuilding...")
+                            try:
+                                env.stop()
+                                env._ensure_container()
+                                if declared:
+                                    env.install_packages(sorted(declared))
+                                collection_error_count = 0
+                                _container_rebuilt = True
+                                continue
+                            except Exception as exc:
+                                log(f"Orchestrator: container rebuild failed ({exc})")
 
                 # Auto-fix bad pytest config files created by debugger
                 fixed_config = self._fix_bad_pytest_config(current_files, error_detail, log)
