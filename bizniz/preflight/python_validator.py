@@ -25,6 +25,17 @@ _COMMON_ALIASES: Dict[str, str] = {
     "dotenv": "python-dotenv",
 }
 
+# Well-known third-party packages whose import name matches their pip name.
+# These should never be auto-stubbed — they just need to be pip-installed.
+_WELL_KNOWN_PACKAGES: Set[str] = {
+    "pydantic", "fastapi", "flask", "django", "sqlalchemy", "celery",
+    "redis", "requests", "httpx", "uvicorn", "gunicorn", "starlette",
+    "pytest", "numpy", "pandas", "scipy", "matplotlib", "torch",
+    "tensorflow", "alembic", "jinja2", "click", "typer", "rich",
+    "boto3", "stripe", "jwt", "passlib", "bcrypt", "cryptography",
+    "aiohttp", "websockets", "motor", "pymongo", "psycopg2", "asyncpg",
+}
+
 
 class PythonPreflightValidator(BasePreflightValidator):
     """Validates Python import resolution and auto-stubs missing modules."""
@@ -103,6 +114,7 @@ class PythonPreflightValidator(BasePreflightValidator):
             if (
                 stem in _STDLIB_MODULES
                 or stem in _COMMON_ALIASES
+                or stem_lower in _WELL_KNOWN_PACKAGES
                 or stem_lower in dep_names
             ):
                 shadow_candidates.append(filepath)
@@ -321,6 +333,10 @@ class PythonPreflightValidator(BasePreflightValidator):
         if top_level in _COMMON_ALIASES:
             return None
 
+        # Well-known third-party package
+        if top_level.lower().replace("-", "_") in _WELL_KNOWN_PACKAGES:
+            return None
+
         # Workspace module — the exact module must resolve
         parts = module.split(".")
 
@@ -393,6 +409,7 @@ class PythonPreflightValidator(BasePreflightValidator):
             if (
                 top_level in _STDLIB_MODULES
                 or top_level in _COMMON_ALIASES
+                or top_lower in _WELL_KNOWN_PACKAGES
                 or (dep_names and top_lower in dep_names)
             ):
                 return None
