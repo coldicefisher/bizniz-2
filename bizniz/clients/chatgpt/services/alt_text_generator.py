@@ -5,8 +5,6 @@ import yaml
 import os
 import datetime
 from enum import Enum
-import requests
-
 from openai import AzureOpenAI, BadRequestError
 
 

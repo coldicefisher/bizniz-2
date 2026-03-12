@@ -2432,7 +2432,6 @@ class CodingOrchestrator:
         Runs on the host (no container needed). Only scans top-level definitions.
         """
         import ast
-        from pathlib import PurePosixPath
 
         index = {}
         try:
