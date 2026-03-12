@@ -342,6 +342,42 @@ def main():
             except Exception:
                 pass  # not on PyPI or network error — keep it
 
+    def _sanitize_requirements(target_dir: Path):
+        """Remove invalid entries from requirements.txt.
+
+        Strips stdlib modules, garbage entries, and duplicates that
+        accumulate from bad LLM suggestions across runs.
+        """
+        import re as _re
+        _stdlib = set(sys.stdlib_module_names)
+
+        for req_file in target_dir.rglob("requirements.txt"):
+            try:
+                lines = req_file.read_text().splitlines()
+            except Exception:
+                continue
+            clean = []
+            seen = set()
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    clean.append(line)
+                    continue
+                # Extract bare package name
+                pkg = _re.split(r"[><=!\[;]", stripped)[0].strip().lower().replace("-", "_")
+                if pkg in _stdlib:
+                    print(f"  [cleanup] Removed stdlib '{stripped}' from {req_file}")
+                    continue
+                if pkg in seen:
+                    continue
+                # Reject entries with no letters or that look malformed
+                if not _re.match(r"^[a-zA-Z]", stripped):
+                    print(f"  [cleanup] Removed invalid '{stripped}' from {req_file}")
+                    continue
+                seen.add(pkg)
+                clean.append(stripped)
+            req_file.write_text("\n".join(clean) + "\n")
+
     def snapshot_workspace(label: str):
         """Save a copy of the workspace after successful issue completion."""
         snap = snapshot_dir / label
@@ -377,11 +413,13 @@ def main():
 
     # Clean workspace before baseline snapshot
     _nuke_shadow_files(WORKSPACE_DIR)
+    _sanitize_requirements(WORKSPACE_DIR)
     # Also clean any existing snapshots
     if snapshot_dir.exists():
         for snap in snapshot_dir.iterdir():
             if snap.is_dir():
                 _nuke_shadow_files(snap)
+                _sanitize_requirements(snap)
 
     # Save initial clean state
     snapshot_workspace("baseline")
