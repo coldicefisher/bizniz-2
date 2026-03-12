@@ -42,7 +42,7 @@ def main():
 
     workspace = LocalWorkspace(root=WORKSPACE_DIR)
 
-    model = "gpt-5"
+    model = "gpt-4o"
     client_config = ChatGPTClientConfig(default_model=model)
     client = OpenAIChat4GPTClient(
         config=client_config,

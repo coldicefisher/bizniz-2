@@ -131,18 +131,16 @@ class ClaudeClient(BaseAIClient):
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
-                response = self._client.messages.create(
+                response_text = ""
+                with self._client.messages.stream(
                     model=self._model_name,
                     max_tokens=max_tokens or self.max_tokens,
                     system=system_content.strip() if system_content.strip() else None,
                     messages=api_messages,
                     temperature=temperature,
-                )
-
-                response_text = ""
-                for block in response.content:
-                    if block.type == "text":
-                        response_text += block.text
+                ) as stream:
+                    for text in stream.text_stream:
+                        response_text += text
 
                 job_id = str(uuid.uuid4())
 
