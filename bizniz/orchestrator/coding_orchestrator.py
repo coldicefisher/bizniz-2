@@ -476,6 +476,13 @@ class CodingOrchestrator:
         self._strategy = strategy
         log(f"Orchestrator: using {strategy.value} strategy")
 
+        # Scope architecture context to this issue's files + their dependencies.
+        # Prevents the LLM from seeing unbuilt modules (e.g. an app factory
+        # that's a future issue) and trying to import from them.
+        architecture_context = self._scope_architecture_context(
+            architecture_context, target_files,
+        )
+
         # Set starting model if suggested by the engineer
         if initial_model and self._model_progression and self._client:
             self._model_progression.set_start(initial_model)
@@ -546,10 +553,15 @@ class CodingOrchestrator:
                 "NEVER use relative imports (from . or from ..) — they will be rejected.\n"
             )
 
-        # ── Enrich test setup hints from actual workspace ────────────────────
-        # Scans disk for app factories and routers, appending verified import
-        # paths so the autotester uses real imports instead of guessing.
-        prompt = self._enrich_test_setup_hint(prompt, test_files, architecture_context, log)
+        # ── Installed packages: tell the LLM what's available ────────────────
+        installed_pkgs = self._get_installed_packages()
+        if installed_pkgs:
+            extra_context += (
+                f"\n\nINSTALLED PACKAGES (available in the environment):\n{installed_pkgs}\n"
+                "\nOnly import third-party packages from this list. "
+                "If you need a package not listed here, declare it in your response's "
+                "\"dependencies\" array.\n"
+            )
 
         if strategy == CodingStrategy.TDD:
             current_files, current_test_files = self._generate_tdd(
@@ -968,12 +980,31 @@ class CodingOrchestrator:
                 self._autotester.clear_message_history()
 
                 log("Orchestrator: test collection error — regenerating tests...")
+
+                # Extract failing imports so we can explicitly warn the LLM
+                import re as _re
+                _bad_imports = _re.findall(
+                    r'>\s*((?:from\s+\S+\s+import\s+\S+|import\s+\S+))',
+                    error_detail,
+                )
+                _bad_warning = ""
+                if _bad_imports:
+                    _bad_warning = (
+                        "\n\nDO NOT use these imports — they failed:\n"
+                        + "\n".join(f"  BROKEN: {imp}" for imp in _bad_imports)
+                        + "\n\nOnly import from the modules listed in the IMPORT MAP "
+                        "or from the source files shown in CURRENT CODE. "
+                        "Test the code directly without going through an app factory "
+                        "or entry-point unless one is shown in CURRENT CODE.\n"
+                    )
+
                 enriched_prompt = (
                     f"{prompt}{self._get_scaffold_context()}\n\n"
                     f"CURRENT CODE:\n"
                     + "\n".join(f"── {fp} ──\n```{self._code_fence_lang}\n{code}\n```" for fp, code in current_files.items())
-                    + f"\n\nThe previous tests had collection errors:\n{error_detail}\n"
-                    f"Fix the imports and test structure."
+                    + f"\n\nThe previous tests had collection errors:\n{error_detail}"
+                    + _bad_warning
+                    + "\nFix the imports and test structure."
                 )
                 try:
                     test_result = self._autotester.generate_multi(
@@ -1658,42 +1689,44 @@ class CodingOrchestrator:
     def _is_source_import_error(self, error_detail: str, current_files: dict) -> bool:
         """
         Detect if a collection error is caused by broken imports in our source
-        code (not the test file). Broadened detection: checks for ImportError,
-        ModuleNotFoundError, 'No module named', or any traceback chaining
-        through our source files.
+        code (not the test file).
+
+        Only returns True when the failing import line directly references one
+        of the files we're generating. If the test imports from an unrelated
+        module (e.g. a stub app factory), this is a test problem, not a source
+        problem — return False so the test gets regenerated instead.
         """
-        # Explicit import error keywords
-        import_keywords = [
-            "ImportError", "ModuleNotFoundError", "No module named",
-            "cannot import name",
-        ]
-        has_import_keyword = any(kw in error_detail for kw in import_keywords)
+        import re
 
-        # Check if any of our source files appear in the error traceback
-        source_in_traceback = False
-        for fp in current_files:
-            # Convert filepath to module path for matching
-            module = fp.replace("/", ".").replace(".py", "")
-            basename = fp.rsplit("/", 1)[-1] if "/" in fp else fp
-            if basename in error_detail or module in error_detail:
-                source_in_traceback = True
-                break
+        # Extract the FIRST failing import line from pytest output.
+        # Pytest marks lines with ">" prefix. The first one is the test file's
+        # import; subsequent ones are the traceback chain through source files.
+        # We only care about the test's own import — if the test imports a
+        # non-target module, that's a test problem, not a source problem.
+        first_match = re.search(r'>\s*(?:from\s+(\S+)\s+import|import\s+(\S+))', error_detail)
+        failing_imports = [first_match.groups()] if first_match else []
+        if not failing_imports:
+            # Fallback: look for "from X import" in the error section header
+            first_match = re.search(r'(?:from\s+(\S+)\s+import|import\s+(\S+))', error_detail)
+            failing_imports = [first_match.groups()] if first_match else []
 
-        if has_import_keyword and source_in_traceback:
-            return True
-
-        # Even without explicit ImportError text, if the test tries to import
-        # our source file and collection fails, it's likely an import issue
-        # in the source. Check for "from <our_module> import" pattern.
+        # Build module paths from our source files
+        our_modules = set()
         for fp in current_files:
             module = fp.replace("/", ".").replace(".py", "")
-            if f"from {module} import" in error_detail:
-                return True
-            # Also check partial module path (e.g., "pet_groomer.api.routers.appointments")
+            our_modules.add(module)
+            # Also add parent package paths
             parts = module.split(".")
             if len(parts) >= 2:
-                short = ".".join(parts[-2:])
-                if f"from {short}" in error_detail or f"import {short}" in error_detail:
+                our_modules.add(".".join(parts[-2:]))
+
+        # Check if the failing import references one of OUR source files
+        for groups in failing_imports:
+            imported_module = groups[0] or groups[1]
+            if not imported_module:
+                continue
+            for our_mod in our_modules:
+                if imported_module == our_mod or imported_module.endswith("." + our_mod):
                     return True
 
         return False
@@ -1968,18 +2001,18 @@ class CodingOrchestrator:
 
         env = self._find_installable_environment()
         if env:
+            # install_packages() handles both container install and requirements.txt update
             env.install_packages([package])
             log(f"Orchestrator: installed package '{package}'")
         else:
             log(f"Orchestrator: WARNING — no installable environment found for '{package}'")
-
-        # Append to requirements.txt
-        try:
-            req_path = self._workspace.path("requirements.txt")
-            with open(req_path, "a") as f:
-                f.write(f"{package}\n")
-        except Exception:
-            pass
+            # No environment — still record in requirements.txt for future builds
+            try:
+                req_path = self._workspace.path("requirements.txt")
+                with open(req_path, "a") as f:
+                    f.write(f"{package}\n")
+            except Exception:
+                pass
 
         # Persist to workspace DB
         try:
@@ -2031,6 +2064,34 @@ class CodingOrchestrator:
             pass
         return []
 
+    def _get_installed_packages(self) -> str:
+        """Read requirements.txt (Python) or package.json (JS/TS) to list installed packages."""
+        lines = []
+        try:
+            req_path = self._workspace.path("requirements.txt")
+            if req_path.exists():
+                for line in req_path.read_text().splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and not line.startswith("-"):
+                        lines.append(f"  {line}")
+        except Exception:
+            pass
+
+        if not lines:
+            # Try package.json for JS/TS
+            try:
+                pkg_path = self._workspace.path("package.json")
+                if pkg_path.exists():
+                    import json
+                    pkg = json.loads(pkg_path.read_text())
+                    for section in ("dependencies", "devDependencies"):
+                        for name, version in pkg.get(section, {}).items():
+                            lines.append(f"  {name}@{version}")
+            except Exception:
+                pass
+
+        return "\n".join(lines) if lines else ""
+
     def _build_workspace_manifest(self) -> str:
         """
         Build a lightweight manifest of existing workspace files.
@@ -2067,7 +2128,7 @@ class CodingOrchestrator:
             signatures = self._extract_signatures(rel_path, content)
             if signatures:
                 manifest_lines.append(f"  {rel_path}: {', '.join(signatures)}")
-            else:
+            elif not self._is_stub_file(rel_path, content):
                 manifest_lines.append(f"  {rel_path}")
 
         if not manifest_lines:
@@ -2093,6 +2154,8 @@ class CodingOrchestrator:
 
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.ClassDef):
+                if self._is_stub_class(node):
+                    continue  # skip stubs entirely
                 methods = []
                 for item in node.body:
                     if isinstance(item, ast.FunctionDef):
@@ -2100,7 +2163,9 @@ class CodingOrchestrator:
                         methods.append(f"{item.name}({args})")
                 methods_str = f" [{', '.join(methods[:5])}]" if methods else ""
                 signatures.append(f"class {node.name}{methods_str}")
-            elif isinstance(node, ast.FunctionDef):
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if self._is_stub_function(node):
+                    continue  # skip stubs entirely
                 args = ", ".join(a.arg for a in node.args.args)
                 signatures.append(f"def {node.name}({args})")
             elif isinstance(node, ast.Assign):
@@ -2158,8 +2223,11 @@ class CodingOrchestrator:
 
             names = []
             for node in ast.iter_child_nodes(tree):
-                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if not node.name.startswith("_"):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if not node.name.startswith("_") and not self._is_stub_function(node):
+                        names.append(node.name)
+                elif isinstance(node, ast.ClassDef):
+                    if not node.name.startswith("_") and not self._is_stub_class(node):
                         names.append(node.name)
                 elif isinstance(node, ast.Assign):
                     for target in node.targets:
@@ -2168,139 +2236,112 @@ class CodingOrchestrator:
 
             if names:
                 lines.append(f"  from {module} import {', '.join(names[:10])}")
+            elif any(
+                isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                for n in ast.iter_child_nodes(tree)
+            ):
+                # File has definitions but they're all stubs — skip entirely
+                continue
             else:
                 lines.append(f"  import {module}")
 
         return "\n".join(lines) if lines else ""
 
-    def _enrich_test_setup_hint(
-        self,
-        prompt: str,
-        test_files: List[str],
-        architecture_context: str,
-        log: Callable,
+    def _scope_architecture_context(
+        self, arch_context: str, target_files: List[dict],
     ) -> str:
+        """Filter architecture context to only reference relevant modules.
+
+        Keeps lines about target files and their upstream dependencies.
+        Removes lines about unrelated modules (e.g. app.py when we're
+        building a router) so the LLM doesn't try to import from them.
         """
-        Scan the workspace for app entry-points and routers, appending
-        ground-truth symbol info to the prompt.  Framework-agnostic —
-        reports what exists, lets the LLM decide how to use it.
-        """
-        # Only enrich for integration/endpoint issues
-        is_integration = any(
-            kw in " ".join(test_files).lower()
-            for kw in ["router", "endpoint", "api", "app", "factory", "integration"]
-        )
-        if not is_integration:
-            prompt_lower = prompt.lower()
-            is_integration = any(
-                kw in prompt_lower
-                for kw in ["endpoint", "route", "router", "api", "handler",
-                            "controller", "middleware", "app factory"]
-            )
-        if not is_integration:
-            return prompt
+        if not arch_context or not target_files:
+            return arch_context
 
-        # Scan workspace for app entry-points and routers
-        app_hints: List[str] = []
-        router_hints: List[str] = []
-        try:
-            rel_files = self._workspace.list_relative_files()
-            for rel_path in sorted(str(p) for p in rel_files):
-                if rel_path.startswith(".") or "__pycache__" in rel_path:
-                    continue
-                if "test" in rel_path.lower():
-                    continue
-                if self._language == "python" and rel_path.endswith(".py"):
-                    self._scan_python_for_hints(rel_path, app_hints, router_hints)
-                elif self._language == "typescript" and rel_path.endswith((".ts", ".tsx")):
-                    self._scan_typescript_for_hints(rel_path, app_hints, router_hints)
-        except Exception:
-            return prompt
+        # Collect filepaths that are relevant: targets + upstream deps
+        relevant_files = {tf["filepath"] for tf in target_files}
+        if self._dependency_edges:
+            # Walk upstream: if our target imports from X, X is relevant
+            changed = True
+            while changed:
+                changed = False
+                for edge in self._dependency_edges:
+                    src = edge.source_filepath if hasattr(edge, "source_filepath") else edge.get("source_filepath", "")
+                    tgt = edge.target_filepath if hasattr(edge, "target_filepath") else edge.get("target_filepath", "")
+                    if src in relevant_files and tgt not in relevant_files:
+                        relevant_files.add(tgt)
+                        changed = True
 
-        if not app_hints and not router_hints:
-            return prompt
+        # Filter the formatted context line by line.
+        # Architecture context has sections like:
+        #   - pet_groomer_backend/app.py: ...
+        #     def create_app() -> FastAPI
+        # We drop module blocks whose filepath isn't relevant.
+        filtered_lines = []
+        skip_block = False
+        for line in arch_context.splitlines():
+            # Detect module filepath references (indented with "  - ")
+            stripped = line.strip()
+            if stripped.startswith("- ") and "(" in stripped and "/" in stripped:
+                # Extract filepath from patterns like "- ClassName (path/to/file.py)"
+                # or "- (module-level) (path/to/file.py)"
+                import re
+                match = re.search(r'\(([^)]+\.\w+)\)', stripped)
+                if match:
+                    filepath = match.group(1)
+                    skip_block = filepath not in relevant_files
+                else:
+                    skip_block = False
+            elif stripped.startswith("- ") and " → " in stripped:
+                # Dependency line like "- app.py → routers/services.py [*]"
+                # Only show if the source is relevant (what our code imports FROM)
+                src_path = stripped.split(" → ")[0].lstrip("- ").strip()
+                skip_block = src_path not in relevant_files
+            elif not line.startswith("    ") and not line.startswith("\t"):
+                # Section header (e.g. "Modules:", "Dependencies:") — always keep
+                skip_block = False
 
-        # Build compact hint — just report what symbols exist
-        lines = []
-        if app_hints:
-            lines.append("App entry-points found on disk:")
-            for h in app_hints:
-                lines.append(f"  {h}")
-        if router_hints:
-            lines.append("Router symbols found on disk:")
-            for h in router_hints:
-                lines.append(f"  {h}")
+            if not skip_block:
+                filtered_lines.append(line)
 
-        if router_hints and not app_hints:
-            lines.append(
-                "\nNOTE: No app factory or app instance exists yet. "
-                "Do NOT import an app from the main package. "
-                "Create a temporary app in your test that mounts the router(s) above."
-            )
+        return "\n".join(filtered_lines)
 
-        verified = "\n".join(lines)
-
-        if "TEST SETUP HINT:" in prompt:
-            prompt += f"\n\nVERIFIED IMPORTS (from workspace):\n{verified}"
-        else:
-            prompt += f"\n\nTEST SETUP HINT (from workspace):\n{verified}"
-
-        log(f"Orchestrator: enriched test hints ({len(app_hints)} app, {len(router_hints)} router from disk)")
-        return prompt
-
-    def _scan_python_for_hints(self, rel_path: str, app_hints: list, router_hints: list):
-        """Scan a Python file for app entry-points and router definitions.
-
-        Framework-agnostic: reports symbol locations, does not prescribe usage.
-        """
+    def _is_stub_file(self, filepath: str, content: str) -> bool:
+        """Check if a file contains only stubs (no real implementations)."""
         import ast
-
+        if not filepath.endswith(".py"):
+            return False
         try:
-            content = self._workspace.read_file(path=rel_path)
-        except Exception:
-            return
-
-        if not content or not content.strip():
-            return
-
-        try:
-            tree = ast.parse(content, filename=rel_path)
+            tree = ast.parse(content, filename=filepath)
         except SyntaxError:
-            return
+            return False
+        definitions = [
+            n for n in ast.iter_child_nodes(tree)
+            if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        if not definitions:
+            return False  # no definitions = utility/config file, not a stub
+        return all(
+            (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and self._is_stub_function(n))
+            or (isinstance(n, ast.ClassDef) and self._is_stub_class(n))
+            for n in definitions
+        )
 
-        module_path = rel_path.replace("/", ".").replace(".py", "")
-
-        for node in ast.iter_child_nodes(tree):
-            if isinstance(node, ast.FunctionDef):
-                name_lower = node.name.lower()
-                # Skip scaffold stubs (body is just `raise NotImplementedError`)
-                if self._is_stub_function(node):
-                    continue
-                # App factory functions
-                if any(kw in name_lower for kw in ["create_app", "make_app", "build_app", "app_factory"]):
-                    app_hints.append(
-                        f"from {module_path} import {node.name}  # app factory function"
-                    )
-                # Router builder functions
-                elif "router" in name_lower:
-                    app_hints.append(
-                        f"from {module_path} import {node.name}  # router builder function"
-                    )
-
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        name_lower = target.id.lower()
-                        # Module-level app instance
-                        if name_lower == "app" and self._is_app_constructor(node.value):
-                            app_hints.append(
-                                f"from {module_path} import {target.id}  # app instance"
-                            )
-                        # Module-level router instance
-                        elif "router" in name_lower:
-                            router_hints.append(
-                                f"from {module_path} import {target.id}  # router instance"
-                            )
+    def _is_stub_class(self, node) -> bool:
+        """Check if a ClassDef is a scaffold stub (all methods are stubs or empty)."""
+        import ast
+        methods = [n for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        if not methods:
+            # Class with no methods — check if body is just pass/docstring
+            meaningful = [
+                stmt for stmt in node.body
+                if not (isinstance(stmt, ast.Pass)
+                        or (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant)
+                            and isinstance(stmt.value.value, str)))
+            ]
+            return len(meaningful) == 0
+        return all(self._is_stub_function(m) for m in methods)
 
     def _is_stub_function(self, node) -> bool:
         """Check if a FunctionDef is a scaffold stub (body is only raise/pass/docstring+raise)."""
@@ -2326,40 +2367,6 @@ class CodingOrchestrator:
                 if isinstance(func, ast.Name) and func.id == "NotImplementedError":
                     return True
         return False
-
-    def _is_app_constructor(self, node) -> bool:
-        """Check if an AST node is a web framework app constructor call."""
-        import ast
-        _APP_CLASSES = {"FastAPI", "Flask", "Starlette", "Express", "Sanic", "Litestar"}
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id in _APP_CLASSES:
-                return True
-            if isinstance(node.func, ast.Attribute) and node.func.attr in _APP_CLASSES:
-                return True
-        return False
-
-    def _scan_typescript_for_hints(self, rel_path: str, app_hints: list, router_hints: list):
-        """Scan a TypeScript file for app/router exports using regex."""
-        import re
-
-        try:
-            content = self._workspace.read_file(path=rel_path)
-        except Exception:
-            return
-
-        if not content or not content.strip():
-            return
-
-        module_path = rel_path.replace(".ts", "").replace(".tsx", "")
-
-        # Look for exported app creation
-        if re.search(r'export\s+(?:const|function)\s+(?:createApp|buildApp|app)', content):
-            for m in re.finditer(r'export\s+(?:const|function)\s+(createApp|buildApp|app)\b', content):
-                app_hints.append(f"import {{ {m.group(1)} }} from './{module_path}'")
-
-        # Look for exported routers
-        for m in re.finditer(r'export\s+(?:const|default)\s+(\w*[Rr]outer\w*)', content):
-            router_hints.append(f"import {{ {m.group(1)} }} from './{module_path}'")
 
     def _get_passing_test_examples(self, max_examples: int = 2) -> str:
         """

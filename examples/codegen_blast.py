@@ -40,8 +40,8 @@ MAX_ITERATIONS = 6  # Per-issue iteration cap (generate + 2 repair + stall recov
 STALL_THRESHOLD = 2  # Consecutive failures before stall action
 
 # ── Model Configuration ──────────────────────────────────────────────────────
-MODEL = "gpt-4o-mini"                      # Starting model for all agents
-MODEL_ESCALATION = ["gpt-4o-mini"]         # Escalation chain (single = no escalation)
+MODEL = "gpt-4o"                            # Starting model for all agents
+MODEL_ESCALATION = ["gpt-4o"]              # Escalation chain (single = no escalation)
 ENABLE_AGENTIC_DEBUG = False               # Agentic debugger (tool-loop diagnosis)
 ENABLE_AGENTIC_REPAIR = False              # Agentic repair (tool-loop repair vs inline)
 ENABLE_AGENTIC_TESTS = False               # Agentic test gen (tool-loop vs inline)
