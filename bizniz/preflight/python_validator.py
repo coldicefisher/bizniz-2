@@ -60,7 +60,7 @@ class PythonPreflightValidator(BasePreflightValidator):
                     filepath, module, is_relative, level, all_files, dep_names
                 )
                 if issue:
-                    stub = self._auto_stub(issue, all_files)
+                    stub = self._auto_stub(issue, all_files, dep_names)
                     if stub:
                         result.stubs_created.append(stub)
                         # Add stub to all_files so subsequent checks see it
@@ -320,7 +320,10 @@ class PythonPreflightValidator(BasePreflightValidator):
         )
 
     def _auto_stub(
-        self, issue: ImportIssue, all_files: Dict[str, str]
+        self,
+        issue: ImportIssue,
+        all_files: Dict[str, str],
+        dep_names: Set[str] | None = None,
     ) -> AutoStub | None:
         """Try to create an auto-stub for a missing module."""
         if issue.issue != "missing_module":
@@ -341,10 +344,22 @@ class PythonPreflightValidator(BasePreflightValidator):
         if not target_file or target_file in all_files:
             return None
 
+        # Never create a stub that shadows a known package (declared dep,
+        # stdlib, or common alias).  e.g. never create "pydantic.py".
+        import_name = issue.import_name.lstrip(".")
+        top_level = import_name.split(".")[0] if import_name else ""
+        if top_level:
+            top_lower = top_level.lower().replace("-", "_")
+            if (
+                top_level in _STDLIB_MODULES
+                or top_level in _COMMON_ALIASES
+                or (dep_names and top_lower in dep_names)
+            ):
+                return None
+
         # If the leaf module exists elsewhere in the workspace, the import
         # is just wrong (not truly missing). Skip stubbing — the orchestrator's
         # auto-fix will rewrite the import path instead.
-        import_name = issue.import_name.lstrip(".")
         leaf = import_name.split(".")[-1] if import_name else ""
         if leaf:
             for existing_path in all_files:

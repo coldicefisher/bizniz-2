@@ -494,7 +494,11 @@ class CodingOrchestrator:
         # ── Import map: exact import statements for every workspace module ────
         import_map = self._build_import_map()
         if import_map:
-            extra_context += f"\n\nIMPORT MAP (use these EXACT import paths — do NOT guess):\n{import_map}\n"
+            extra_context += (
+                f"\n\nIMPORT MAP (use these EXACT import paths — do NOT guess):\n{import_map}\n"
+                "\nIMPORTANT: Always use absolute imports as shown above. "
+                "NEVER use relative imports (from . or from ..) — they will be rejected.\n"
+            )
 
         # ── Enrich test setup hints from actual workspace ────────────────────
         # Scans disk for app factories and routers, appending verified import

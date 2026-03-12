@@ -247,3 +247,32 @@ class TestPreflightResult:
         result = validator.validate(files, [])
         summary = result.summary()
         assert "auto-stub" in summary.lower() or "Auto-fixed" in summary
+
+    def test_no_stub_shadowing_declared_dep(self, validator):
+        """Never create a stub file that shadows a declared dependency."""
+        files = {
+            "myapp/__init__.py": "",
+            "myapp/api.py": "from pydantic import BaseModel\n",
+        }
+        result = validator.validate(files, ["pydantic"])
+        stub_paths = [s.filepath for s in result.stubs_created]
+        assert "pydantic.py" not in stub_paths
+
+    def test_no_stub_shadowing_stdlib(self, validator):
+        """Never create a stub file that shadows a stdlib module."""
+        files = {
+            "myapp/__init__.py": "",
+            "myapp/api.py": "from json import dumps\n",
+        }
+        result = validator.validate(files, [])
+        stub_paths = [s.filepath for s in result.stubs_created]
+        assert "json.py" not in stub_paths
+
+    def test_no_stub_shadowing_common_alias(self, validator):
+        """Never create a stub file that shadows a common alias package."""
+        files = {
+            "app.py": "import yaml\n",
+        }
+        result = validator.validate(files, [])
+        stub_paths = [s.filepath for s in result.stubs_created]
+        assert "yaml.py" not in stub_paths
