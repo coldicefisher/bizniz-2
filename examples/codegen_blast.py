@@ -194,6 +194,7 @@ def main():
     from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
     from bizniz.clients.chatgpt.openai_chatgpt_client import OpenAIChat4GPTClient
     from bizniz.clients.chatgpt.chatgpt_client_config import ChatGPTClientConfig
+    from bizniz.clients.claude.claude_client import ClaudeClient
     from bizniz.autocoder.autocoder import Autocoder
     from bizniz.autotester.autotester import Autotester
     from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
@@ -209,7 +210,7 @@ def main():
 
     # Load config
     config = BiznizConfig.find_and_load()
-    model = "gpt-4o"
+    model = "gpt-4o-mini"
     print(f"\n  Model: {model}")
     print(f"  Project: {PROJECT_ROOT}")
     print(f"  Docker image: {DOCKER_IMAGE}")
@@ -309,12 +310,45 @@ def main():
     snapshot_dir = PROJECT_ROOT / ".snapshots"
     snapshot_dir.mkdir(exist_ok=True)
 
+    def _nuke_shadow_files(target_dir: Path):
+        """Remove top-level .py files that shadow known packages.
+
+        Checks stdlib, common aliases, and PyPI. Runs on workspace and
+        snapshot dirs to prevent stale shadows from persisting across runs.
+        """
+        import urllib.request
+        import urllib.error
+
+        _stdlib = set(sys.stdlib_module_names)
+        _aliases = {"cv2", "PIL", "sklearn", "yaml", "bs4", "gi", "attr", "dotenv"}
+
+        for py_file in target_dir.glob("*.py"):
+            if py_file.name.startswith("__"):
+                continue
+            stem = py_file.stem.lower().replace("-", "_")
+            if stem in _stdlib or stem in _aliases:
+                py_file.unlink()
+                print(f"  [cleanup] Removed shadow file: {py_file.name}")
+                continue
+            # Quick PyPI check for anything else suspicious
+            try:
+                req = urllib.request.Request(
+                    f"https://pypi.org/pypi/{stem}/json", method="HEAD"
+                )
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    if resp.status == 200:
+                        py_file.unlink()
+                        print(f"  [cleanup] Removed shadow file: {py_file.name} (exists on PyPI)")
+            except Exception:
+                pass  # not on PyPI or network error — keep it
+
     def snapshot_workspace(label: str):
         """Save a copy of the workspace after successful issue completion."""
         snap = snapshot_dir / label
         if snap.exists():
             shutil.rmtree(snap)
         shutil.copytree(WORKSPACE_DIR, snap, ignore=shutil.ignore_patterns(".bizniz", ".snapshots", "__pycache__", "*.pyc"))
+        _nuke_shadow_files(snap)
         print(f"  [snapshot] Saved workspace state: {label}")
 
     def restore_workspace(label: str):
@@ -338,7 +372,16 @@ def main():
                 shutil.copytree(item, dest)
             else:
                 shutil.copy2(item, dest)
+        _nuke_shadow_files(WORKSPACE_DIR)
         print(f"  [snapshot] Restored workspace to: {label}")
+
+    # Clean workspace before baseline snapshot
+    _nuke_shadow_files(WORKSPACE_DIR)
+    # Also clean any existing snapshots
+    if snapshot_dir.exists():
+        for snap in snapshot_dir.iterdir():
+            if snap.is_dir():
+                _nuke_shadow_files(snap)
 
     # Save initial clean state
     snapshot_workspace("baseline")
@@ -383,6 +426,11 @@ def main():
                 )
 
                 def make_client(model_name):
+                    if model_name.startswith("claude"):
+                        return ClaudeClient(
+                            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                            model_name=model_name,
+                        )
                     cfg = ChatGPTClientConfig(default_model=model_name)
                     return OpenAIChat4GPTClient(
                         config=cfg,
@@ -404,7 +452,7 @@ def main():
                 )
 
                 # Model escalation on stall: matches bizniz.yaml repair_models
-                progression = ModelProgression(["gpt-4o", "gpt-5", "claude-sonnet", "claude-opus"])
+                progression = ModelProgression(["gpt-4o-mini", "gpt-4o", "gpt-5", "claude-sonnet", "claude-opus"])
 
                 orchestrator = CodingOrchestrator(
                     autocoder=autocoder,
