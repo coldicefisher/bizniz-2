@@ -39,6 +39,7 @@ class PreflightResult:
     issues: List[ImportIssue] = field(default_factory=list)
     stubs_created: List[AutoStub] = field(default_factory=list)
     import_rewrites: List["ImportRewrite"] = field(default_factory=list)
+    shadow_files_removed: List[str] = field(default_factory=list)
     files_checked: int = 0
 
     @property
@@ -55,6 +56,10 @@ class PreflightResult:
             lines.append(f"  Rewrote {len(self.import_rewrites)} relative import(s) to absolute:")
             for rw in self.import_rewrites:
                 lines.append(f"    ~ {rw.filepath}: {rw.old_import} → {rw.new_import}")
+        if self.shadow_files_removed:
+            lines.append(f"  Removed {len(self.shadow_files_removed)} shadow file(s):")
+            for sf in self.shadow_files_removed:
+                lines.append(f"    - {sf}")
         if self.stubs_created:
             lines.append(f"  Auto-fixed {len(self.stubs_created)} issue(s):")
             for stub in self.stubs_created:

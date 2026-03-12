@@ -45,6 +45,9 @@ class PythonPreflightValidator(BasePreflightValidator):
         # Normalize declared deps to top-level package names
         dep_names = self._normalize_dep_names(declared_dependencies)
 
+        # Remove workspace files that shadow known packages (e.g. pydantic.py)
+        self._remove_shadow_files(all_files, generated_files, dep_names, result)
+
         # Normalize all relative imports to absolute before validation
         self._normalize_relative_imports(generated_files, result)
         all_files.update(generated_files)
@@ -76,6 +79,43 @@ class PythonPreflightValidator(BasePreflightValidator):
                 all_files[stub.filepath] = stub.content
 
         return result
+
+    def _remove_shadow_files(
+        self,
+        all_files: Dict[str, str],
+        generated_files: Dict[str, str],
+        dep_names: Set[str],
+        result: "PreflightResult",
+    ) -> None:
+        """Detect and remove files that shadow known packages.
+
+        A top-level file like ``pydantic.py`` shadows the real pydantic
+        package and causes cascading ImportErrors.  This removes such files
+        from both the file maps and the workspace on disk.
+        """
+        shadow_candidates = []
+        for filepath in list(all_files.keys()):
+            # Only top-level .py files can shadow packages
+            if "/" in filepath or not filepath.endswith(".py"):
+                continue
+            stem = filepath[:-3]  # strip .py
+            stem_lower = stem.lower().replace("-", "_")
+            if (
+                stem in _STDLIB_MODULES
+                or stem in _COMMON_ALIASES
+                or stem_lower in dep_names
+            ):
+                shadow_candidates.append(filepath)
+
+        for filepath in shadow_candidates:
+            all_files.pop(filepath, None)
+            generated_files.pop(filepath, None)
+            result.shadow_files_removed.append(filepath)
+            # Remove from workspace on disk
+            try:
+                self._workspace.delete_file(filepath)
+            except Exception:
+                pass  # best effort — file may not exist on disk
 
     def _get_workspace_files(self) -> Dict[str, str]:
         """Get all existing files in the workspace as {path: content}."""

@@ -404,7 +404,7 @@ def main():
                 )
 
                 # Model escalation on stall: matches bizniz.yaml repair_models
-                progression = ModelProgression(["gpt-4o", "gpt-5"])
+                progression = ModelProgression(["gpt-4o", "gpt-5", "claude-sonnet", "claude-opus"])
 
                 orchestrator = CodingOrchestrator(
                     autocoder=autocoder,
