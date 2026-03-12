@@ -313,34 +313,29 @@ def main():
     def _nuke_shadow_files(target_dir: Path):
         """Remove top-level .py files that shadow known packages.
 
-        Checks stdlib, common aliases, and PyPI. Runs on workspace and
-        snapshot dirs to prevent stale shadows from persisting across runs.
+        Checks stdlib and common aliases only (no network calls).
+        The preflight validator handles dynamic PyPI checks at runtime.
         """
-        import urllib.request
-        import urllib.error
-
         _stdlib = set(sys.stdlib_module_names)
         _aliases = {"cv2", "PIL", "sklearn", "yaml", "bs4", "gi", "attr", "dotenv"}
+        # Common third-party packages that agents frequently shadow
+        _common_pkgs = {
+            "pydantic", "fastapi", "flask", "django", "sqlalchemy", "celery",
+            "redis", "requests", "httpx", "uvicorn", "starlette", "pytest",
+            "numpy", "pandas", "click", "rich", "boto3", "stripe",
+        }
+        _skip = {"conftest", "sitecustomize", "setup", "manage", "app", "main"}
 
         for py_file in target_dir.glob("*.py"):
             if py_file.name.startswith("__"):
                 continue
-            stem = py_file.stem.lower().replace("-", "_")
-            if stem in _stdlib or stem in _aliases:
+            stem = py_file.stem
+            stem_lower = stem.lower().replace("-", "_")
+            if stem_lower in _skip:
+                continue
+            if stem in _stdlib or stem in _aliases or stem_lower in _common_pkgs:
                 py_file.unlink()
                 print(f"  [cleanup] Removed shadow file: {py_file.name}")
-                continue
-            # Quick PyPI check for anything else suspicious
-            try:
-                req = urllib.request.Request(
-                    f"https://pypi.org/pypi/{stem}/json", method="HEAD"
-                )
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    if resp.status == 200:
-                        py_file.unlink()
-                        print(f"  [cleanup] Removed shadow file: {py_file.name} (exists on PyPI)")
-            except Exception:
-                pass  # not on PyPI or network error — keep it
 
     def _sanitize_requirements(target_dir: Path):
         """Remove invalid entries from requirements.txt.
