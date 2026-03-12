@@ -34,7 +34,7 @@ load_dotenv()
 PROJECT_ROOT = Path("/home/jamey/bizniz_projects/pet_groomer")
 WORKSPACE_DIR = PROJECT_ROOT / "backend"
 DOCKER_IMAGE = "pet_groomer-backend:dev"
-PROBLEM_ID = 8  # Issues with test_setup_hint + dependencies + model escalation
+PROBLEM_ID = 1  # Fresh engineer analysis with architecture context
 MAX_FAILURES = 3  # Stop after this many failed issues
 MAX_ITERATIONS = 10  # Per-issue iteration cap
 
@@ -470,13 +470,6 @@ def main():
             status_cb = make_status_callback(issue_metrics)
 
             try:
-                # Create fresh client per issue
-                client_config = ChatGPTClientConfig(default_model=model)
-                client = OpenAIChat4GPTClient(
-                    config=client_config,
-                    api_key=os.environ["OPENAI_API_KEY"],
-                )
-
                 def make_client(model_name):
                     if model_name.startswith("claude"):
                         return ClaudeClient(
@@ -488,6 +481,9 @@ def main():
                         config=cfg,
                         api_key=os.environ["OPENAI_API_KEY"],
                     )
+
+                # Create fresh client per issue
+                client = make_client(model)
 
                 autocoder = Autocoder(
                     client=client,

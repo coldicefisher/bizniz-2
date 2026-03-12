@@ -154,7 +154,8 @@ class AutoEngineer(BaseAIAgent):
         )
         refined_raw = self._call_ai_for_analysis(refined_prompt)
 
-        # Replace issues with architecture-aware ones (keep requirements/use cases)
+        # Delete draft issues from DB before creating refined ones
+        self._workspace.db.delete_issues(problem_id)
         analysis.issues = []
         for issue in refined_raw.get("issues", []):
             target_files = issue.get("target_files", [])

@@ -302,6 +302,14 @@ class WorkspaceDB:
         )
         self._conn.commit()
 
+    def delete_issues(self, problem_id: int):
+        """Delete all issues for a given problem_id (used to clear draft issues before refinement)."""
+        self._conn.execute(
+            "DELETE FROM issues WHERE problem_id = ?",
+            (problem_id,),
+        )
+        self._conn.commit()
+
     def get_problem_for_issue(self, issue_id: int) -> Optional[str]:
         cur = self._conn.execute(
             """SELECT p.statement FROM problems p

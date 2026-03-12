@@ -162,6 +162,14 @@ class WorkspaceScope:
         )
         self._commit()
 
+    def delete_issues(self, problem_id: int):
+        """Delete all issues for a given problem_id (used to clear draft issues before refinement)."""
+        self._execute(
+            "DELETE FROM issues WHERE problem_id = ? AND project_id = ? AND service_name = ?",
+            (problem_id, self._project_id, self._service_name),
+        )
+        self._commit()
+
     def get_problem_for_issue(self, issue_id: int) -> Optional[str]:
         cur = self._execute(
             """SELECT p.statement FROM problems p

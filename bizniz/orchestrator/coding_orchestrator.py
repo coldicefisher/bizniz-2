@@ -317,7 +317,6 @@ class CodingOrchestrator:
                      or "exited with code 4" in eval_result.error.message)
             )
             if is_collection_error:
-                log("Orchestrator: test collection error — regenerating tests...")
                 error_detail = ""
                 if eval_result.error and eval_result.error.traceback:
                     error_detail = eval_result.error.traceback
@@ -328,6 +327,38 @@ class CodingOrchestrator:
                 elif eval_result.stderr and eval_result.stderr not in error_detail:
                     error_detail += f"\nstderr: {eval_result.stderr}"
 
+                # Config file parse error — repair the source, not the tests
+                is_config_error = (
+                    "exited with code 4" in (eval_result.error.message or "")
+                    and any(
+                        cf in error_detail
+                        for cf in ("pyproject.toml", "setup.cfg", "pytest.ini", "tox.ini")
+                    )
+                )
+                if is_config_error:
+                    log("Orchestrator: config file parse error — repairing source...")
+                    try:
+                        repair_result = self._autocoder.repair(
+                            code=current_code,
+                            error_message=(
+                                f"A config file has a syntax/parse error that prevents pytest "
+                                f"from starting. Fix the broken file.\n\n"
+                                f"FULL ERROR:\n{error_detail}"
+                            ),
+                            code_filename=code_filename,
+                        )
+                        current_code = repair_result.code
+                        self._workspace.write_file(path=code_filename, content=current_code)
+                        self._install_project_editable(log)
+                        stale_count = 0
+                        previous_code_hash = None
+                        continue
+                    except AIInsufficientFunds:
+                        raise
+                    except Exception as e:
+                        log(f"Orchestrator: config repair failed ({type(e).__name__}: {e})")
+
+                log("Orchestrator: test collection error — regenerating tests...")
                 regen_prompt = (
                     f"{prompt}\n\n"
                     f"Here is the current implementation that tests must be written for:\n"
@@ -742,6 +773,47 @@ class CodingOrchestrator:
                     log("Orchestrator: fixed file/directory collision — retrying...")
                     collection_error_count = 0
                     continue
+
+                # Config file parse error (e.g. malformed pyproject.toml, setup.cfg)
+                # — pytest can't even start. Repair the config file, not the tests.
+                is_config_error = (
+                    "exited with code 4" in (eval_result.error.message or "")
+                    and any(
+                        cf in error_detail
+                        for cf in ("pyproject.toml", "setup.cfg", "pytest.ini", "tox.ini")
+                    )
+                )
+                if is_config_error and collection_error_count <= 3:
+                    log("Orchestrator: config file parse error — repairing source...")
+                    all_files = {**current_files}
+                    for fp, tests in current_test_files.items():
+                        all_files[fp] = tests
+                    try:
+                        repaired = self._autocoder.repair_multi(
+                            current_files=all_files,
+                            error_message=(
+                                f"A config file has a syntax/parse error that prevents pytest "
+                                f"from starting. Fix the broken file.\n\n"
+                                f"FULL ERROR:\n{error_detail}"
+                            ),
+                            architecture_context=architecture_context,
+                        )
+                        if repaired.dependencies:
+                            self._install_declared_dependencies(repaired.dependencies, log)
+                        for ch in repaired.changes:
+                            if ch.filepath in current_test_files:
+                                current_test_files[ch.filepath] = ch.code
+                            else:
+                                current_files[ch.filepath] = ch.code
+                                self._workspace.write_file(path=ch.filepath, content=ch.code)
+                        self._install_project_editable(log)
+                        stale_count = 0
+                        previous_code_hash = None
+                        continue
+                    except AIInsufficientFunds:
+                        raise
+                    except Exception as e:
+                        log(f"Orchestrator: config repair failed ({type(e).__name__}: {e})")
 
                 # If collection error involves our source files, repair the source
                 # code instead of just regenerating tests. Detects: ImportError,
