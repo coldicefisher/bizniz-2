@@ -2298,6 +2298,8 @@ class CodingOrchestrator:
                 f'"names": {[n for n in names]!r}, '
                 f'"error": str(e)}})'
             )
+            lines.append("except Exception:")
+            lines.append("    pass  # runtime error in module body, not an import issue")
 
         lines.append("print(json.dumps(failures))")
         script = "\n".join(lines)
@@ -2307,15 +2309,20 @@ class CodingOrchestrator:
             capture_output=True, text=True, timeout=30,
         )
 
-        if proc.returncode != 0:
-            # Script itself errored — log and return empty
+        # Try to parse results even if return code is non-zero —
+        # the script may have printed partial results before an error.
+        stdout = proc.stdout.strip() if proc.stdout else ""
+        if proc.returncode != 0 and not stdout:
             log(f"Orchestrator: container import check script error: {proc.stderr[:200]}")
             return []
 
         try:
-            return _json.loads(proc.stdout.strip())
-        except _json.JSONDecodeError:
-            log("Orchestrator: container import check returned invalid JSON")
+            return _json.loads(stdout)
+        except (_json.JSONDecodeError, ValueError):
+            if proc.returncode != 0:
+                log(f"Orchestrator: container import check script error: {proc.stderr[:200]}")
+            else:
+                log("Orchestrator: container import check returned invalid JSON")
             return []
 
     def _build_workspace_export_index(self) -> dict:
@@ -2535,9 +2542,9 @@ class CodingOrchestrator:
             )
             for ch in repaired.changes:
                 if ch.filepath in current_files:
-                    current_files[ch.filepath] = ch.content
+                    current_files[ch.filepath] = ch.code
                     self._workspace.write_file(
-                        path=ch.filepath, content=ch.content,
+                        path=ch.filepath, content=ch.code,
                     )
                     log(f"Orchestrator: agent resolved import in {ch.filepath}")
         except Exception as exc:
