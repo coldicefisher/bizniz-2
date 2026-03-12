@@ -40,6 +40,7 @@ class PreflightResult:
     stubs_created: List[AutoStub] = field(default_factory=list)
     import_rewrites: List["ImportRewrite"] = field(default_factory=list)
     shadow_files_removed: List[str] = field(default_factory=list)
+    packages_to_install: List[str] = field(default_factory=list)
     files_checked: int = 0
 
     @property
@@ -56,6 +57,8 @@ class PreflightResult:
             lines.append(f"  Rewrote {len(self.import_rewrites)} relative import(s) to absolute:")
             for rw in self.import_rewrites:
                 lines.append(f"    ~ {rw.filepath}: {rw.old_import} → {rw.new_import}")
+        if self.packages_to_install:
+            lines.append(f"  Will install {len(self.packages_to_install)} package(s): {', '.join(self.packages_to_install)}")
         if self.shadow_files_removed:
             lines.append(f"  Removed {len(self.shadow_files_removed)} shadow file(s):")
             for sf in self.shadow_files_removed:

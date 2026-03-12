@@ -1,7 +1,7 @@
 """Tests for Python pre-flight validator."""
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from bizniz.preflight.python_validator import PythonPreflightValidator
 from bizniz.workspace.base_workspace import BaseWorkspace
@@ -18,6 +18,15 @@ def workspace():
 @pytest.fixture
 def validator(workspace):
     return PythonPreflightValidator(workspace)
+
+
+@pytest.fixture(autouse=True)
+def mock_pypi():
+    """Disable PyPI network calls in all tests by default."""
+    with patch(
+        "bizniz.preflight.python_validator._pypi_package_exists", return_value=False
+    ) as m:
+        yield m
 
 
 class TestImportResolution:
@@ -276,3 +285,70 @@ class TestPreflightResult:
         result = validator.validate(files, [])
         stub_paths = [s.filepath for s in result.stubs_created]
         assert "yaml.py" not in stub_paths
+
+
+class TestPyPILookup:
+
+    def test_pypi_package_added_to_install(self, validator, mock_pypi):
+        """Package found on PyPI gets added to packages_to_install, not stubbed."""
+        mock_pypi.return_value = True
+        files = {
+            "app.py": "from stripe import Charge\n",
+        }
+        result = validator.validate(files, [])
+        assert "stripe" in result.packages_to_install
+        stub_paths = [s.filepath for s in result.stubs_created]
+        assert "stripe.py" not in stub_paths
+
+    def test_pypi_lookup_failure_falls_back_to_stub(self, validator, mock_pypi):
+        """When PyPI lookup fails, fall back to stubbing."""
+        mock_pypi.return_value = None  # network error
+        files = {
+            "app.py": "from somepkg import Foo\n",
+        }
+        result = validator.validate(files, [])
+        assert len(result.packages_to_install) == 0
+        assert len(result.stubs_created) >= 1
+
+    def test_ambiguous_name_flagged_not_installed(self, validator, mock_pypi):
+        """Ambiguous name (common local module name) on PyPI gets flagged, not installed."""
+        mock_pypi.return_value = True
+        files = {
+            "app.py": "from models import User\n",
+        }
+        result = validator.validate(files, [])
+        assert "models" not in result.packages_to_install
+        assert any(i.issue == "ambiguous_import" for i in result.issues)
+
+    def test_ambiguous_name_not_on_pypi_gets_stubbed(self, validator, mock_pypi):
+        """Ambiguous name not on PyPI gets stubbed normally."""
+        mock_pypi.return_value = False
+        files = {
+            "app.py": "from models import User\n",
+        }
+        result = validator.validate(files, [])
+        assert len(result.stubs_created) >= 1
+        stub_paths = [s.filepath for s in result.stubs_created]
+        assert "models.py" in stub_paths
+
+    def test_packages_to_install_deduped(self, validator, mock_pypi):
+        """Multiple files importing same PyPI package only lists it once."""
+        mock_pypi.return_value = True
+        files = {
+            "app.py": "from stripe import Charge\n",
+            "billing.py": "from stripe import Customer\n",
+        }
+        result = validator.validate(files, [])
+        assert result.packages_to_install.count("stripe") == 1
+
+    def test_pydantic_not_stubbed_when_detected_via_pypi(self, validator, mock_pypi):
+        """pydantic import gets added to packages_to_install, never stubbed."""
+        mock_pypi.return_value = True
+        files = {
+            "myapp/__init__.py": "",
+            "myapp/models.py": "from pydantic import BaseModel\n",
+        }
+        result = validator.validate(files, [])
+        assert "pydantic" in result.packages_to_install
+        stub_paths = [s.filepath for s in result.stubs_created]
+        assert "pydantic.py" not in stub_paths

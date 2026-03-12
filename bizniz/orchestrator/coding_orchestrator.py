@@ -2228,7 +2228,18 @@ class CodingOrchestrator:
             self._workspace.write_file(path=stub.filepath, content=stub.content)
             current_files[stub.filepath] = stub.content
 
-        if result.import_rewrites or result.stubs_created or result.issues or result.shadow_files_removed:
+        # Install packages identified by PyPI lookup
+        if result.packages_to_install:
+            env = self._find_installable_environment()
+            if env:
+                for pkg in result.packages_to_install:
+                    try:
+                        env.install_packages([pkg])
+                        log(f"pip installed {pkg} (detected via PyPI)")
+                    except Exception:
+                        log(f"failed to pip install {pkg}")
+
+        if result.import_rewrites or result.stubs_created or result.issues or result.shadow_files_removed or result.packages_to_install:
             log(result.summary())
 
         return current_files

@@ -2,6 +2,10 @@
 
 import ast
 import sys
+import urllib.request
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Set, Tuple
 
@@ -25,16 +29,32 @@ _COMMON_ALIASES: Dict[str, str] = {
     "dotenv": "python-dotenv",
 }
 
-# Well-known third-party packages whose import name matches their pip name.
-# These should never be auto-stubbed — they just need to be pip-installed.
-_WELL_KNOWN_PACKAGES: Set[str] = {
-    "pydantic", "fastapi", "flask", "django", "sqlalchemy", "celery",
-    "redis", "requests", "httpx", "uvicorn", "gunicorn", "starlette",
-    "pytest", "numpy", "pandas", "scipy", "matplotlib", "torch",
-    "tensorflow", "alembic", "jinja2", "click", "typer", "rich",
-    "boto3", "stripe", "jwt", "passlib", "bcrypt", "cryptography",
-    "aiohttp", "websockets", "motor", "pymongo", "psycopg2", "asyncpg",
+# Single-word names that are too generic to trust as PyPI packages.
+# These are almost always local modules the LLM forgot to generate.
+_AMBIGUOUS_NAMES: Set[str] = {
+    "utils", "models", "config", "settings", "helpers", "common",
+    "core", "base", "main", "app", "db", "api", "tests", "test",
+    "services", "schemas", "routes", "views", "tasks", "data",
+    "errors", "exceptions", "constants", "types", "enums",
 }
+
+_PYPI_TIMEOUT = 3  # seconds
+
+
+@lru_cache(maxsize=256)
+def _pypi_package_exists(package_name: str) -> bool | None:
+    """Check if a package exists on PyPI. Returns True/False, or None on error."""
+    url = f"https://pypi.org/pypi/{package_name}/json"
+    req = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=_PYPI_TIMEOUT) as resp:
+            return resp.status == 200
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return False
+        return None
+    except Exception:
+        return None
 
 
 class PythonPreflightValidator(BasePreflightValidator):
@@ -63,6 +83,8 @@ class PythonPreflightValidator(BasePreflightValidator):
         self._normalize_relative_imports(generated_files, result)
         all_files.update(generated_files)
 
+        # Pass 1: collect all unresolved imports
+        unresolved: List[ImportIssue] = []
         for filepath, content in generated_files.items():
             if not filepath.endswith(".py"):
                 continue
@@ -74,13 +96,59 @@ class PythonPreflightValidator(BasePreflightValidator):
                     filepath, module, is_relative, level, all_files, dep_names
                 )
                 if issue:
-                    stub = self._auto_stub(issue, all_files, dep_names)
-                    if stub:
-                        result.stubs_created.append(stub)
-                        # Add stub to all_files so subsequent checks see it
-                        all_files[stub.filepath] = stub.content
-                    else:
-                        result.issues.append(issue)
+                    unresolved.append(issue)
+
+        # Pass 2: check PyPI for unresolved absolute imports, then stub/install
+        pypi_candidates: Set[str] = set()
+        for issue in unresolved:
+            if issue.issue == "missing_module" and not issue.import_name.startswith("."):
+                top = issue.import_name.split(".")[0].lower()
+                if top not in _AMBIGUOUS_NAMES:
+                    pypi_candidates.add(issue.import_name.split(".")[0])
+
+        pypi_results = self._check_pypi_batch(pypi_candidates) if pypi_candidates else {}
+
+        # Also check ambiguous names against PyPI (to distinguish local vs real pkg)
+        ambiguous_candidates: Set[str] = set()
+        for issue in unresolved:
+            if issue.issue == "missing_module" and not issue.import_name.startswith("."):
+                top = issue.import_name.split(".")[0].lower()
+                if top in _AMBIGUOUS_NAMES:
+                    ambiguous_candidates.add(issue.import_name.split(".")[0])
+        if ambiguous_candidates:
+            ambiguous_pypi = self._check_pypi_batch(ambiguous_candidates)
+            pypi_results.update(ambiguous_pypi)
+
+        install_set: Set[str] = set()
+
+        for issue in unresolved:
+            top = issue.import_name.lstrip(".").split(".")[0]
+            top_lower = top.lower()
+
+            # PyPI-confirmed package, not ambiguous — auto-install
+            if top in pypi_results and pypi_results[top] and top_lower not in _AMBIGUOUS_NAMES:
+                if top_lower not in install_set:
+                    result.packages_to_install.append(top)
+                    install_set.add(top_lower)
+                continue
+
+            # Ambiguous name that exists on PyPI — flag for agent
+            if top_lower in _AMBIGUOUS_NAMES and top in pypi_results and pypi_results[top]:
+                issue.issue = "ambiguous_import"
+                issue.detail = (
+                    f"'{top}' exists on PyPI but is also a common local module name. "
+                    "Verify whether this is a third-party package or a missing local module."
+                )
+                result.issues.append(issue)
+                continue
+
+            # Default: try to auto-stub
+            stub = self._auto_stub(issue, all_files, dep_names)
+            if stub:
+                result.stubs_created.append(stub)
+                all_files[stub.filepath] = stub.content
+            else:
+                result.issues.append(issue)
 
         # Check for missing __init__.py files
         init_stubs = self._check_init_files(all_files)
@@ -90,6 +158,23 @@ class PythonPreflightValidator(BasePreflightValidator):
                 all_files[stub.filepath] = stub.content
 
         return result
+
+    def _check_pypi_batch(self, package_names: Set[str]) -> Dict[str, bool]:
+        """Check multiple packages against PyPI in parallel."""
+        results: Dict[str, bool] = {}
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {
+                executor.submit(_pypi_package_exists, name): name
+                for name in package_names
+            }
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    exists = future.result()
+                    results[name] = bool(exists)
+                except Exception:
+                    results[name] = False
+        return results
 
     def _remove_shadow_files(
         self,
@@ -114,7 +199,6 @@ class PythonPreflightValidator(BasePreflightValidator):
             if (
                 stem in _STDLIB_MODULES
                 or stem in _COMMON_ALIASES
-                or stem_lower in _WELL_KNOWN_PACKAGES
                 or stem_lower in dep_names
             ):
                 shadow_candidates.append(filepath)
@@ -333,10 +417,6 @@ class PythonPreflightValidator(BasePreflightValidator):
         if top_level in _COMMON_ALIASES:
             return None
 
-        # Well-known third-party package
-        if top_level.lower().replace("-", "_") in _WELL_KNOWN_PACKAGES:
-            return None
-
         # Workspace module — the exact module must resolve
         parts = module.split(".")
 
@@ -409,7 +489,6 @@ class PythonPreflightValidator(BasePreflightValidator):
             if (
                 top_level in _STDLIB_MODULES
                 or top_level in _COMMON_ALIASES
-                or top_lower in _WELL_KNOWN_PACKAGES
                 or (dep_names and top_lower in dep_names)
             ):
                 return None
