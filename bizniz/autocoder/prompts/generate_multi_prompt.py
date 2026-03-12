@@ -14,7 +14,7 @@ RULES:
   Example: pet_groomer/models/service.py should begin with a docstring like
   "pet_groomer.models.service -- Service domain model."
   This tells other agents exactly how to import from this module.
-- Use relative imports within the package (e.g. `from .models import Expense`).
+- Use ABSOLUTE imports (e.g. `from pet_groomer.models import Expense`), never relative imports.
 - Ensure __init__.py files export the public API.
 - Write clean Python with type hints. No test code in source files.
 - The "changes" array MUST be non-empty when you submit. Include every target file.

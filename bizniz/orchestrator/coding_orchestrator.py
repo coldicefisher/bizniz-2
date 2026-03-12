@@ -491,6 +491,11 @@ class CodingOrchestrator:
         if manifest:
             extra_context += f"\n\nWORKSPACE MANIFEST (existing files and their exports):\n{manifest}\n"
 
+        # ── Import map: exact import statements for every workspace module ────
+        import_map = self._build_import_map()
+        if import_map:
+            extra_context += f"\n\nIMPORT MAP (use these EXACT import paths — do NOT guess):\n{import_map}\n"
+
         # ── Enrich test setup hints from actual workspace ────────────────────
         # Scans disk for app factories and routers, appending verified import
         # paths so the autotester uses real imports instead of guessing.
@@ -1927,6 +1932,69 @@ class CodingOrchestrator:
                         signatures.append(target.id)
 
         return signatures[:10]
+
+    def _build_import_map(self) -> str:
+        """Build explicit import statements for every workspace module.
+
+        Returns a string like:
+          from pet_groomer.models.service import Service
+          from pet_groomer.errors import ServiceNotFoundError, SlotConflictError
+          from pet_groomer.repositories.in_memory_services import InMemoryServicesRepository
+
+        This eliminates import guessing — agents use these exact paths.
+        """
+        import ast
+
+        lines = []
+        try:
+            rel_files = self._workspace.list_relative_files()
+        except Exception:
+            return ""
+
+        for rel_path in sorted(str(p) for p in rel_files):
+            if rel_path.startswith(".") or "__pycache__" in rel_path:
+                continue
+            if not rel_path.endswith(".py"):
+                continue
+            # Skip test files, __init__.py, and config files
+            if rel_path.startswith("tests") or rel_path == "conftest.py":
+                continue
+            if rel_path.endswith("__init__.py"):
+                continue
+
+            # Convert filepath to module path
+            module = rel_path.replace("/", ".").replace(".py", "")
+
+            try:
+                content = self._workspace.read_file(path=rel_path)
+            except Exception:
+                continue
+
+            if not content or not content.strip():
+                continue
+
+            # Extract top-level names
+            try:
+                tree = ast.parse(content, filename=rel_path)
+            except SyntaxError:
+                continue
+
+            names = []
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if not node.name.startswith("_"):
+                        names.append(node.name)
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                            names.append(target.id)
+
+            if names:
+                lines.append(f"  from {module} import {', '.join(names[:10])}")
+            else:
+                lines.append(f"  import {module}")
+
+        return "\n".join(lines) if lines else ""
 
     def _enrich_test_setup_hint(
         self,
