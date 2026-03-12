@@ -406,6 +406,25 @@ def main():
         _nuke_shadow_files(WORKSPACE_DIR)
         print(f"  [snapshot] Restored workspace to: {label}")
 
+    # Nuke all stale bizniz-pytest containers before starting
+    import subprocess as _sp
+    try:
+        result = _sp.run(
+            ["docker", "ps", "-a", "--filter", "name=bizniz-pytest-",
+             "--format", "{{.ID}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        container_ids = result.stdout.strip().split("\n")
+        container_ids = [c for c in container_ids if c]
+        if container_ids:
+            _sp.run(
+                ["docker", "rm", "-f"] + container_ids,
+                capture_output=True, timeout=30,
+            )
+            print(f"  [cleanup] Removed {len(container_ids)} stale container(s)")
+    except Exception:
+        pass
+
     # Clean workspace before baseline snapshot
     _nuke_shadow_files(WORKSPACE_DIR)
     _sanitize_requirements(WORKSPACE_DIR)
