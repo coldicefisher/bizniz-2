@@ -21,6 +21,10 @@ def mock_autocoder():
     ac = MagicMock(spec=Autocoder)
     ac.generate_only.return_value = AutocoderProcessResult(changes=[FileChange(filepath="add.py", code=GENERATED_CODE, action="create")])
     ac.repair.return_value = AutocoderProcessResult(changes=[FileChange(filepath="add.py", code=GENERATED_CODE + "# repaired\n", action="modify")])
+    ac.repair_multi_inline.return_value = AutocoderProcessResult(
+        changes=[FileChange(filepath="pkg/models.py", code="# repaired\n", action="modify")],
+        dependencies=[],
+    )
     return ac
 
 

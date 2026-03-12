@@ -66,6 +66,12 @@ def mock_autocoder():
             FileChange(filepath="pkg/models.py", code=CODE_MODELS + "# fixed\n", action="modify"),
         ]
     )
+    ac.repair_multi_inline.return_value = AutocoderProcessResult(
+        changes=[
+            FileChange(filepath="pkg/models.py", code=CODE_MODELS + "# fixed\n", action="modify"),
+        ],
+        dependencies=[],
+    )
     return ac
 
 
@@ -206,7 +212,7 @@ class TestRunMultiRepair:
 
         assert result.success is True
         assert result.iterations == 2
-        mock_autocoder.repair_multi.assert_called_once()
+        mock_autocoder.repair_multi_inline.assert_called_once()
 
     def test_raises_after_max_iterations(self, orchestrator, mock_test_env):
         mock_test_env.execute.return_value = ExecutionEnvironmentResult(
@@ -379,4 +385,4 @@ class TestRegressionDetection:
             test_files=TEST_FILES,
         )
 
-        assert mock_autocoder.repair_multi.call_count >= 1
+        assert mock_autocoder.repair_multi_inline.call_count >= 1

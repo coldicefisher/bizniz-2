@@ -6,7 +6,7 @@ across the pipeline.
 """
 
 
-from bizniz.clients.errors import AIInsufficientFunds
+from bizniz.clients.errors import AIInsufficientFunds, AIContextLengthExceeded
 
 
 class ClaudeClientError(Exception):
@@ -31,4 +31,9 @@ class ClaudeAuthError(ClaudeClientError):
 
 class ClaudeInvalidRequest(ClaudeClientError):
     """Bad request — malformed input, too many tokens, etc."""
+    pass
+
+
+class ClaudeContextLengthExceeded(ClaudeInvalidRequest, AIContextLengthExceeded):
+    """Input exceeds the model's context window."""
     pass

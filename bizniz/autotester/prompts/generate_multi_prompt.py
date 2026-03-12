@@ -4,24 +4,30 @@ from bizniz.tools.discovery_prompt import DISCOVERY_TOOLS_PROMPT
 _GENERATE_MULTI_SYSTEM_PROMPT_PYTHON = """You write pytest test suites for multi-file Python projects.
 
 RULES:
+- Test stub files already exist with correct imports and a placeholder test. REPLACE the
+  placeholder with real tests, keeping the existing imports intact.
 - pytest conventions: test functions named test_*, fixtures where appropriate.
 - Cover happy path, edge cases, and error cases.
-- Use standard imports relative to the project root / package name.
+- Use the imports already in the stub file. Do NOT change import paths.
 - All test code must be complete and runnable as-is with `pytest`.
 - Always include `import pytest` at the top.
-- Use discovery tools to read source code before writing tests.
+- Use discovery tools to read the source code and test stub before writing tests.
+- Do NOT create new test files. Only modify the test files listed in the issue.
 - When you are ready to submit, use action "submit_tests" with your test files.
 """ + DISCOVERY_TOOLS_PROMPT
 
 _GENERATE_MULTI_SYSTEM_PROMPT_TYPESCRIPT = """You write Jest test suites for TypeScript/React projects.
 
 RULES:
+- Test stub files already exist with correct imports and a placeholder test. REPLACE the
+  placeholder with real tests, keeping the existing imports intact.
 - Jest conventions: describe/it or test() blocks.
 - Test files must end in .test.ts or .test.tsx.
 - Cover happy path, edge cases, and error cases.
-- Use standard ES module imports relative to the project root.
+- Use the imports already in the stub file. Do NOT change import paths.
 - All test code must be complete and runnable as-is with `npx jest`.
-- Use discovery tools to read source code before writing tests.
+- Use discovery tools to read the source code and test stub before writing tests.
+- Do NOT create new test files. Only modify the test files listed in the issue.
 - When you are ready to submit, use action "submit_tests" with your test files.
 """ + DISCOVERY_TOOLS_PROMPT
 

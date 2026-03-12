@@ -502,7 +502,7 @@ def main():
                 )
 
                 # Model escalation on stall: matches bizniz.yaml repair_models
-                progression = ModelProgression(["claude-sonnet", "claude-opus"])
+                progression = ModelProgression(["claude-sonnet"])
 
                 orchestrator = CodingOrchestrator(
                     autocoder=autocoder,
@@ -514,7 +514,7 @@ def main():
                     model_progression=progression,
                     max_iterations=MAX_ITERATIONS,
                     stall_threshold=3,
-                    agentic_debug_threshold=5,
+                    agentic_debug_threshold=2,
                     on_status_message=status_cb,
                 )
 

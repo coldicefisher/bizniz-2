@@ -5,23 +5,20 @@ models:
   - gpt-4o-mini
   - gpt-4o
   - claude-sonnet
-  - claude-opus
 autocoder_models:
   - gpt-4o-mini
   - gpt-4o
   - claude-sonnet
-  - claude-opus
 autotester_models:
   - gpt-4o-mini
   - gpt-4o
   - claude-sonnet
-  - claude-opus
 repair_models:
   - gpt-4o
   - claude-sonnet
-  - claude-opus
 stall_threshold: 3
-agentic_debug_threshold: 5
+agentic_debug_threshold: 2
+enable_agentic_debug: false
 layered_generation: true
 parallel_services: true
 max_service_workers: 4

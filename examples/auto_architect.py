@@ -145,6 +145,7 @@ def _make_orchestrator(config, workspace, on_status_message=None, suggested_mode
         max_iterations=config.max_iterations,
         on_status_message=on_status_message,
         language=language,
+        enable_agentic_debug=config.enable_agentic_debug,
     )
 
 

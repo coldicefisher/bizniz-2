@@ -194,6 +194,15 @@ class AutoEngineer(BaseAIAgent):
             log("AutoEngineer: creating package structure...")
             self.create_package_structure(plan)
 
+        # Step 5: Scaffold stub files from architecture plan
+        from bizniz.engineer.scaffold import scaffold_from_plan
+        scaffold_from_plan(
+            workspace=self._workspace,
+            plan=plan,
+            issues=analysis.issues,
+            on_status_message=self._on_status_message,
+        )
+
         log(
             f"AutoEngineer: analysis complete — "
             f"{len(analysis.requirements)} requirements, "
@@ -249,6 +258,7 @@ class AutoEngineer(BaseAIAgent):
 
         # Load architecture context if available
         arch_context = ""
+        dependency_edges = []
         plan_row = self._workspace.db.get_architecture_plan(row["problem_id"])
         if plan_row:
             try:
@@ -257,6 +267,7 @@ class AutoEngineer(BaseAIAgent):
                 plan_data.pop("problem_id", None)
                 plan = ArchitecturePlan(problem_id=row["problem_id"], **plan_data)
                 arch_context = self.format_architecture_context(plan)
+                dependency_edges = plan.dependencies or []
             except Exception:
                 pass
 
@@ -272,6 +283,7 @@ class AutoEngineer(BaseAIAgent):
             strategy=CodingStrategy.CODE_FIRST,
             workspace_context=workspace_context,
             log=log,
+            dependency_edges=dependency_edges,
         )
 
         if result.success:
@@ -288,6 +300,7 @@ class AutoEngineer(BaseAIAgent):
             strategy=CodingStrategy.TDD,
             workspace_context=workspace_context,
             log=log,
+            dependency_edges=dependency_edges,
         )
 
         if result.success:
@@ -307,6 +320,7 @@ class AutoEngineer(BaseAIAgent):
                 workspace_context=workspace_context,
                 log=log,
                 prompt_override=reprompted,
+                dependency_edges=dependency_edges,
             )
             if result.success:
                 return self._finalize_dispatch(issue_id, result, log)
@@ -325,6 +339,7 @@ class AutoEngineer(BaseAIAgent):
                 workspace_context=workspace_context,
                 log=log,
                 prompt_override=reduced,
+                dependency_edges=dependency_edges,
             )
             if result.success:
                 return self._finalize_dispatch(issue_id, result, log)
@@ -335,7 +350,7 @@ class AutoEngineer(BaseAIAgent):
     def _run_orchestrator(
         self, row, target_files, test_files, arch_context,
         suggested_model, strategy, workspace_context, log,
-        prompt_override=None,
+        prompt_override=None, dependency_edges=None,
     ) -> OrchestratorResult:
         """Run the orchestrator with the given strategy and return the result."""
         orchestrator = self._orchestrator_factory(suggested_model=suggested_model)
@@ -357,6 +372,7 @@ class AutoEngineer(BaseAIAgent):
                 initial_model=suggested_model,
                 strategy=strategy,
                 workspace_context=workspace_context,
+                dependency_edges=dependency_edges,
             )
         except OrchestratorMaxIterationsError:
             log(f"AutoEngineer: hit max iterations with {strategy.value}")
@@ -437,7 +453,7 @@ class AutoEngineer(BaseAIAgent):
                 strategy_used=strategy_used,
             )
             text, _, _ = self._client.get_text(
-                messages=[Message(role="user", content=prompt)],
+                messages=[{"role": "user", "content": prompt}],
                 use_message_history=False,
             )
             if text and text.strip():
@@ -467,7 +483,7 @@ class AutoEngineer(BaseAIAgent):
                 workspace_files=workspace_files,
             )
             text, _, _ = self._client.get_text(
-                messages=[Message(role="user", content=prompt)],
+                messages=[{"role": "user", "content": prompt}],
                 use_message_history=False,
             )
             if text and text.strip():
@@ -646,6 +662,7 @@ class AutoEngineer(BaseAIAgent):
             f"{len(all_test_files)} test file(s)"
         )
 
+        dep_edges = analysis.architecture.dependencies if analysis.architecture else []
         result = self._run_orchestrator(
             row={"title": f"Layer {layer.layer_index}", "description": combined_prompt},
             target_files=all_target_files,
@@ -655,6 +672,7 @@ class AutoEngineer(BaseAIAgent):
             strategy=CodingStrategy.CODE_FIRST,
             workspace_context=workspace_context,
             log=log,
+            dependency_edges=dep_edges,
         )
 
         # Update all issue statuses

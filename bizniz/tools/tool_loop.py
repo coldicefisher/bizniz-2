@@ -31,6 +31,28 @@ def _parse_retry_after(error_msg: str) -> float:
     return 5.0  # default backoff
 
 
+def _trim_messages_for_context(messages: list) -> bool:
+    """Trim the message list to fit within context limits.
+
+    Strategy: keep system prompt (index 0) and initial user message (index 1),
+    drop the oldest tool-use turns from the middle. Returns True if trimming
+    was possible, False if already minimal.
+    """
+    # Need at least system + initial user + latest user = 3 messages
+    if len(messages) <= 3:
+        return False
+
+    # Remove the oldest pair of assistant+user messages after the initial prompt
+    # (i.e. the earliest tool-use turn)
+    removed = 0
+    idx = 2  # start after system + initial user
+    while idx < len(messages) - 1 and removed < 2:
+        messages.pop(idx)
+        removed += 1
+
+    return removed > 0
+
+
 class ToolLoopError(Exception):
     pass
 
@@ -138,7 +160,16 @@ def run_tool_loop(
             )
         except Exception as e:
             from bizniz.clients.chatgpt.errors import OpenAIRateLimit
-            if isinstance(e, OpenAIRateLimit):
+            from bizniz.clients.errors import AIContextLengthExceeded
+            if isinstance(e, AIContextLengthExceeded):
+                # Context too large — trim older tool-use turns and retry
+                if _trim_messages_for_context(messages):
+                    log(f"{agent_name}: context too large — trimmed history ({len(messages)} messages remaining)")
+                    continue  # retry with shorter context
+                else:
+                    log(f"{agent_name}: context too large and cannot trim further")
+                    raise ToolLoopBadResponseError(f"Context length exceeded with minimal messages: {e}")
+            elif isinstance(e, OpenAIRateLimit):
                 wait = _parse_retry_after(str(e))
                 log(f"{agent_name}: rate limited — waiting {wait:.1f}s")
                 time.sleep(wait + 1.0)
@@ -152,7 +183,11 @@ def run_tool_loop(
                     )
                 except Exception as retry_e:
                     from bizniz.clients.chatgpt.errors import OpenAIRateLimit as RL2
-                    if isinstance(retry_e, RL2):
+                    if isinstance(retry_e, AIContextLengthExceeded):
+                        if _trim_messages_for_context(messages):
+                            log(f"{agent_name}: context too large on retry — trimmed history")
+                            continue
+                    elif isinstance(retry_e, RL2):
                         # Still rate limited — set escalating backoff for next turn
                         rate_limit_backoff = min(wait * 2, 60.0)
                         log(f"{agent_name}: still rate limited, will wait {rate_limit_backoff:.1f}s next turn")
@@ -253,38 +288,35 @@ def run_tool_loop(
         ),
     })
 
-    try:
-        text, _, _ = client.get_text(
-            messages=messages,
-            use_message_history=False,
-            response_format=ResponseFormat.JSON_SCHEMA,
-            schema=action_schema,
-        )
-        text = clean_llm_json(text)
-        action = json.loads(text)
+    # Final forced submission — try up to 3 times, trimming context on overflow
+    for _final_attempt in range(3):
+        try:
+            text, _, _ = client.get_text(
+                messages=messages,
+                use_message_history=False,
+                response_format=ResponseFormat.JSON_SCHEMA,
+                schema=action_schema,
+            )
+            text = clean_llm_json(text)
+            action = json.loads(text)
 
-        if action.get("action") == terminal_action:
-            return action
-    except Exception as e:
-        from bizniz.clients.chatgpt.errors import OpenAIRateLimit
-        if isinstance(e, OpenAIRateLimit):
-            wait = _parse_retry_after(str(e))
-            log(f"{agent_name}: rate limited on final submission — waiting {wait:.1f}s")
-            time.sleep(wait + 1.0)
-            try:
-                text, _, _ = client.get_text(
-                    messages=messages,
-                    use_message_history=False,
-                    response_format=ResponseFormat.JSON_SCHEMA,
-                    schema=action_schema,
-                )
-                text = clean_llm_json(text)
-                action = json.loads(text)
-                if action.get("action") == terminal_action:
-                    return action
-            except Exception:
-                pass
-        raise ToolLoopBadResponseError(f"Final forced submission failed: {e}")
+            if action.get("action") == terminal_action:
+                return action
+            break  # got a response but wrong action — don't retry
+        except Exception as e:
+            from bizniz.clients.chatgpt.errors import OpenAIRateLimit
+            from bizniz.clients.errors import AIContextLengthExceeded
+            if isinstance(e, AIContextLengthExceeded):
+                if _trim_messages_for_context(messages):
+                    log(f"{agent_name}: context too large on final submission — trimmed history")
+                    continue
+                raise ToolLoopBadResponseError(f"Final submission failed — context too large: {e}")
+            elif isinstance(e, OpenAIRateLimit):
+                wait = _parse_retry_after(str(e))
+                log(f"{agent_name}: rate limited on final submission — waiting {wait:.1f}s")
+                time.sleep(wait + 1.0)
+                continue
+            raise ToolLoopBadResponseError(f"Final forced submission failed: {e}")
 
     raise ToolLoopTimeoutError(
         f"LLM did not submit '{terminal_action}' after {max_turns} turns + forced attempt"

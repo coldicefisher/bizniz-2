@@ -171,6 +171,10 @@ class ClaudeClient(BaseAIClient):
                     continue
                 raise ClaudeRateLimit(str(e))
             except anthropic.BadRequestError as e:
+                from bizniz.clients.claude.errors import ClaudeContextLengthExceeded
+                error_msg = str(e).lower()
+                if "context_length_exceeded" in error_msg or "context window" in error_msg or "too many tokens" in error_msg:
+                    raise ClaudeContextLengthExceeded(str(e))
                 raise ClaudeInvalidRequest(str(e))
             except Exception as e:
                 raise ClaudeClientError(f"Claude API error: {e}")

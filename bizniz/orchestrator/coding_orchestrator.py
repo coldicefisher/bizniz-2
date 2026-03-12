@@ -111,6 +111,7 @@ class CodingOrchestrator:
         max_iterations: int = 20,
         on_status_message: Optional[Callable[[str], None]] = None,
         language: str = "python",
+        enable_agentic_debug: bool = True,
     ):
         self._autocoder = autocoder
         self._autotester = autotester
@@ -130,6 +131,7 @@ class CodingOrchestrator:
         self._max_iterations = max_iterations
         self._on_status_message = on_status_message
         self._language = language
+        self._enable_agentic_debug = enable_agentic_debug
         self._stall_detector = StallDetector(
             consecutive_fail_threshold=stall_threshold,
         )
@@ -432,6 +434,7 @@ class CodingOrchestrator:
         initial_model: Optional[str] = None,
         strategy: CodingStrategy = CodingStrategy.TDD,
         workspace_context: Optional[dict] = None,
+        dependency_edges: Optional[list] = None,
     ) -> OrchestratorResult:
         """
         Run the full iterative coding + testing loop for a multi-file issue.
@@ -452,7 +455,11 @@ class CodingOrchestrator:
         workspace_context:
             Optional dict of existing workspace files {filepath: content}
             for cross-issue learning.
+        dependency_edges:
+            Optional list of DependencyEdge objects from the ArchitecturePlan.
+            Used for exact graph lookups in the repair loop.
         """
+        self._dependency_edges = dependency_edges or []
 
         def log(msg: str):
             if self._on_status_message:
@@ -1158,9 +1165,10 @@ class CodingOrchestrator:
             log(f"Orchestrator: stall detected — {self._stall_detector.stall_reason}")
             self._stall_cycle_count += 1
 
-            # Agentic diagnosis — only if we've hit the agentic debug threshold
+            # Agentic diagnosis — only if enabled and we've hit the agentic debug threshold
             agentic_diagnosis = None
-            if (self._debugger_factory is not None
+            if (self._enable_agentic_debug
+                    and self._debugger_factory is not None
                     and self._stall_detector._consecutive_failures >= self._agentic_debug_threshold):
                 try:
                     log("Orchestrator: running agentic debugger...")
@@ -1403,21 +1411,32 @@ class CodingOrchestrator:
                 new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
                 return current_files, new_test_files, 0, None
 
-        # Not stalled — one-shot minimal repair
-        # Send only the single failing source file + its test file
+        # Not stalled — inline repair with full dependency context
+        # Extract failing pair + transitive deps from the graph
         relevant_files = _extract_failing_pair(
             failure_output, current_files, current_test_files,
+            dependency_edges=self._dependency_edges,
         )
-        log(f"Orchestrator: one-shot repair with {len(relevant_files)} file(s)...")
 
-        # Truncate error output to prevent massive prompts that cause JSON parse failures
+        # Separate source and test files for the inline repair prompt
+        repair_source = {}
+        repair_tests = {}
+        for fp, content in relevant_files.items():
+            if fp in current_test_files:
+                repair_tests[fp] = content
+            else:
+                repair_source[fp] = content
+
+        log(f"Orchestrator: inline repair with {len(repair_source)} source + {len(repair_tests)} test file(s)...")
+
+        # Truncate error output — keep head (summary) + tail (most relevant failures)
         truncated_error = _truncate_error(failure_output)
 
         t0 = time.time()
-        repaired = self._autocoder.repair_multi(
-            current_files=relevant_files,
+        repaired = self._autocoder.repair_multi_inline(
+            source_files=repair_source,
+            test_files=repair_tests,
             error_message=truncated_error,
-            architecture_context=architecture_context,
         )
         log(f"Orchestrator: repair done in {time.time() - t0:.1f}s")
 
@@ -3269,13 +3288,14 @@ def _extract_failing_pair(
     failure_output: str,
     current_files: dict,
     current_test_files: dict,
+    dependency_edges: Optional[list] = None,
 ) -> dict:
     """
-    Extract the single failing test file + the source file it tests.
+    Extract the failing test file + the source file it tests + transitive deps.
 
-    Keeps the repair prompt minimal (one source + one test) so it fits
-    within tight TPM limits. Falls back to _extract_relevant_files if
-    we can't identify a single pair.
+    When dependency_edges (from ArchitecturePlan) are available, uses exact
+    graph lookups to find the full dependency chain. Falls back to string
+    matching via _include_transitive_deps when edges aren't available.
     """
     # Find the first test file mentioned in the error output
     failing_test_fp = None
@@ -3295,20 +3315,81 @@ def _extract_failing_pair(
     # Find the source file that this test imports
     result = {failing_test_fp: current_test_files[failing_test_fp]}
     test_content = current_test_files[failing_test_fp]
+    primary_source_fp = None
     for code_fp in current_files:
         base_name = _strip_source_ext(code_fp.replace("/", ".")).split(".")[-1]
         if base_name in test_content or code_fp in failure_output:
             result[code_fp] = current_files[code_fp]
-            break  # Only one source file
+            primary_source_fp = code_fp
+            break
 
     # If no source file matched, include the first source file mentioned in the error
-    if len(result) == 1:
+    if primary_source_fp is None:
         for code_fp in current_files:
             if code_fp in failure_output:
                 result[code_fp] = current_files[code_fp]
+                primary_source_fp = code_fp
                 break
 
+    # Follow dependency chain to include all files the primary source depends on
+    if primary_source_fp and primary_source_fp in current_files:
+        if dependency_edges:
+            _include_deps_from_graph(primary_source_fp, current_files, result, dependency_edges)
+        else:
+            _include_transitive_deps(primary_source_fp, current_files, result)
+
     return result
+
+
+def _include_deps_from_graph(
+    source_fp: str,
+    current_files: dict,
+    result: dict,
+    dependency_edges: list,
+    depth: int = 3,
+) -> None:
+    """
+    Follow DependencyEdge graph to include exact dependencies in the repair context.
+
+    Each DependencyEdge has source_filepath, target_filepath, and import_symbols.
+    Recurses up to `depth` levels to capture the full chain (e.g. router → service → model).
+    """
+    if depth <= 0:
+        return
+    for edge in dependency_edges:
+        target_fp = edge.target_filepath if hasattr(edge, 'target_filepath') else edge.get('target_filepath', '')
+        edge_source = edge.source_filepath if hasattr(edge, 'source_filepath') else edge.get('source_filepath', '')
+        if edge_source == source_fp and target_fp in current_files and target_fp not in result:
+            result[target_fp] = current_files[target_fp]
+            # Recurse into this dependency's own deps
+            _include_deps_from_graph(target_fp, current_files, result, dependency_edges, depth - 1)
+
+
+def _include_transitive_deps(
+    source_fp: str,
+    current_files: dict,
+    result: dict,
+    depth: int = 2,
+) -> None:
+    """
+    Follow imports in source_fp and add any referenced current_files to result.
+
+    Recurses up to `depth` levels so repair can see the full dependency chain
+    (e.g. router → storage → models).
+    """
+    if depth <= 0:
+        return
+    content = current_files.get(source_fp, "")
+    for code_fp, code_content in current_files.items():
+        if code_fp in result:
+            continue
+        base_name = _strip_source_ext(code_fp.replace("/", ".")).split(".")[-1]
+        # Check if the source file imports this module
+        module_path = _strip_source_ext(code_fp.replace("/", "."))
+        if base_name in content or module_path in content:
+            result[code_fp] = code_content
+            # Recurse into this dependency
+            _include_transitive_deps(code_fp, current_files, result, depth - 1)
 
 
 def _extract_relevant_files(

@@ -17,6 +17,10 @@ from bizniz.autocoder.prompts.repair_multi_prompt import (
     REPAIR_MULTI_PROMPT_TEMPLATE,
     REPAIR_MULTI_SYSTEM_PROMPT,
 )
+from bizniz.autocoder.prompts.repair_inline_prompt import (
+    REPAIR_INLINE_SYSTEM_PROMPT,
+    REPAIR_INLINE_USER_PROMPT,
+)
 from bizniz.autocoder.prompts.prompt_schemas import GeneratePromptSchema, RepairPromptSchema
 from bizniz.autocoder.prompts.tool_action_schema import (
     AutocoderGenerateActionSchema,
@@ -540,6 +544,107 @@ class Autocoder(BaseAIAgent):
             log(f"Autocoder: repair declared dependencies: {', '.join(dependencies)}")
 
         return AutocoderProcessResult(changes=changes, dependencies=dependencies)
+
+    def repair_multi_inline(
+        self,
+        source_files: dict,
+        test_files: dict,
+        error_message: str,
+        on_status_message: Optional[Callable[[str], None]] = None,
+    ) -> AutocoderProcessResult:
+        """
+        Inline multi-file repair — no tool loop, all code sent inline.
+
+        Two-shot: system+user → LLM returns analysis + changes in one call.
+        Sends all relevant source and test file contents directly in the prompt
+        so the LLM has full context without needing discovery tools.
+        """
+        if on_status_message is not None:
+            self._on_status_message = on_status_message
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        # Format source files inline
+        source_block = ""
+        for fp, content in source_files.items():
+            source_block += f"── {fp} ──\n```python\n{content}\n```\n\n"
+
+        # Format test files inline
+        test_block = ""
+        for fp, content in test_files.items():
+            test_block += f"── {fp} ──\n```python\n{content}\n```\n\n"
+
+        user_prompt = REPAIR_INLINE_USER_PROMPT.format(
+            error_output=error_message,
+            source_files=source_block or "(no source files)",
+            test_files=test_block or "(no test files)",
+        )
+
+        log(f"Autocoder: inline repair with {len(source_files)} source + {len(test_files)} test file(s)...")
+
+        messages = [
+            {"role": "system", "content": REPAIR_INLINE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        import time
+        attempts = 3
+        last_error = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                t0 = time.time()
+                text, job_id, output_messages = self._client.get_text(
+                    messages=messages,
+                    response_format=ResponseFormat.JSON_SCHEMA,
+                    schema=RepairPromptSchema,
+                )
+                elapsed = time.time() - t0
+                log(f"Autocoder: inline repair response in {elapsed:.1f}s (attempt {attempt})")
+
+                if not text or not text.strip():
+                    last_error = "Empty response"
+                    continue
+
+                text = self.clean_llm_json(text)
+                json_response = json.loads(text)
+
+                analysis = json_response.get("analysis", "")
+                fix_plan = json_response.get("fix_plan", "")
+                if analysis:
+                    log(f"Autocoder: analysis — {analysis[:120]}")
+                if fix_plan:
+                    log(f"Autocoder: fix plan — {fix_plan[:120]}")
+
+                changes = self._parse_changes(json_response)
+                dependencies = json_response.get("dependencies", [])
+
+                if not changes:
+                    last_error = "No changes in response"
+                    continue
+
+                # Save repaired files
+                for change in changes:
+                    log(f"Saving repaired {change.filepath} to workspace...")
+                    self._workspace.write_file(path=change.filepath, content=change.code)
+
+                if dependencies:
+                    log(f"Autocoder: repair declared dependencies: {', '.join(dependencies)}")
+
+                return AutocoderProcessResult(changes=changes, dependencies=dependencies)
+
+            except json.JSONDecodeError as e:
+                last_error = f"JSON parse error: {e}"
+                log(f"Autocoder: inline repair JSON error (attempt {attempt}): {e}")
+            except AIInsufficientFunds:
+                raise
+            except Exception as e:
+                last_error = f"{type(e).__name__}: {e}"
+                log(f"Autocoder: inline repair error (attempt {attempt}): {e}")
+
+        raise AutocoderBadAIResponseError(f"Inline repair failed after {attempts} attempts: {last_error}")
 
     # ── Multi-file private helpers ────────────────────────────────────────────
 

@@ -1,4 +1,4 @@
-from bizniz.clients.errors import AIInsufficientFunds
+from bizniz.clients.errors import AIInsufficientFunds, AIContextLengthExceeded
 
 
 class OpenAIClientError(Exception):
@@ -22,4 +22,9 @@ class OpenAIAuthError(OpenAIClientError):
 
 
 class OpenAIInvalidRequest(OpenAIClientError):
+    pass
+
+
+class OpenAIContextLengthExceeded(OpenAIInvalidRequest, AIContextLengthExceeded):
+    """Input exceeds the model's context window."""
     pass

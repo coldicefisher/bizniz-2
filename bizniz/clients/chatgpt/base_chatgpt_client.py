@@ -389,6 +389,10 @@ class BaseChatGPTClient(BaseAIClient):
             raise OpenAIRateLimit(str(e))
 
         except BadRequestError as e:
+            from bizniz.clients.chatgpt.errors import OpenAIContextLengthExceeded
+            error_msg = str(e).lower()
+            if "context_length_exceeded" in error_msg or "context window" in error_msg:
+                raise OpenAIContextLengthExceeded(str(e))
             raise OpenAIInvalidRequest(str(e))
 
         except Exception as e:
