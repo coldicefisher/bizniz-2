@@ -785,8 +785,9 @@ class Autocoder(BaseAIAgent):
                 code_raw = code_raw.replace("\\n", "\n")
             code = self._strip_code_block(code_raw)
             if code and code.strip():
+                filepath = ch["filepath"].lstrip("/")
                 changes.append(FileChange(
-                    filepath=ch["filepath"],
+                    filepath=filepath,
                     code=code,
                     action=ch.get("action", "create"),
                 ))

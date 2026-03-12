@@ -210,7 +210,7 @@ def main():
 
     # Load config
     config = BiznizConfig.find_and_load()
-    model = "gpt-4o"
+    model = "gpt-4o-mini"
     print(f"\n  Model: {model}")
     print(f"  Project: {PROJECT_ROOT}")
     print(f"  Docker image: {DOCKER_IMAGE}")
@@ -289,9 +289,45 @@ def main():
                 **plan_data,
             )
             arch_context = AutoEngineer.format_architecture_context(plan)
-            print(f"\n  Architecture: {plan.package_name} ({len(plan.modules)} modules)")
+            dep_edges = plan.dependencies or []
+            print(f"\n  Architecture: {plan.package_name} ({len(plan.modules)} modules, {len(dep_edges)} dependency edges)")
         except Exception as e:
             print(f"\n  WARNING: Could not load architecture plan: {e}")
+            dep_edges = []
+    else:
+        dep_edges = []
+
+    # Run scaffold to create stub files before code gen
+    if plan_row and plan:
+        from bizniz.engineer.scaffold import scaffold_from_plan
+        from bizniz.engineer.types import EngineeringIssue, TargetFile
+
+        # Convert issue dicts to EngineeringIssue objects for scaffold
+        scaffold_issues = []
+        for iss in issues:
+            scaffold_issues.append(EngineeringIssue(
+                db_id=iss["id"],
+                title=iss["title"],
+                description=iss["description"],
+                target_files=[TargetFile(**tf) for tf in iss["target_files"]],
+                test_files=iss["test_files"],
+                test_setup_hint=iss.get("test_setup_hint", ""),
+            ))
+
+        import_map = scaffold_from_plan(
+            workspace=workspace,
+            plan=plan,
+            issues=scaffold_issues,
+            on_status_message=lambda msg: print(f"  {msg}"),
+        )
+        print(f"  Scaffold: {len(import_map)} stub files created")
+
+        # Update issue dicts with flipped actions (create → modify)
+        for iss, eng_iss in zip(issues, scaffold_issues):
+            iss["target_files"] = [
+                {"filepath": tf.filepath, "action": tf.action}
+                for tf in eng_iss.target_files
+            ]
 
     print(f"\n{'=' * 60}")
     print("  Starting...\n")
@@ -501,8 +537,8 @@ def main():
                     on_status_message=status_cb,
                 )
 
-                # Model escalation on stall: matches bizniz.yaml repair_models
-                progression = ModelProgression(["claude-sonnet"])
+                # Model escalation on stall: mini → 4o only, no claude
+                progression = ModelProgression(["gpt-4o-mini", "gpt-4o"])
 
                 orchestrator = CodingOrchestrator(
                     autocoder=autocoder,
@@ -516,6 +552,7 @@ def main():
                     stall_threshold=3,
                     agentic_debug_threshold=2,
                     on_status_message=status_cb,
+                    enable_agentic_debug=False,
                 )
 
                 # Build problem statement for orchestrator
@@ -529,6 +566,7 @@ def main():
                     test_files=issue["test_files"],
                     architecture_context=arch_context,
                     strategy=CodingStrategy.CODE_FIRST,
+                    dependency_edges=dep_edges,
                 )
 
                 issue_metrics.finish(
