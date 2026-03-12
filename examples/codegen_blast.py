@@ -210,7 +210,7 @@ def main():
 
     # Load config
     config = BiznizConfig.find_and_load()
-    model = "gpt-5"
+    model = "gpt-4o"
     print(f"\n  Model: {model}")
     print(f"  Project: {PROJECT_ROOT}")
     print(f"  Docker image: {DOCKER_IMAGE}")
@@ -504,7 +504,7 @@ def main():
                 )
 
                 # Model escalation on stall: matches bizniz.yaml repair_models
-                progression = ModelProgression(["gpt-5", "claude-sonnet", "claude-opus"])
+                progression = ModelProgression(["claude-sonnet", "claude-opus"])
 
                 orchestrator = CodingOrchestrator(
                     autocoder=autocoder,
