@@ -1785,7 +1785,54 @@ class CodingOrchestrator:
             pass  # DB may not exist yet for fresh workspaces
 
     def _install_package(self, package: str, log: Callable):
-        """Install a package into the test environment and persist to DB."""
+        """Install a package into the test environment and persist to DB.
+
+        Validates the package name before installing: rejects stdlib modules,
+        malformed names, and packages that don't exist on PyPI. Deduplicates
+        against requirements.txt using normalized names (lowercase, - → _).
+        """
+        import re as _re
+        import sys as _sys
+
+        # Strip version specifiers for validation
+        bare = _re.split(r"[><=!\[;]", package)[0].strip()
+        bare_lower = bare.lower().replace("-", "_")
+
+        # Reject empty or malformed names
+        if not bare or not _re.match(r"^[a-zA-Z][a-zA-Z0-9._-]*$", bare):
+            log(f"Orchestrator: rejected invalid package name '{package}'")
+            return
+
+        # Reject stdlib modules
+        if bare_lower in _sys.stdlib_module_names:
+            log(f"Orchestrator: rejected stdlib module '{package}'")
+            return
+
+        # Check for duplicates in requirements.txt BEFORE PyPI check
+        try:
+            req_path = self._workspace.path("requirements.txt")
+            existing = req_path.read_text() if req_path.exists() else ""
+            existing_pkgs = set()
+            for line in existing.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    pkg_name = _re.split(r"[><=!\[;]", line)[0].strip()
+                    existing_pkgs.add(pkg_name.lower().replace("-", "_"))
+        except Exception:
+            existing = ""
+            existing_pkgs = set()
+
+        if bare_lower in existing_pkgs:
+            return  # already in requirements.txt
+
+        # Verify package exists on PyPI before installing
+        from bizniz.preflight.python_validator import _pypi_package_exists
+        exists = _pypi_package_exists(bare)
+        if exists is False:
+            log(f"Orchestrator: rejected '{package}' — not found on PyPI")
+            return
+        # If exists is None (network error), proceed cautiously
+
         env = self._find_installable_environment()
         if env:
             env.install_packages([package])
@@ -1793,18 +1840,11 @@ class CodingOrchestrator:
         else:
             log(f"Orchestrator: WARNING — no installable environment found for '{package}'")
 
-        # Update requirements.txt in workspace
+        # Append to requirements.txt
         try:
             req_path = self._workspace.path("requirements.txt")
-            existing = req_path.read_text() if req_path.exists() else ""
-            existing_pkgs = {
-                line.strip().split("==")[0].split(">=")[0].lower()
-                for line in existing.splitlines()
-                if line.strip() and not line.startswith("#")
-            }
-            if package.lower() not in existing_pkgs:
-                with open(req_path, "a") as f:
-                    f.write(f"{package}\n")
+            with open(req_path, "a") as f:
+                f.write(f"{package}\n")
         except Exception:
             pass
 
