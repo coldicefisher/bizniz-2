@@ -1,19 +1,25 @@
 default_model: gpt-4o-mini
-engineer_model: gpt-5
-architect_model: gpt-5
+engineer_model: gpt-4o
+architect_model: gpt-4o
 models:
   - gpt-4o-mini
   - gpt-4o
-  - gpt-5
+  - claude-sonnet
+  - claude-opus
 autocoder_models:
+  - gpt-4o-mini
   - gpt-4o
-  - gpt-5
+  - claude-sonnet
+  - claude-opus
 autotester_models:
+  - gpt-4o-mini
   - gpt-4o
-  - gpt-5
+  - claude-sonnet
+  - claude-opus
 repair_models:
   - gpt-4o
-  - gpt-5
+  - claude-sonnet
+  - claude-opus
 stall_threshold: 3
 agentic_debug_threshold: 5
 layered_generation: true

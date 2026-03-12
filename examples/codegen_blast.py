@@ -482,8 +482,10 @@ def main():
                         api_key=os.environ["OPENAI_API_KEY"],
                     )
 
-                # Create fresh client per issue
-                client = make_client(model)
+                # Honor engineer's suggested_model per issue, fall back to default
+                issue_model = issue.get("suggested_model") or model
+                print(f"  Model: {issue_model}")
+                client = make_client(issue_model)
 
                 autocoder = Autocoder(
                     client=client,
