@@ -86,11 +86,14 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
             else:
                 self._container_id = None
 
+        # Clean up any stopped bizniz-pytest containers from prior crashed runs
+        self._cleanup_stale_containers()
+
         # Generate fresh container name for each start
         self._container_name = f"bizniz-pytest-{uuid.uuid4().hex[:12]}"
 
         cmd = [
-            "docker", "run", "-d",
+            "docker", "run", "-d", "--rm",
             "--name", self._container_name,
             "-w", "/workspace",
             "-e", "PYTHONPATH=/workspace",
@@ -139,6 +142,26 @@ class DockerPytestEnvironment(BaseExecutionEnvironment):
                 capture_output=True, timeout=10,
             )
             self._container_id = None
+
+    @staticmethod
+    def _cleanup_stale_containers():
+        """Remove stopped bizniz-pytest containers left by crashed runs."""
+        try:
+            result = subprocess.run(
+                ["docker", "ps", "-a", "--filter", "name=bizniz-pytest-",
+                 "--filter", "status=exited", "--filter", "status=created",
+                 "-q"],
+                capture_output=True, text=True, timeout=10,
+            )
+            container_ids = result.stdout.strip().split("\n")
+            container_ids = [c for c in container_ids if c]
+            if container_ids:
+                subprocess.run(
+                    ["docker", "rm", "-f"] + container_ids,
+                    capture_output=True, timeout=15,
+                )
+        except Exception:
+            pass  # Best-effort cleanup
 
     def _sync_workspace_from_container(self):
         """Copy workspace files back from container to host (e.g. generated files).

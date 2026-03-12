@@ -33,9 +33,10 @@ def _completed(returncode=0, stdout="", stderr=""):
 
 
 def _container_start_side_effects(container_id="container123"):
-    """Side effects for _ensure_container: docker run, mkdir, docker cp."""
+    """Side effects for _ensure_container: cleanup, docker run, mkdir, docker cp."""
     return [
-        _completed(returncode=0, stdout=container_id),  # docker run -d
+        _completed(stdout=""),  # docker ps -a (stale container cleanup)
+        _completed(returncode=0, stdout=container_id),  # docker run -d --rm
         _completed(),  # docker exec mkdir -p /workspace
         _completed(),  # docker cp (initial sync)
     ]
@@ -70,8 +71,8 @@ class TestExecuteCommand:
         spec = ExecutionCallSpec(symbol="pytest", args=[str(test_file)])
         env.execute(code="", call_spec=spec)
 
-        # First call starts the container (no -v bind mount)
-        start_cmd = mock_run.call_args_list[0][0][0]
+        # Second call starts the container (first is stale cleanup)
+        start_cmd = mock_run.call_args_list[1][0][0]
         assert "docker" in start_cmd
         assert "run" in start_cmd
         assert "-d" in start_cmd
@@ -79,7 +80,7 @@ class TestExecuteCommand:
         assert "sleep" in start_cmd
 
         # docker cp is used to sync workspace
-        cp_cmd = mock_run.call_args_list[2][0][0]
+        cp_cmd = mock_run.call_args_list[3][0][0]
         assert "docker" in cp_cmd
         assert "cp" in cp_cmd
 
@@ -116,7 +117,7 @@ class TestExecuteCommand:
         spec = ExecutionCallSpec(symbol="pytest", args=["test_a.py"])
         env.execute(code="", call_spec=spec)
 
-        start_cmd = mock_run.call_args_list[0][0][0]
+        start_cmd = mock_run.call_args_list[1][0][0]
         assert "--network" not in start_cmd
 
     @patch("bizniz.environment.docker_pytest_environment.subprocess.run")
@@ -126,7 +127,7 @@ class TestExecuteCommand:
         spec = ExecutionCallSpec(symbol="pytest", args=["test_a.py"])
         env.execute(code="", call_spec=spec)
 
-        start_cmd = mock_run.call_args_list[0][0][0]
+        start_cmd = mock_run.call_args_list[1][0][0]
         assert "--network" in start_cmd
         net_idx = start_cmd.index("--network")
         assert start_cmd[net_idx + 1] == "none"
