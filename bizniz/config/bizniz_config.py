@@ -33,6 +33,7 @@ class BiznizConfig(BaseModel):
     stall_threshold: int = 3
     agentic_debug_threshold: int = 5
     enable_agentic_debug: bool = True
+    stall_recovery: str = "full"  # "full", "regenerate", or "none"
     # Pipeline execution mode
     layered_generation: bool = True
     parallel_services: bool = True

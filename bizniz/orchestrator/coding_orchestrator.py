@@ -112,6 +112,7 @@ class CodingOrchestrator:
         on_status_message: Optional[Callable[[str], None]] = None,
         language: str = "python",
         enable_agentic_debug: bool = True,
+        stall_recovery: str = "full",
     ):
         self._autocoder = autocoder
         self._autotester = autotester
@@ -132,6 +133,7 @@ class CodingOrchestrator:
         self._on_status_message = on_status_message
         self._language = language
         self._enable_agentic_debug = enable_agentic_debug
+        self._stall_recovery = stall_recovery  # "full", "regenerate", or "none"
         self._stall_detector = StallDetector(
             consecutive_fail_threshold=stall_threshold,
         )
@@ -435,6 +437,7 @@ class CodingOrchestrator:
         strategy: CodingStrategy = CodingStrategy.TDD,
         workspace_context: Optional[dict] = None,
         dependency_edges: Optional[list] = None,
+        prior_test_files: Optional[Set[str]] = None,
     ) -> OrchestratorResult:
         """
         Run the full iterative coding + testing loop for a multi-file issue.
@@ -458,6 +461,11 @@ class CodingOrchestrator:
         dependency_edges:
             Optional list of DependencyEdge objects from the ArchitecturePlan.
             Used for exact graph lookups in the repair loop.
+        prior_test_files:
+            Optional set of test file paths from previously completed issues.
+            Only these files are checked for regressions. If None, all passing
+            tests in the workspace are used (which may include stubs from
+            future issues).
         """
         self._dependency_edges = dependency_edges or []
 
@@ -510,7 +518,7 @@ class CodingOrchestrator:
                 existing_code[tf["filepath"]] = self._workspace.read_file(path=tf["filepath"])
 
         # ── Snapshot passing tests before we start (regression baseline) ─────
-        baseline_passing = self._get_passing_tests(log)
+        baseline_passing = self._get_passing_tests(log, restrict_to=prior_test_files)
 
         # ── Build workspace context for cross-issue learning ─────────────────
         extra_context = ""
@@ -1225,10 +1233,15 @@ class CodingOrchestrator:
             self._autocoder.clear_message_history()
             self._autotester.clear_message_history()
 
-            # Strategy flip: after 2 stall cycles in TDD, switch to code-first
-            # (and vice versa). This lets the agentic debugger modify tests too.
+            # stall_recovery="none": escalate model only, no strategy flips or regeneration.
+            # Fall through to the inline repair below (don't return early).
+            if self._stall_recovery == "none":
+                log("Orchestrator: stall recovery=none — falling through to inline repair")
+                # Fall through — the inline repair at the bottom of this method will run
+
+            # Strategy flip (stall_recovery="full" only): after 2 stall cycles, switch strategy.
             is_tdd = getattr(self, '_strategy', None) == CodingStrategy.TDD
-            if self._stall_cycle_count == 2 and is_tdd:
+            if self._stall_recovery == "full" and self._stall_cycle_count == 2 and is_tdd:
                 log("Orchestrator: flipping from TDD to CODE_FIRST — tests can now be modified")
                 self._strategy = CodingStrategy.CODE_FIRST
                 # Regenerate tests from spec only (no source blob — architecture context is in the prompt)
@@ -1239,7 +1252,7 @@ class CodingOrchestrator:
                 )
                 new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
                 return current_files, new_test_files, 0, None
-            elif self._stall_cycle_count == 2 and not is_tdd:
+            elif self._stall_recovery == "full" and self._stall_cycle_count == 2 and not is_tdd:
                 log("Orchestrator: flipping from CODE_FIRST to TDD — tests become the spec")
                 self._strategy = CodingStrategy.TDD
                 # Regenerate tests from spec (TDD style, no source code)
@@ -1266,8 +1279,8 @@ class CodingOrchestrator:
                         new_files[ch.filepath] = ch.code
                 return new_files, new_test_files, 0, None
 
-            # After multiple stall cycles without progress, do a full regeneration
-            if self._stall_cycle_count >= 3:
+            # After multiple stall cycles without progress, do a full regeneration (full/regenerate only)
+            if self._stall_recovery in ("full", "regenerate") and self._stall_cycle_count >= 3:
                 log(f"Orchestrator: {self._stall_cycle_count} stall cycles — regenerating code and tests from scratch...")
                 self._stall_cycle_count = 0
                 diagnosis_context = ""
@@ -1382,52 +1395,62 @@ class CodingOrchestrator:
                 new_hash = _hash("".join(sorted(f"{k}:{v}" for k, v in new_files.items())))
                 return new_files, new_test_files, 0, new_hash
 
-            # No diagnosis available
-            if is_tdd:
-                # TDD mode: regenerate code from scratch (tests are the spec)
-                log("Orchestrator: TDD stall — regenerating code from scratch...")
-                code_result = self._autocoder.generate_multi(
-                    issue_description=(
-                        f"{prompt}\n\n"
-                        f"YOUR CODE MUST PASS THESE TESTS:\n"
-                        + "\n".join(f"── {fp} ──\n```{self._code_fence_lang}\n{t}\n```" for fp, t in current_test_files.items())
-                        + f"\n\nPrevious failures:\n{failure_output}\n"
-                        f"Generate a COMPLETELY FRESH implementation."
-                    ),
-                    target_files=target_files,
-                    architecture_context=architecture_context,
-                    existing_code={},
-                )
-                new_files = {ch.filepath: ch.code for ch in code_result.changes}
-                return new_files, current_test_files, 0, None
-            else:
-                # Code-first mode: regenerate tests from spec (no source blob)
-                log("Orchestrator: regenerating tests after stall...")
-                test_result = self._autotester.generate_multi(
-                    problem_statement=prompt + self._get_scaffold_context() + f"\n\nPrevious failures:\n{failure_output}",
-                    test_files=test_files,
-                    source_code=None,
-                )
-                new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
-                return current_files, new_test_files, 0, None
+            # No diagnosis available — regenerate (full/regenerate only, not "none")
+            if self._stall_recovery != "none":
+                if is_tdd:
+                    # TDD mode: regenerate code from scratch (tests are the spec)
+                    log("Orchestrator: TDD stall — regenerating code from scratch...")
+                    code_result = self._autocoder.generate_multi(
+                        issue_description=(
+                            f"{prompt}\n\n"
+                            f"YOUR CODE MUST PASS THESE TESTS:\n"
+                            + "\n".join(f"── {fp} ──\n```{self._code_fence_lang}\n{t}\n```" for fp, t in current_test_files.items())
+                            + f"\n\nPrevious failures:\n{failure_output}\n"
+                            f"Generate a COMPLETELY FRESH implementation."
+                        ),
+                        target_files=target_files,
+                        architecture_context=architecture_context,
+                        existing_code={},
+                    )
+                    new_files = {ch.filepath: ch.code for ch in code_result.changes}
+                    return new_files, current_test_files, 0, None
+                else:
+                    # Code-first mode: regenerate tests from spec (no source blob)
+                    log("Orchestrator: regenerating tests after stall...")
+                    test_result = self._autotester.generate_multi(
+                        problem_statement=prompt + self._get_scaffold_context() + f"\n\nPrevious failures:\n{failure_output}",
+                        test_files=test_files,
+                        source_code=None,
+                    )
+                    new_test_files = {tf.filepath: tf.tests for tf in test_result.test_files}
+                    return current_files, new_test_files, 0, None
 
-        # Not stalled — inline repair with full dependency context
+            # stall_recovery="none": fall through to inline repair below
+
+        # Inline repair with full dependency context
         # Extract failing pair + transitive deps from the graph
         relevant_files = _extract_failing_pair(
             failure_output, current_files, current_test_files,
             dependency_edges=self._dependency_edges,
         )
 
-        # Separate source and test files for the inline repair prompt
+        # Determine which files are writable (current issue's target files + test files)
+        writable_paths = set(tf["filepath"] for tf in target_files) | set(current_test_files.keys())
+
+        # Separate into writable source, writable tests, and read-only context
         repair_source = {}
         repair_tests = {}
+        readonly_context = {}
         for fp, content in relevant_files.items():
             if fp in current_test_files:
                 repair_tests[fp] = content
-            else:
+            elif fp in writable_paths:
                 repair_source[fp] = content
+            else:
+                readonly_context[fp] = content
 
-        log(f"Orchestrator: inline repair with {len(repair_source)} source + {len(repair_tests)} test file(s)...")
+        log(f"Orchestrator: inline repair with {len(repair_source)} source + {len(repair_tests)} test"
+            f" + {len(readonly_context)} readonly file(s)...")
 
         # Truncate error output — keep head (summary) + tail (most relevant failures)
         truncated_error = _truncate_error(failure_output)
@@ -1437,8 +1460,20 @@ class CodingOrchestrator:
             source_files=repair_source,
             test_files=repair_tests,
             error_message=truncated_error,
+            readonly_context=readonly_context,
         )
         log(f"Orchestrator: repair done in {time.time() - t0:.1f}s")
+
+        # Filter out any changes to read-only files (LLM may ignore the instruction)
+        repaired_changes = [
+            ch for ch in repaired.changes
+            if ch.filepath in writable_paths
+        ]
+        if len(repaired_changes) < len(repaired.changes):
+            skipped = len(repaired.changes) - len(repaired_changes)
+            log(f"Orchestrator: filtered {skipped} change(s) to read-only files")
+        from bizniz.autocoder.types import AutocoderProcessResult
+        repaired = AutocoderProcessResult(changes=repaired_changes, dependencies=repaired.dependencies)
 
         # Install any new dependencies declared in repair
         if repaired.dependencies:
@@ -1483,16 +1518,23 @@ class CodingOrchestrator:
 
     # ── Regression detection ──────────────────────────────────────────────────
 
-    def _get_passing_tests(self, log: Callable) -> set:
+    def _get_passing_tests(self, log: Callable, restrict_to: Optional[Set[str]] = None) -> set:
         """
         Run all existing tests in the workspace and return the set of
         test file paths that pass. Used as a baseline for regression detection.
+
+        restrict_to: if provided, only check these specific test file paths.
+            This prevents scaffold stubs from future issues being included
+            in the regression baseline.
         """
         try:
-            test_paths = [
-                str(f) for f in self._workspace.list_relative_files()
-                if self._is_test_file(str(f))
-            ]
+            if restrict_to is not None:
+                test_paths = [tp for tp in restrict_to if self._workspace.exists(path=tp)]
+            else:
+                test_paths = [
+                    str(f) for f in self._workspace.list_relative_files()
+                    if self._is_test_file(str(f))
+                ]
             if not test_paths:
                 return set()
 
@@ -2139,10 +2181,9 @@ class CodingOrchestrator:
         log: Callable,
     ) -> str:
         """
-        Scan the workspace for app factories and routers, appending a few
-        verified import lines to the prompt. Keeps it minimal — the
-        architecture plan and engineer's hint are already in the prompt,
-        this just adds ground-truth imports from files that exist on disk.
+        Scan the workspace for app entry-points and routers, appending
+        ground-truth symbol info to the prompt.  Framework-agnostic —
+        reports what exists, lets the LLM decide how to use it.
         """
         # Only enrich for integration/endpoint issues
         is_integration = any(
@@ -2154,15 +2195,14 @@ class CodingOrchestrator:
             is_integration = any(
                 kw in prompt_lower
                 for kw in ["endpoint", "route", "router", "api", "handler",
-                            "controller", "middleware", "fastapi", "express",
-                            "flask", "app factory", "testclient"]
+                            "controller", "middleware", "app factory"]
             )
         if not is_integration:
             return prompt
 
-        # Scan workspace for app factories and routers
-        app_hints = []
-        router_hints = []
+        # Scan workspace for app entry-points and routers
+        app_hints: List[str] = []
+        router_hints: List[str] = []
         try:
             rel_files = self._workspace.list_relative_files()
             for rel_path in sorted(str(p) for p in rel_files):
@@ -2180,10 +2220,24 @@ class CodingOrchestrator:
         if not app_hints and not router_hints:
             return prompt
 
-        # Build compact hint — just the import lines
+        # Build compact hint — just report what symbols exist
         lines = []
-        for h in app_hints + router_hints:
-            lines.append(f"  {h}")
+        if app_hints:
+            lines.append("App entry-points found on disk:")
+            for h in app_hints:
+                lines.append(f"  {h}")
+        if router_hints:
+            lines.append("Router symbols found on disk:")
+            for h in router_hints:
+                lines.append(f"  {h}")
+
+        if router_hints and not app_hints:
+            lines.append(
+                "\nNOTE: No app factory or app instance exists yet. "
+                "Do NOT import an app from the main package. "
+                "Create a temporary app in your test that mounts the router(s) above."
+            )
+
         verified = "\n".join(lines)
 
         if "TEST SETUP HINT:" in prompt:
@@ -2195,7 +2249,10 @@ class CodingOrchestrator:
         return prompt
 
     def _scan_python_for_hints(self, rel_path: str, app_hints: list, router_hints: list):
-        """Scan a Python file for app factories and router definitions."""
+        """Scan a Python file for app entry-points and router definitions.
+
+        Framework-agnostic: reports symbol locations, does not prescribe usage.
+        """
         import ast
 
         try:
@@ -2212,48 +2269,72 @@ class CodingOrchestrator:
             return
 
         module_path = rel_path.replace("/", ".").replace(".py", "")
-        basename = rel_path.rsplit("/", 1)[-1].replace(".py", "")
 
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.FunctionDef):
                 name_lower = node.name.lower()
+                # Skip scaffold stubs (body is just `raise NotImplementedError`)
+                if self._is_stub_function(node):
+                    continue
                 # App factory functions
                 if any(kw in name_lower for kw in ["create_app", "make_app", "build_app", "app_factory"]):
                     app_hints.append(
-                        f"from {module_path} import {node.name}; "
-                        f"from fastapi.testclient import TestClient; "
-                        f"client = TestClient({node.name}())"
+                        f"from {module_path} import {node.name}  # app factory function"
                     )
                 # Router builder functions
-                elif "router" in name_lower or "build_router" in name_lower:
+                elif "router" in name_lower:
                     app_hints.append(
-                        f"from {module_path} import {node.name}"
+                        f"from {module_path} import {node.name}  # router builder function"
                     )
 
             elif isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         name_lower = target.id.lower()
-                        # Module-level app = FastAPI()
-                        if name_lower == "app" and self._is_fastapi_call(node.value):
+                        # Module-level app instance
+                        if name_lower == "app" and self._is_app_constructor(node.value):
                             app_hints.append(
-                                f"from {module_path} import app; "
-                                f"from fastapi.testclient import TestClient; "
-                                f"client = TestClient(app)"
+                                f"from {module_path} import {target.id}  # app instance"
                             )
-                        # Module-level router = APIRouter()
+                        # Module-level router instance
                         elif "router" in name_lower:
                             router_hints.append(
-                                f"from {module_path} import {target.id}"
+                                f"from {module_path} import {target.id}  # router instance"
                             )
 
-    def _is_fastapi_call(self, node) -> bool:
-        """Check if an AST node is a FastAPI() or similar call."""
+    def _is_stub_function(self, node) -> bool:
+        """Check if a FunctionDef is a scaffold stub (body is only raise/pass/docstring+raise)."""
         import ast
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id in ("FastAPI", "Flask", "Starlette"):
+        # Filter out docstrings and pass statements to find meaningful body
+        meaningful = [
+            stmt for stmt in node.body
+            if not (isinstance(stmt, ast.Pass)
+                    or (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant)
+                        and isinstance(stmt.value.value, str)))
+        ]
+        if len(meaningful) == 0:
+            return True  # only pass/docstring — stub
+        if len(meaningful) == 1 and isinstance(meaningful[0], ast.Raise):
+            exc = meaningful[0].exc
+            if exc is None:
+                return True  # bare raise
+            # raise NotImplementedError / raise NotImplementedError(...)
+            if isinstance(exc, ast.Name) and exc.id == "NotImplementedError":
                 return True
-            if isinstance(node.func, ast.Attribute) and node.func.attr in ("FastAPI", "Flask"):
+            if isinstance(exc, ast.Call):
+                func = exc.func
+                if isinstance(func, ast.Name) and func.id == "NotImplementedError":
+                    return True
+        return False
+
+    def _is_app_constructor(self, node) -> bool:
+        """Check if an AST node is a web framework app constructor call."""
+        import ast
+        _APP_CLASSES = {"FastAPI", "Flask", "Starlette", "Express", "Sanic", "Litestar"}
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in _APP_CLASSES:
+                return True
+            if isinstance(node.func, ast.Attribute) and node.func.attr in _APP_CLASSES:
                 return True
         return False
 

@@ -550,6 +550,7 @@ class Autocoder(BaseAIAgent):
         source_files: dict,
         test_files: dict,
         error_message: str,
+        readonly_context: Optional[dict] = None,
         on_status_message: Optional[Callable[[str], None]] = None,
     ) -> AutocoderProcessResult:
         """
@@ -558,6 +559,9 @@ class Autocoder(BaseAIAgent):
         Two-shot: system+user → LLM returns analysis + changes in one call.
         Sends all relevant source and test file contents directly in the prompt
         so the LLM has full context without needing discovery tools.
+
+        readonly_context: dict of filepath→content for files from prior issues.
+            Included for reference but must NOT be modified by the repair.
         """
         if on_status_message is not None:
             self._on_status_message = on_status_message
@@ -571,6 +575,12 @@ class Autocoder(BaseAIAgent):
         for fp, content in source_files.items():
             source_block += f"── {fp} ──\n```python\n{content}\n```\n\n"
 
+        # Format read-only dependency files
+        readonly_block = ""
+        if readonly_context:
+            for fp, content in readonly_context.items():
+                readonly_block += f"── {fp} (READ-ONLY) ──\n```python\n{content}\n```\n\n"
+
         # Format test files inline
         test_block = ""
         for fp, content in test_files.items():
@@ -580,6 +590,7 @@ class Autocoder(BaseAIAgent):
             error_output=error_message,
             source_files=source_block or "(no source files)",
             test_files=test_block or "(no test files)",
+            readonly_files=readonly_block or "",
         )
 
         log(f"Autocoder: inline repair with {len(source_files)} source + {len(test_files)} test file(s)...")
@@ -618,7 +629,8 @@ class Autocoder(BaseAIAgent):
                 if fix_plan:
                     log(f"Autocoder: fix plan — {fix_plan[:120]}")
 
-                changes = self._parse_changes(json_response)
+                known = set(source_files.keys()) | set(test_files.keys()) | set((readonly_context or {}).keys())
+                changes = self._parse_changes(json_response, known_files=known)
                 dependencies = json_response.get("dependencies", [])
 
                 if not changes:
@@ -775,8 +787,13 @@ class Autocoder(BaseAIAgent):
             f"Last error: {last_error}"
         )
 
-    def _parse_changes(self, json_response: dict) -> List[FileChange]:
-        """Parse a changes array from AI response into FileChange objects."""
+    def _parse_changes(self, json_response: dict, known_files: Optional[set] = None) -> List[FileChange]:
+        """Parse a changes array from AI response into FileChange objects.
+
+        known_files: optional set of filepaths from the repair context.
+            Used to recover hallucinated path prefixes like
+            'absolute/path/to/pet_groomer_backend/...' → 'pet_groomer_backend/...'.
+        """
         raw_changes = json_response.get("changes", [])
         changes = []
         for ch in raw_changes:
@@ -786,6 +803,14 @@ class Autocoder(BaseAIAgent):
             code = self._strip_code_block(code_raw)
             if code and code.strip():
                 filepath = ch["filepath"].lstrip("/")
+
+                # Recover hallucinated path prefixes by matching against known files
+                if known_files and filepath not in known_files:
+                    for kf in known_files:
+                        if filepath.endswith("/" + kf) or filepath.endswith(kf):
+                            filepath = kf
+                            break
+
                 changes.append(FileChange(
                     filepath=filepath,
                     code=code,

@@ -36,7 +36,16 @@ WORKSPACE_DIR = PROJECT_ROOT / "backend"
 DOCKER_IMAGE = "pet_groomer-backend:dev"
 PROBLEM_ID = 1  # Fresh engineer analysis with architecture context
 MAX_FAILURES = 3  # Stop after this many failed issues
-MAX_ITERATIONS = 10  # Per-issue iteration cap
+MAX_ITERATIONS = 6  # Per-issue iteration cap (generate + 2 repair + stall recovery)
+STALL_THRESHOLD = 2  # Consecutive failures before stall action
+
+# ── Model Configuration ──────────────────────────────────────────────────────
+MODEL = "gpt-4o-mini"                      # Starting model for all agents
+MODEL_ESCALATION = ["gpt-4o-mini"]         # Escalation chain (single = no escalation)
+ENABLE_AGENTIC_DEBUG = False               # Agentic debugger (tool-loop diagnosis)
+ENABLE_AGENTIC_REPAIR = False              # Agentic repair (tool-loop repair vs inline)
+ENABLE_AGENTIC_TESTS = False               # Agentic test gen (tool-loop vs inline)
+STALL_RECOVERY = "none"                    # "full", "regenerate", or "none"
 
 
 # ── Metrics ──────────────────────────────────────────────────────────────────
@@ -210,7 +219,7 @@ def main():
 
     # Load config
     config = BiznizConfig.find_and_load()
-    model = "gpt-4o-mini"
+    model = MODEL
     print(f"\n  Model: {model}")
     print(f"  Project: {PROJECT_ROOT}")
     print(f"  Docker image: {DOCKER_IMAGE}")
@@ -296,6 +305,17 @@ def main():
             dep_edges = []
     else:
         dep_edges = []
+
+    # Nuke all source/test .py files so scaffold creates fresh stubs
+    # (prevents stale code from prior architect runs surviving)
+    _protected_dirs = {".bizniz", ".snapshots", "__pycache__", "docs"}
+    for py_file in WORKSPACE_DIR.rglob("*.py"):
+        if any(part in _protected_dirs for part in py_file.parts):
+            continue
+        if py_file.name in ("setup.py", "conftest.py"):
+            continue
+        py_file.unlink()
+    print(f"  [cleanup] Removed stale source files for fresh scaffold")
 
     # Run scaffold to create stub files before code gen
     if plan_row and plan:
@@ -464,6 +484,22 @@ def main():
     # Clean workspace before baseline snapshot
     _nuke_shadow_files(WORKSPACE_DIR)
     _sanitize_requirements(WORKSPACE_DIR)
+
+    # Remove junk directories created by LLM hallucinated paths (e.g. absolute/path/to/...)
+    _expected_top_dirs = set()
+    for iss in issues:
+        for tf in iss["target_files"]:
+            top = Path(tf["filepath"]).parts[0] if "/" in tf["filepath"] else None
+            if top:
+                _expected_top_dirs.add(top)
+        for tf in iss["test_files"]:
+            top = Path(tf).parts[0]
+            _expected_top_dirs.add(top)
+    _expected_top_dirs.update({".bizniz", ".snapshots", "__pycache__", "docs", "node_modules"})
+    for item in WORKSPACE_DIR.iterdir():
+        if item.is_dir() and item.name not in _expected_top_dirs:
+            shutil.rmtree(item)
+            print(f"  [cleanup] Removed unexpected directory: {item.name}")
     # Also clean any existing snapshots
     if snapshot_dir.exists():
         for snap in snapshot_dir.iterdir():
@@ -474,6 +510,11 @@ def main():
     # Save initial clean state
     snapshot_workspace("baseline")
     last_good_snapshot = "baseline"
+
+    # Track test files from completed issues for regression baseline
+    completed_test_files: set = set()
+    # Track source files from completed issues for cross-issue context
+    completed_source_files: dict = {}  # filepath -> content
 
     try:
         for i, issue in enumerate(issues):
@@ -518,8 +559,8 @@ def main():
                         api_key=os.environ["OPENAI_API_KEY"],
                     )
 
-                # Honor engineer's suggested_model per issue, fall back to default
-                issue_model = issue.get("suggested_model") or model
+                # Force all issues to use the configured model (no suggested_model override)
+                issue_model = model
                 print(f"  Model: {issue_model}")
                 client = make_client(issue_model)
 
@@ -537,8 +578,7 @@ def main():
                     on_status_message=status_cb,
                 )
 
-                # Model escalation on stall: mini → 4o only, no claude
-                progression = ModelProgression(["gpt-4o-mini", "gpt-4o"])
+                progression = ModelProgression(MODEL_ESCALATION)
 
                 orchestrator = CodingOrchestrator(
                     autocoder=autocoder,
@@ -549,16 +589,22 @@ def main():
                     client_factory=make_client,
                     model_progression=progression,
                     max_iterations=MAX_ITERATIONS,
-                    stall_threshold=3,
-                    agentic_debug_threshold=2,
+                    stall_threshold=STALL_THRESHOLD,
+                    agentic_debug_threshold=STALL_THRESHOLD,
                     on_status_message=status_cb,
-                    enable_agentic_debug=False,
+                    enable_agentic_debug=ENABLE_AGENTIC_DEBUG,
+                    stall_recovery=STALL_RECOVERY,
                 )
 
                 # Build problem statement for orchestrator
                 problem_stmt = f"{issue['description']}"
                 if issue.get("test_setup_hint"):
                     problem_stmt += f"\n\nTEST SETUP HINT:\n{issue['test_setup_hint']}"
+
+                # Build workspace context from completed dependency files
+                ws_context = None
+                if completed_source_files and issue.get("depends_on"):
+                    ws_context = dict(completed_source_files)
 
                 result = orchestrator.run_multi(
                     prompt=problem_stmt,
@@ -567,6 +613,8 @@ def main():
                     architecture_context=arch_context,
                     strategy=CodingStrategy.CODE_FIRST,
                     dependency_edges=dep_edges,
+                    prior_test_files=completed_test_files or None,
+                    workspace_context=ws_context,
                 )
 
                 issue_metrics.finish(
@@ -578,6 +626,11 @@ def main():
                 if result.success:
                     print(f"\n  ✓ PASSED in {issue_metrics.elapsed_seconds:.1f}s "
                           f"({result.iterations} iterations)")
+                    # Track test files for regression baseline
+                    completed_test_files.update(issue["test_files"])
+                    # Track source files for cross-issue context
+                    for ch in result.changes:
+                        completed_source_files[ch.filepath] = ch.code
                     # Snapshot workspace after success to prevent cascade
                     snap_label = f"after_issue_{issue['id']}"
                     snapshot_workspace(snap_label)
