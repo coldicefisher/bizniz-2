@@ -39,10 +39,13 @@ share/python-wheels/
 *.swo
 *~
 
-# Environment variables
+# Environment variables / secrets
 .env
 .env.*
 !.env.example
+*_key.txt
+*_key.json
+credentials.*
 
 # OS
 .DS_Store
