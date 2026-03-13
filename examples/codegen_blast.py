@@ -35,17 +35,13 @@ PROJECT_ROOT = Path("/home/jamey/bizniz_projects/pet_groomer")
 WORKSPACE_DIR = PROJECT_ROOT / "backend"
 DOCKER_IMAGE = "pet_groomer-backend:dev"
 PROBLEM_ID = 1  # Fresh engineer analysis with architecture context
-MAX_FAILURES = 3  # Stop after this many failed issues
-MAX_ITERATIONS = 6  # Per-issue iteration cap (generate + 2 repair + stall recovery)
-STALL_THRESHOLD = 2  # Consecutive failures before stall action
+MAX_FAILURES = 8  # Stop after this many failed issues (high = let all passes run)
 
 # ── Model Configuration ──────────────────────────────────────────────────────
-MODEL = "gpt-4o"                            # Starting model for all agents
-MODEL_ESCALATION = ["gpt-4o"]              # Escalation chain (single = no escalation)
-ENABLE_AGENTIC_DEBUG = False               # Agentic debugger (tool-loop diagnosis)
-ENABLE_AGENTIC_REPAIR = False              # Agentic repair (tool-loop repair vs inline)
-ENABLE_AGENTIC_TESTS = False               # Agentic test gen (tool-loop vs inline)
-STALL_RECOVERY = "none"                    # "full", "regenerate", or "none"
+# Phase 1 (framing) always uses the baseline model. Phase 2 (testing)
+# uses a multi-pass strategy with escalation — see PASSES config in
+# _phase2_test() for per-pass model/iteration/debug settings.
+MODEL = "gpt-4o-mini"                        # Baseline model for Phase 1
 
 
 # ── Metrics ──────────────────────────────────────────────────────────────────
@@ -195,6 +191,479 @@ def _topological_sort(issues):
     return ordered
 
 
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _nuke_shadow_files(target_dir: Path):
+    """Remove top-level .py files that shadow known packages."""
+    _stdlib = set(sys.stdlib_module_names)
+    _aliases = {"cv2", "PIL", "sklearn", "yaml", "bs4", "gi", "attr", "dotenv"}
+    _common_pkgs = {
+        "pydantic", "fastapi", "flask", "django", "sqlalchemy", "celery",
+        "redis", "requests", "httpx", "uvicorn", "starlette", "pytest",
+        "numpy", "pandas", "click", "rich", "boto3", "stripe",
+    }
+    _skip = {"conftest", "sitecustomize", "setup", "manage", "app", "main"}
+
+    for py_file in target_dir.glob("*.py"):
+        if py_file.name.startswith("__"):
+            continue
+        stem = py_file.stem
+        stem_lower = stem.lower().replace("-", "_")
+        if stem_lower in _skip:
+            continue
+        if stem in _stdlib or stem in _aliases or stem_lower in _common_pkgs:
+            py_file.unlink()
+            print(f"  [cleanup] Removed shadow file: {py_file.name}")
+
+
+def _sanitize_requirements(target_dir: Path):
+    """Remove invalid entries from requirements.txt."""
+    import re as _re
+    _stdlib = set(sys.stdlib_module_names)
+
+    for req_file in target_dir.rglob("requirements.txt"):
+        try:
+            lines = req_file.read_text().splitlines()
+        except Exception:
+            continue
+        clean = []
+        seen = set()
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                clean.append(line)
+                continue
+            pkg = _re.split(r"[><=!\[;]", stripped)[0].strip().lower().replace("-", "_")
+            if pkg in _stdlib:
+                print(f"  [cleanup] Removed stdlib '{stripped}' from {req_file}")
+                continue
+            if pkg in seen:
+                continue
+            if not _re.match(r"^[a-zA-Z]", stripped):
+                print(f"  [cleanup] Removed invalid '{stripped}' from {req_file}")
+                continue
+            seen.add(pkg)
+            clean.append(stripped)
+        req_file.write_text("\n".join(clean) + "\n")
+
+
+def _run_preflight_standalone(generated_files, workspace, language="python"):
+    """Run preflight validation without Docker.
+
+    Validates imports and creates auto-stubs. Writes any stubs/rewrites
+    to the workspace on disk.
+    """
+    from bizniz.preflight.registry import get_validator
+
+    validator = get_validator(language, workspace)
+    if not validator:
+        return None
+
+    result = validator.validate(generated_files, [])
+
+    # Write auto-stubs to disk
+    for stub in result.stubs_created:
+        workspace.write_file(path=stub.filepath, content=stub.content)
+
+    # Write import rewrites to disk
+    for rw in result.import_rewrites:
+        if rw.filepath in generated_files:
+            content = workspace.read_file(path=rw.filepath)
+            if content:
+                updated = content.replace(rw.old_import, rw.new_import)
+                workspace.write_file(path=rw.filepath, content=updated)
+
+    return result
+
+
+# ── Phase 1: Frame (generate ALL code, no tests) ────────────────────────────
+
+def _phase1_frame(issues, workspace, arch_context, make_client, env):
+    """Generate source code for all issues in topological order.
+
+    No Docker, no tests. Writes real code to disk so later issues
+    can import from earlier ones (instead of stubs).
+    """
+    from bizniz.autocoder.autocoder import Autocoder
+
+    print(f"\n{'=' * 60}")
+    print("  PHASE 1: FRAME (generate all code, no tests)")
+    print(f"{'=' * 60}\n")
+
+    failed_issue_ids = set()
+    phase1_metrics = []
+
+    for i, issue in enumerate(issues):
+        print(f"  [{i+1}/{len(issues)}] {issue['title']}")
+
+        metrics = IssueMetrics(issue["id"], issue["title"])
+        metrics.start()
+        status_cb = make_status_callback(metrics)
+
+        try:
+            client = make_client(MODEL)
+            autocoder = Autocoder(
+                client=client,
+                environment=env,
+                workspace=workspace,
+                on_status_message=status_cb,
+            )
+
+            # Build problem statement — just the issue + hints.
+            # Dependency code is already on disk; the agent discovers it via tools.
+            problem_stmt = issue["description"]
+            if issue.get("test_setup_hint"):
+                problem_stmt += f"\n\nTEST SETUP HINT:\n{issue['test_setup_hint']}"
+
+            # Generate source code only (no test_files)
+            result = autocoder.generate_multi(
+                issue_description=problem_stmt,
+                target_files=issue["target_files"],
+                architecture_context=arch_context,
+                test_files=None,  # No tests in Phase 1
+                on_status_message=status_cb,
+            )
+
+            # Run standalone preflight to fix imports and create auto-stubs
+            generated = {ch.filepath: ch.code for ch in result.changes}
+            pfr = _run_preflight_standalone(generated, workspace)
+            if pfr:
+                print(f"    {pfr.summary()}")
+
+            metrics.finish(success=True, iterations=1, strategy="frame")
+            print(f"    Framed in {metrics.elapsed_seconds:.1f}s "
+                  f"({len(result.changes)} files)")
+            phase1_metrics.append({"id": issue["id"], "title": issue["title"], "status": "framed"})
+
+        except Exception as e:
+            error_str = f"{type(e).__name__}: {str(e)[:200]}"
+            failed_issue_ids.add(issue["id"])
+            metrics.finish(success=False, error=error_str)
+            print(f"    FAILED: {error_str}")
+            phase1_metrics.append({"id": issue["id"], "title": issue["title"], "status": "failed", "error": error_str})
+
+    _nuke_shadow_files(WORKSPACE_DIR)
+
+    framed = sum(1 for m in phase1_metrics if m["status"] == "framed")
+    print(f"\n  Phase 1 complete: {framed}/{len(issues)} issues framed")
+    return failed_issue_ids, phase1_metrics
+
+
+# ── Phase 2: Test (generate tests + run + repair, bottom-up) ────────────────
+
+def _collect_dep_files(issue, issues):
+    """Collect all source file paths from an issue's transitive dependencies.
+
+    Returns a list of {"filepath": ..., "action": "modify"} dicts for
+    dependency files that the repair loop is allowed to modify.
+    """
+    id_to_issue = {iss["id"]: iss for iss in issues}
+    dep_ids = set(issue.get("depends_on", []))
+    own_files = {tf["filepath"] for tf in issue["target_files"]}
+
+    visited = set()
+    dep_files = []
+    queue = list(dep_ids)
+    while queue:
+        dep_id = queue.pop(0)
+        if dep_id in visited:
+            continue
+        visited.add(dep_id)
+        dep_issue = id_to_issue.get(dep_id)
+        if not dep_issue:
+            continue
+        for tf in dep_issue["target_files"]:
+            fp = tf["filepath"]
+            if fp not in own_files:
+                dep_files.append({"filepath": fp, "action": "modify"})
+                own_files.add(fp)  # dedup
+        for transitive_id in dep_issue.get("depends_on", []):
+            if transitive_id not in visited:
+                queue.append(transitive_id)
+
+    return dep_files
+
+
+def _find_issues_affected_by(modified_files, issues, passed_issue_ids):
+    """Find already-passed issues whose source files were modified.
+
+    Returns issue IDs that need re-testing because their own files
+    or their dependency files were changed.
+    """
+    affected = []
+    for iss in issues:
+        if iss["id"] not in passed_issue_ids:
+            continue
+        own_files = {tf["filepath"] for tf in iss["target_files"]}
+        if own_files & modified_files:
+            affected.append(iss["id"])
+    return affected
+
+
+def _phase2_test(
+    issues, workspace, arch_context, dep_edges, make_client, env,
+    phase1_failed_ids, run_metrics,
+    snapshot_workspace_fn, restore_workspace_fn,
+):
+    """Multi-pass test strategy: quick passes first, then escalate.
+
+    Pass 1 (Quick):   All issues, 2 iters, gpt-4o-mini, dumb repair, no rollback
+    Pass 2 (Escalate): Failed issues, 3 iters, gpt-4o, dumb repair, no rollback
+    Pass 3 (Deep):    Remaining failures, 6 iters, gpt-4o, agentic debugger, rollback
+
+    Between passes, re-test all passed issues to catch regressions from
+    cross-issue code modifications.
+    """
+    from bizniz.autocoder.autocoder import Autocoder
+    from bizniz.autotester.autotester import Autotester
+    from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
+    from bizniz.orchestrator.strategy import CodingStrategy
+    from bizniz.orchestrator.model_progression import ModelProgression
+
+    # ── Pass configuration ────────────────────────────────────────────────
+    PASSES = [
+        {
+            "name": "Quick",
+            "model": "gpt-4o-mini",
+            "escalation": ["gpt-4o-mini"],
+            "max_iters": 2,
+            "stall_threshold": 2,
+            "agentic_debug": False,
+            "stall_recovery": "none",
+            "rollback_on_fail": False,
+            "attempt": "all",  # attempt all issues
+        },
+        {
+            "name": "Escalate",
+            "model": "gpt-4o",
+            "escalation": ["gpt-4o"],
+            "max_iters": 3,
+            "stall_threshold": 2,
+            "agentic_debug": False,
+            "stall_recovery": "none",
+            "rollback_on_fail": False,
+            "attempt": "failed",  # only failed issues
+        },
+        {
+            "name": "Deep",
+            "model": "gpt-4o",
+            "escalation": ["gpt-4o", "gpt-5"],
+            "max_iters": 6,
+            "stall_threshold": 2,
+            "agentic_debug": True,
+            "stall_recovery": "none",
+            "rollback_on_fail": True,
+            "attempt": "failed",
+        },
+    ]
+
+    passed_issue_ids: set = set()
+    failed_issue_ids: set = set()
+    skipped_issue_ids: set = set()
+    completed_test_files: set = set()
+    last_good_snapshot = "post_phase1"
+    id_to_issue = {iss["id"]: iss for iss in issues}
+
+    def _run_issue(issue, pass_cfg, label="Issue"):
+        """Run the orchestrator for a single issue. Returns (success, metrics, result)."""
+        idx = next((j for j, iss in enumerate(issues) if iss["id"] == issue["id"]), 0)
+
+        issue_metrics = IssueMetrics(issue["id"], issue["title"])
+        issue_metrics.start()
+
+        print(f"\n{'─' * 60}")
+        print(f"  {label} {idx+1}/{len(issues)}: [{issue['id']}] {issue['title']}")
+        print(f"{'─' * 60}")
+
+        status_cb = make_status_callback(issue_metrics)
+
+        try:
+            model = pass_cfg["model"]
+            print(f"  Model: {model} | Pass: {pass_cfg['name']} | Max iters: {pass_cfg['max_iters']}")
+            client = make_client(model)
+
+            autocoder = Autocoder(
+                client=client,
+                environment=env,
+                workspace=workspace,
+                on_status_message=status_cb,
+            )
+
+            autotester = Autotester(
+                client=client,
+                environment=env,
+                workspace=workspace,
+                on_status_message=status_cb,
+            )
+
+            progression = ModelProgression(pass_cfg["escalation"])
+
+            orchestrator = CodingOrchestrator(
+                autocoder=autocoder,
+                autotester=autotester,
+                test_environment=env,
+                workspace=workspace,
+                client=client,
+                client_factory=make_client,
+                model_progression=progression,
+                max_iterations=pass_cfg["max_iters"],
+                stall_threshold=pass_cfg["stall_threshold"],
+                agentic_debug_threshold=pass_cfg["stall_threshold"],
+                on_status_message=status_cb,
+                enable_agentic_debug=pass_cfg["agentic_debug"],
+                stall_recovery=pass_cfg["stall_recovery"],
+            )
+
+            # Build problem statement
+            problem_stmt = issue["description"]
+            if issue.get("test_setup_hint"):
+                problem_stmt += f"\n\nTEST SETUP HINT:\n{issue['test_setup_hint']}"
+
+            # Include dependency files as writable targets so repair can modify them
+            own_targets = [
+                {"filepath": tf["filepath"], "action": "modify"}
+                for tf in issue["target_files"]
+            ]
+            dep_targets = _collect_dep_files(issue, issues)
+            target_files = own_targets + dep_targets
+            if dep_targets:
+                print(f"  Writable deps: {', '.join(tf['filepath'] for tf in dep_targets)}")
+
+            result = orchestrator.run_multi(
+                prompt=problem_stmt,
+                target_files=target_files,
+                test_files=issue["test_files"],
+                architecture_context=arch_context,
+                strategy=CodingStrategy.CODE_FIRST,
+                dependency_edges=dep_edges,
+                prior_test_files=completed_test_files or None,
+            )
+
+            issue_metrics.finish(
+                success=result.success,
+                iterations=result.iterations,
+                strategy=result.strategy_used,
+            )
+
+            if not result.success:
+                issue_metrics.finish(
+                    success=False,
+                    iterations=result.iterations,
+                    error="Tests did not pass",
+                    strategy=result.strategy_used,
+                )
+
+            return result.success, issue_metrics, result
+
+        except Exception as e:
+            error_name = type(e).__name__
+            error_str = f"{error_name}: {str(e)[:200]}"
+
+            if "no test files" in str(e).lower() or "no tests" in str(e).lower():
+                issue_metrics.finish(success=False, error=error_str)
+                issue_metrics.skipped = True
+                print(f"\n  SKIPPED (no tests possible): {error_str}")
+                return None, issue_metrics, None
+            else:
+                issue_metrics.finish(success=False, error=error_str)
+                print(f"\n  CRASHED: {error_str}")
+                return False, issue_metrics, None
+
+    # ── Multi-pass loop ───────────────────────────────────────────────────
+    for pass_idx, pass_cfg in enumerate(PASSES):
+        pass_name = pass_cfg["name"]
+
+        # Determine which issues to attempt this pass
+        if pass_cfg["attempt"] == "all":
+            attempt_issues = list(issues)
+        else:
+            attempt_issues = [
+                iss for iss in issues
+                if iss["id"] in failed_issue_ids or iss["id"] not in passed_issue_ids
+            ]
+
+        if not attempt_issues:
+            print(f"\n  All issues passed — skipping remaining passes")
+            break
+
+        print(f"\n{'=' * 60}")
+        print(f"  PASS {pass_idx + 1}: {pass_name.upper()} "
+              f"({len(attempt_issues)} issues, "
+              f"model={pass_cfg['model']}, "
+              f"max_iters={pass_cfg['max_iters']})")
+        print(f"{'=' * 60}")
+
+        pass_newly_passed = []
+
+        for issue in attempt_issues:
+            # Already passed in this pass (e.g. from re-test)
+            if issue["id"] in passed_issue_ids:
+                continue
+
+            success, issue_metrics, result = _run_issue(issue, pass_cfg)
+            run_metrics.add(issue_metrics)
+
+            if success:
+                elapsed = issue_metrics.elapsed_seconds
+                iters = result.iterations if result else 0
+                print(f"\n  PASSED in {elapsed:.1f}s ({iters} iterations)")
+                passed_issue_ids.add(issue["id"])
+                failed_issue_ids.discard(issue["id"])
+                completed_test_files.update(issue["test_files"])
+                pass_newly_passed.append(issue["id"])
+
+                # Snapshot on success
+                snap_label = f"pass{pass_idx+1}_issue_{issue['id']}"
+                snapshot_workspace_fn(snap_label)
+                last_good_snapshot = snap_label
+
+            elif success is None:
+                # Skipped
+                skipped_issue_ids.add(issue["id"])
+            else:
+                elapsed = issue_metrics.elapsed_seconds
+                print(f"\n  FAILED in {elapsed:.1f}s — continuing")
+                failed_issue_ids.add(issue["id"])
+
+                if pass_cfg["rollback_on_fail"]:
+                    restore_workspace_fn(last_good_snapshot)
+
+        # ── Between-pass regression check ─────────────────────────────────
+        # Re-test all previously passed issues to catch regressions from
+        # cross-issue code modifications during this pass
+        if pass_newly_passed and passed_issue_ids - set(pass_newly_passed):
+            prior_passed = [
+                iss for iss in issues
+                if iss["id"] in passed_issue_ids and iss["id"] not in pass_newly_passed
+            ]
+            if prior_passed:
+                print(f"\n  ── Regression check: re-testing {len(prior_passed)} prior issues ──")
+                for iss in prior_passed:
+                    success, re_metrics, _ = _run_issue(iss, pass_cfg, label="RECHECK")
+                    run_metrics.add(re_metrics)
+                    if success:
+                        print(f"  RECHECK OK: [{iss['id']}] {iss['title']}")
+                    elif success is None:
+                        pass
+                    else:
+                        print(f"  REGRESSION: [{iss['id']}] {iss['title']}")
+                        passed_issue_ids.discard(iss["id"])
+                        failed_issue_ids.add(iss["id"])
+                        completed_test_files -= set(iss["test_files"])
+
+        # Pass summary
+        total_passed = len(passed_issue_ids)
+        total_failed = len(failed_issue_ids)
+        print(f"\n  Pass {pass_idx+1} ({pass_name}) complete: "
+              f"{total_passed} passed, {total_failed} failed, "
+              f"{len(skipped_issue_ids)} skipped")
+
+        if not failed_issue_ids:
+            break
+
+    return failed_issue_ids
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -204,17 +673,11 @@ def main():
     from bizniz.clients.chatgpt.openai_chatgpt_client import OpenAIChat4GPTClient
     from bizniz.clients.chatgpt.chatgpt_client_config import ChatGPTClientConfig
     from bizniz.clients.claude.claude_client import ClaudeClient
-    from bizniz.autocoder.autocoder import Autocoder
-    from bizniz.autotester.autotester import Autotester
-    from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-    from bizniz.orchestrator.strategy import CodingStrategy
-    from bizniz.agentic_debugger.agentic_debugger import AgenticDebugger
     from bizniz.engineer.auto_engineer import AutoEngineer
     from bizniz.engineer.types import ArchitecturePlan
-    from bizniz.orchestrator.model_progression import ModelProgression
 
     print("=" * 60)
-    print("  Code Generation Blast Test")
+    print("  Two-Phase Code Generation Blast Test")
     print("=" * 60)
 
     # Load config
@@ -223,8 +686,7 @@ def main():
     print(f"\n  Model: {model}")
     print(f"  Project: {PROJECT_ROOT}")
     print(f"  Docker image: {DOCKER_IMAGE}")
-    print(f"  Max failures before abort: {MAX_FAILURES}")
-    print(f"  Max iterations per issue: {MAX_ITERATIONS}")
+    print(f"  Strategy: multi-pass (quick → escalate → deep)")
 
     # Setup workspace
     workspace = LocalWorkspace(root=WORKSPACE_DIR)
@@ -307,7 +769,6 @@ def main():
         dep_edges = []
 
     # Nuke all source/test .py files so scaffold creates fresh stubs
-    # (prevents stale code from prior architect runs surviving)
     _protected_dirs = {".bizniz", ".snapshots", "__pycache__", "docs"}
     for py_file in WORKSPACE_DIR.rglob("*.py"):
         if any(part in _protected_dirs for part in py_file.parts):
@@ -322,7 +783,6 @@ def main():
         from bizniz.engineer.scaffold import scaffold_from_plan
         from bizniz.engineer.types import EngineeringIssue, TargetFile
 
-        # Convert issue dicts to EngineeringIssue objects for scaffold
         scaffold_issues = []
         for iss in issues:
             scaffold_issues.append(EngineeringIssue(
@@ -342,125 +802,25 @@ def main():
         )
         print(f"  Scaffold: {len(import_map)} stub files created")
 
-        # Update issue dicts with flipped actions (create → modify)
+        # Update issue dicts with flipped actions (create -> modify)
         for iss, eng_iss in zip(issues, scaffold_issues):
             iss["target_files"] = [
                 {"filepath": tf.filepath, "action": tf.action}
                 for tf in eng_iss.target_files
             ]
 
-    print(f"\n{'=' * 60}")
-    print("  Starting...\n")
-
-    # Setup Docker environment
-    env = DockerPytestEnvironment(
-        workspace_root=WORKSPACE_DIR,
-        image=DOCKER_IMAGE,
-    )
-
-    run_metrics = RunMetrics()
-    failure_count = 0
-    failed_issue_ids = set()  # Track failed IDs for dependency skip
-
-    # Workspace snapshotting to prevent cascade failures
-    snapshot_dir = PROJECT_ROOT / ".snapshots"
-    snapshot_dir.mkdir(exist_ok=True)
-
-    def _nuke_shadow_files(target_dir: Path):
-        """Remove top-level .py files that shadow known packages.
-
-        Checks stdlib and common aliases only (no network calls).
-        The preflight validator handles dynamic PyPI checks at runtime.
-        """
-        _stdlib = set(sys.stdlib_module_names)
-        _aliases = {"cv2", "PIL", "sklearn", "yaml", "bs4", "gi", "attr", "dotenv"}
-        # Common third-party packages that agents frequently shadow
-        _common_pkgs = {
-            "pydantic", "fastapi", "flask", "django", "sqlalchemy", "celery",
-            "redis", "requests", "httpx", "uvicorn", "starlette", "pytest",
-            "numpy", "pandas", "click", "rich", "boto3", "stripe",
-        }
-        _skip = {"conftest", "sitecustomize", "setup", "manage", "app", "main"}
-
-        for py_file in target_dir.glob("*.py"):
-            if py_file.name.startswith("__"):
-                continue
-            stem = py_file.stem
-            stem_lower = stem.lower().replace("-", "_")
-            if stem_lower in _skip:
-                continue
-            if stem in _stdlib or stem in _aliases or stem_lower in _common_pkgs:
-                py_file.unlink()
-                print(f"  [cleanup] Removed shadow file: {py_file.name}")
-
-    def _sanitize_requirements(target_dir: Path):
-        """Remove invalid entries from requirements.txt.
-
-        Strips stdlib modules, garbage entries, and duplicates that
-        accumulate from bad LLM suggestions across runs.
-        """
-        import re as _re
-        _stdlib = set(sys.stdlib_module_names)
-
-        for req_file in target_dir.rglob("requirements.txt"):
-            try:
-                lines = req_file.read_text().splitlines()
-            except Exception:
-                continue
-            clean = []
-            seen = set()
-            for line in lines:
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
-                    clean.append(line)
-                    continue
-                # Extract bare package name
-                pkg = _re.split(r"[><=!\[;]", stripped)[0].strip().lower().replace("-", "_")
-                if pkg in _stdlib:
-                    print(f"  [cleanup] Removed stdlib '{stripped}' from {req_file}")
-                    continue
-                if pkg in seen:
-                    continue
-                # Reject entries with no letters or that look malformed
-                if not _re.match(r"^[a-zA-Z]", stripped):
-                    print(f"  [cleanup] Removed invalid '{stripped}' from {req_file}")
-                    continue
-                seen.add(pkg)
-                clean.append(stripped)
-            req_file.write_text("\n".join(clean) + "\n")
-
-    def snapshot_workspace(label: str):
-        """Save a copy of the workspace after successful issue completion."""
-        snap = snapshot_dir / label
-        if snap.exists():
-            shutil.rmtree(snap)
-        shutil.copytree(WORKSPACE_DIR, snap, ignore=shutil.ignore_patterns(".bizniz", ".snapshots", "__pycache__", "*.pyc"))
-        _nuke_shadow_files(snap)
-        print(f"  [snapshot] Saved workspace state: {label}")
-
-    def restore_workspace(label: str):
-        """Restore workspace to a previous snapshot, preserving .bizniz DB."""
-        snap = snapshot_dir / label
-        if not snap.exists():
-            print(f"  [snapshot] No snapshot '{label}' found — skipping restore")
-            return
-        # Remove current generated files but keep .bizniz
-        for item in WORKSPACE_DIR.iterdir():
-            if item.name in (".bizniz", ".snapshots"):
-                continue
-            if item.is_dir():
-                shutil.rmtree(item)
-            else:
-                item.unlink()
-        # Copy snapshot back
-        for item in snap.iterdir():
-            dest = WORKSPACE_DIR / item.name
-            if item.is_dir():
-                shutil.copytree(item, dest)
-            else:
-                shutil.copy2(item, dest)
-        _nuke_shadow_files(WORKSPACE_DIR)
-        print(f"  [snapshot] Restored workspace to: {label}")
+    # Client factory
+    def make_client(model_name):
+        if model_name.startswith("claude"):
+            return ClaudeClient(
+                api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                model_name=model_name,
+            )
+        cfg = ChatGPTClientConfig(default_model=model_name)
+        return OpenAIChat4GPTClient(
+            config=cfg,
+            api_key=os.environ["OPENAI_API_KEY"],
+        )
 
     # Nuke all stale bizniz-pytest containers before starting
     import subprocess as _sp
@@ -485,7 +845,7 @@ def main():
     _nuke_shadow_files(WORKSPACE_DIR)
     _sanitize_requirements(WORKSPACE_DIR)
 
-    # Remove junk directories created by LLM hallucinated paths (e.g. absolute/path/to/...)
+    # Remove junk directories
     _expected_top_dirs = set()
     for iss in issues:
         for tf in iss["target_files"]:
@@ -500,6 +860,11 @@ def main():
         if item.is_dir() and item.name not in _expected_top_dirs:
             shutil.rmtree(item)
             print(f"  [cleanup] Removed unexpected directory: {item.name}")
+
+    # Workspace snapshotting
+    snapshot_dir = PROJECT_ROOT / ".snapshots"
+    snapshot_dir.mkdir(exist_ok=True)
+
     # Also clean any existing snapshots
     if snapshot_dir.exists():
         for snap in snapshot_dir.iterdir():
@@ -507,186 +872,76 @@ def main():
                 _nuke_shadow_files(snap)
                 _sanitize_requirements(snap)
 
+    def snapshot_workspace(label: str):
+        snap = snapshot_dir / label
+        if snap.exists():
+            shutil.rmtree(snap)
+        shutil.copytree(WORKSPACE_DIR, snap, ignore=shutil.ignore_patterns(".bizniz", ".snapshots", "__pycache__", "*.pyc"))
+        _nuke_shadow_files(snap)
+        print(f"  [snapshot] Saved workspace state: {label}")
+
+    def restore_workspace(label: str):
+        snap = snapshot_dir / label
+        if not snap.exists():
+            print(f"  [snapshot] No snapshot '{label}' found — skipping restore")
+            return
+        for item in WORKSPACE_DIR.iterdir():
+            if item.name in (".bizniz", ".snapshots"):
+                continue
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+        for item in snap.iterdir():
+            dest = WORKSPACE_DIR / item.name
+            if item.is_dir():
+                shutil.copytree(item, dest)
+            else:
+                shutil.copy2(item, dest)
+        _nuke_shadow_files(WORKSPACE_DIR)
+        print(f"  [snapshot] Restored workspace to: {label}")
+
     # Save initial clean state
     snapshot_workspace("baseline")
-    last_good_snapshot = "baseline"
 
-    # Track test files from completed issues for regression baseline
-    completed_test_files: set = set()
-    # Track source files from completed issues for cross-issue context
-    completed_source_files: dict = {}  # filepath -> content
+    # Setup Docker environment (needed for Phase 1 autocoder env.describe() and Phase 2)
+    env = DockerPytestEnvironment(
+        workspace_root=WORKSPACE_DIR,
+        image=DOCKER_IMAGE,
+    )
+
+    run_metrics = RunMetrics()
 
     try:
-        for i, issue in enumerate(issues):
-            # Skip issues whose dependencies failed
-            blocked_by = [
-                dep_id for dep_id in issue.get("depends_on", [])
-                if dep_id in failed_issue_ids
-            ]
-            if blocked_by:
-                issue_metrics = IssueMetrics(issue["id"], issue["title"])
-                issue_metrics.skipped = True
-                issue_metrics.elapsed_seconds = 0
-                issue_metrics.error = f"Skipped: dependency {blocked_by} failed"
-                # Propagate: this issue's dependents should also be skipped
-                failed_issue_ids.add(issue["id"])
-                run_metrics.add(issue_metrics)
-                print(f"\n{'─' * 60}")
-                print(f"  Issue {i+1}/{len(issues)}: [{issue['id']}] {issue['title']}")
-                print(f"  ⏭ SKIPPED — blocked by failed dependency {blocked_by}")
-                print(f"{'─' * 60}")
-                continue
+        # ── Phase 1: Frame all code (no Docker, no tests) ────────────────
+        phase1_failed_ids, phase1_metrics = _phase1_frame(
+            issues=issues,
+            workspace=workspace,
+            arch_context=arch_context,
+            make_client=make_client,
+            env=env,
+        )
 
-            issue_metrics = IssueMetrics(issue["id"], issue["title"])
-            issue_metrics.start()
+        # Snapshot after Phase 1 so Phase 2 can rollback to this state
+        _nuke_shadow_files(WORKSPACE_DIR)
+        snapshot_workspace("post_phase1")
 
-            print(f"\n{'─' * 60}")
-            print(f"  Issue {i+1}/{len(issues)}: [{issue['id']}] {issue['title']}")
-            print(f"{'─' * 60}")
-
-            status_cb = make_status_callback(issue_metrics)
-
-            try:
-                def make_client(model_name):
-                    if model_name.startswith("claude"):
-                        return ClaudeClient(
-                            api_key=os.environ.get("ANTHROPIC_API_KEY"),
-                            model_name=model_name,
-                        )
-                    cfg = ChatGPTClientConfig(default_model=model_name)
-                    return OpenAIChat4GPTClient(
-                        config=cfg,
-                        api_key=os.environ["OPENAI_API_KEY"],
-                    )
-
-                # Force all issues to use the configured model (no suggested_model override)
-                issue_model = model
-                print(f"  Model: {issue_model}")
-                client = make_client(issue_model)
-
-                autocoder = Autocoder(
-                    client=client,
-                    environment=env,
-                    workspace=workspace,
-                    on_status_message=status_cb,
-                )
-
-                autotester = Autotester(
-                    client=client,
-                    environment=env,
-                    workspace=workspace,
-                    on_status_message=status_cb,
-                )
-
-                progression = ModelProgression(MODEL_ESCALATION)
-
-                orchestrator = CodingOrchestrator(
-                    autocoder=autocoder,
-                    autotester=autotester,
-                    test_environment=env,
-                    workspace=workspace,
-                    client=client,
-                    client_factory=make_client,
-                    model_progression=progression,
-                    max_iterations=MAX_ITERATIONS,
-                    stall_threshold=STALL_THRESHOLD,
-                    agentic_debug_threshold=STALL_THRESHOLD,
-                    on_status_message=status_cb,
-                    enable_agentic_debug=ENABLE_AGENTIC_DEBUG,
-                    stall_recovery=STALL_RECOVERY,
-                )
-
-                # Build problem statement for orchestrator
-                problem_stmt = f"{issue['description']}"
-                if issue.get("test_setup_hint"):
-                    problem_stmt += f"\n\nTEST SETUP HINT:\n{issue['test_setup_hint']}"
-
-                # Build workspace context from completed dependency files
-                ws_context = None
-                if completed_source_files and issue.get("depends_on"):
-                    ws_context = dict(completed_source_files)
-
-                result = orchestrator.run_multi(
-                    prompt=problem_stmt,
-                    target_files=issue["target_files"],
-                    test_files=issue["test_files"],
-                    architecture_context=arch_context,
-                    strategy=CodingStrategy.CODE_FIRST,
-                    dependency_edges=dep_edges,
-                    prior_test_files=completed_test_files or None,
-                    workspace_context=ws_context,
-                )
-
-                issue_metrics.finish(
-                    success=result.success,
-                    iterations=result.iterations,
-                    strategy=result.strategy_used,
-                )
-
-                if result.success:
-                    print(f"\n  ✓ PASSED in {issue_metrics.elapsed_seconds:.1f}s "
-                          f"({result.iterations} iterations)")
-                    # Track test files for regression baseline
-                    completed_test_files.update(issue["test_files"])
-                    # Track source files for cross-issue context
-                    for ch in result.changes:
-                        completed_source_files[ch.filepath] = ch.code
-                    # Snapshot workspace after success to prevent cascade
-                    snap_label = f"after_issue_{issue['id']}"
-                    snapshot_workspace(snap_label)
-                    last_good_snapshot = snap_label
-                else:
-                    failure_count += 1
-                    failed_issue_ids.add(issue["id"])
-                    issue_metrics.finish(
-                        success=False,
-                        iterations=result.iterations,
-                        error="Tests did not pass",
-                        strategy=result.strategy_used,
-                    )
-                    print(f"\n  ✗ FAILED in {issue_metrics.elapsed_seconds:.1f}s "
-                          f"({result.iterations} iterations)")
-                    # Rollback to last good state to prevent cascade
-                    restore_workspace(last_good_snapshot)
-
-            except Exception as e:
-                error_name = type(e).__name__
-                error_str = f"{error_name}: {str(e)[:200]}"
-
-                # Autotester can't generate tests for non-code files (e.g. pyproject.toml)
-                # — don't count these as real failures or block dependents
-                if "no test files" in str(e).lower() or "no tests" in str(e).lower():
-                    issue_metrics.finish(success=False, error=error_str)
-                    issue_metrics.skipped = True
-                    print(f"\n  ⚠ SKIPPED (no tests possible): {error_str}")
-                else:
-                    failure_count += 1
-                    failed_issue_ids.add(issue["id"])
-                    issue_metrics.finish(success=False, error=error_str)
-                    print(f"\n  ✗ CRASHED: {error_str}")
-                    # Rollback to last good state to prevent cascade
-                    restore_workspace(last_good_snapshot)
-
-            run_metrics.add(issue_metrics)
-
-            # Check abort condition (skipped issues don't count)
-            if failure_count >= MAX_FAILURES:
-                # Skip remaining issues that depend on failed ones, but don't abort
-                remaining = issues[i+1:]
-                all_remaining_blocked = all(
-                    any(d in failed_issue_ids for d in iss.get("depends_on", []))
-                    for iss in remaining
-                ) if remaining else False
-
-                if not all_remaining_blocked:
-                    print(f"\n{'=' * 60}")
-                    print(f"  ABORTING: {failure_count} failures reached limit of {MAX_FAILURES}")
-                    print(f"{'=' * 60}")
-                    break
+        # ── Phase 2: Test bottom-up (Docker + repair loop) ───────────────
+        _phase2_test(
+            issues=issues,
+            workspace=workspace,
+            arch_context=arch_context,
+            dep_edges=dep_edges,
+            make_client=make_client,
+            env=env,
+            phase1_failed_ids=phase1_failed_ids,
+            run_metrics=run_metrics,
+            snapshot_workspace_fn=snapshot_workspace,
+            restore_workspace_fn=restore_workspace,
+        )
 
     finally:
         env.stop()
-        # Clean up snapshots
         if snapshot_dir.exists():
             shutil.rmtree(snapshot_dir)
             print("  [snapshot] Cleaned up workspace snapshots")
@@ -702,15 +957,22 @@ def main():
     print(f"  Failed: {summary['issues_failed']}")
     print(f"  Skipped: {summary.get('issues_skipped', 0)}")
     print(f"  Total iterations: {summary['total_iterations']}")
-    print()
 
+    # Phase 1 summary
+    print(f"\n  Phase 1 (framing):")
+    for m in phase1_metrics:
+        status = {"framed": "+", "skipped": "-", "failed": "!"}[m["status"]]
+        err = f" — {m.get('error', '')[:80]}" if m.get("error") else ""
+        print(f"    {status} [{m['id']}] {m['title']}{err}")
+
+    print(f"\n  Phase 2 (testing):")
     for m in summary["issue_details"]:
         if m.get("skipped"):
-            status = "⏭"
+            status = "-"
         elif m["success"]:
-            status = "✓"
+            status = "+"
         else:
-            status = "✗"
+            status = "!"
         print(f"  {status} [{m['issue_id']}] {m['title']}")
         if m.get("skipped"):
             print(f"    {m.get('error', 'Skipped')}")
@@ -730,6 +992,15 @@ def main():
     # Also save full logs
     logs_path = metrics_dir / f"run_{summary['run_id']}_logs.txt"
     with open(logs_path, "w") as f:
+        f.write("PHASE 1: FRAME\n")
+        f.write("=" * 60 + "\n")
+        for m in phase1_metrics:
+            f.write(f"  [{m['id']}] {m['title']} — {m['status']}")
+            if m.get("error"):
+                f.write(f" — {m['error']}")
+            f.write("\n")
+        f.write("\nPHASE 2: TEST\n")
+        f.write("=" * 60 + "\n")
         for m in run_metrics.issues:
             f.write(f"\n{'=' * 60}\n")
             f.write(f"Issue [{m.issue_id}] {m.title}\n")

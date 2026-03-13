@@ -140,6 +140,7 @@ class CodingOrchestrator:
         self._stall_cycle_count = 0
         self._editable_install_failed = False  # skip pip install -e . after first failure
         self._test_scaffold = ""  # cached scaffold from autocoder for test regeneration
+        self._readonly_filter_warning = ""  # set when read-only changes are filtered from repair
 
         # Override system prompts for non-Python languages
         if language == "typescript":
@@ -563,6 +564,85 @@ class CodingOrchestrator:
                 "\"dependencies\" array.\n"
             )
 
+        # ── Stub file warnings ─────────────────────────────────────────────────
+        # Tell the LLM which files are still stubs so it doesn't import from them
+        target_fps = {tf["filepath"] for tf in target_files}
+        stub_warnings = []
+        try:
+            for rel_path in self._workspace.list_relative_files():
+                rel_str = str(rel_path)
+                if rel_str in target_fps or not rel_str.endswith(".py"):
+                    continue
+                if rel_str.startswith("tests") or "__pycache__" in rel_str:
+                    continue
+                try:
+                    content = self._workspace.read_file(path=rel_str)
+                    if content and self._is_stub_file(rel_str, content):
+                        stub_warnings.append(rel_str)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Transitive stubs: files that import from stub files are also unsafe
+        if stub_warnings:
+            import ast as _ast
+            stub_modules = set()
+            for sw in stub_warnings:
+                # Convert filepath to module name (e.g. "pkg/foo.py" -> "pkg.foo")
+                mod = sw.replace("/", ".").replace("\\", ".")
+                if mod.endswith(".py"):
+                    mod = mod[:-3]
+                stub_modules.add(mod)
+
+            try:
+                for rel_path in self._workspace.list_relative_files():
+                    rel_str = str(rel_path)
+                    if rel_str in target_fps or not rel_str.endswith(".py"):
+                        continue
+                    if rel_str in stub_warnings:
+                        continue
+                    if rel_str.startswith("tests") or "__pycache__" in rel_str:
+                        continue
+                    try:
+                        content = self._workspace.read_file(path=rel_str)
+                        if not content:
+                            continue
+                        tree = _ast.parse(content, filename=rel_str)
+                        for node in _ast.iter_child_nodes(tree):
+                            if isinstance(node, _ast.Import):
+                                for alias in node.names:
+                                    if any(alias.name.startswith(sm) for sm in stub_modules):
+                                        stub_warnings.append(rel_str)
+                                        raise StopIteration
+                            elif isinstance(node, _ast.ImportFrom) and node.module:
+                                if any(node.module.startswith(sm) for sm in stub_modules):
+                                    stub_warnings.append(rel_str)
+                                    raise StopIteration
+                    except StopIteration:
+                        pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if stub_warnings:
+            extra_context += (
+                "\n\nSTUB FILES — NOT YET IMPLEMENTED (do NOT import from these):\n"
+                + "\n".join(f"  - {fp}" for fp in stub_warnings)
+                + "\nThese files contain stubs or import from stubs. "
+                "Importing from them will cause errors.\n"
+            )
+
+        # Tell the LLM to test source files directly, not through app
+        # factories or entry points that may not exist yet.
+        extra_context += (
+            "\n\nTEST ISOLATION: In tests, import ONLY from the source files "
+            "listed as targets and their declared dependencies. Do NOT import "
+            "from an app factory, main entry point, or any module not listed "
+            "in your target files. Create any needed test fixtures (e.g. a "
+            "FastAPI TestClient) directly in the test file.\n"
+        )
+
         if strategy == CodingStrategy.TDD:
             current_files, current_test_files = self._generate_tdd(
                 prompt, target_files, test_files, architecture_context,
@@ -663,15 +743,52 @@ class CodingOrchestrator:
                         f"Fix the code to make all tests pass without breaking existing functionality.\n\n"
                         f"REGRESSING TEST FILES:\n" + "\n\n".join(regression_details)
                     )
+
+                    # Widen writable scope for regression repair: include the
+                    # regressing test files and any source files they import so
+                    # the repair loop can fix both sides of the mismatch.
+                    regression_test_files = dict(current_test_files)
+                    regression_target_files = list(target_files)
+                    _existing_targets = {tf["filepath"] for tf in regression_target_files}
+                    for reg_path in regressions:
+                        if reg_path not in regression_test_files:
+                            try:
+                                regression_test_files[reg_path] = self._workspace.read_file(path=reg_path)
+                            except Exception:
+                                pass
+                        # Also make source files imported by regressing tests writable
+                        try:
+                            reg_content = self._workspace.read_file(path=reg_path)
+                            for imp_match in re.finditer(
+                                r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
+                                reg_content, re.MULTILINE,
+                            ):
+                                module_path = (imp_match.group(1) or imp_match.group(2) or "")
+                                parts = module_path.split(".")
+                                for k in range(len(parts), 0, -1):
+                                    candidate = "/".join(parts[:k]) + ".py"
+                                    if candidate not in _existing_targets:
+                                        try:
+                                            if self._workspace.path(candidate).exists():
+                                                regression_target_files.append(
+                                                    {"filepath": candidate, "action": "modify"}
+                                                )
+                                                _existing_targets.add(candidate)
+                                                break
+                                        except Exception:
+                                            pass
+                        except Exception:
+                            pass
+
                     try:
                         current_files, current_test_files, stale_count, previous_code_hash = (
                             self._handle_multi_failure(
                                 prompt=prompt,
                                 failure_output=failure_output,
                                 current_files=current_files,
-                                current_test_files=current_test_files,
-                                target_files=target_files,
-                                test_files=list(current_test_files.keys()),
+                                current_test_files=regression_test_files,
+                                target_files=regression_target_files,
+                                test_files=list(regression_test_files.keys()),
                                 architecture_context=architecture_context,
                                 stale_count=stale_count,
                                 previous_code_hash=previous_code_hash,
@@ -757,7 +874,7 @@ class CodingOrchestrator:
                 elif eval_result.stderr and eval_result.stderr not in error_detail:
                     error_detail += f"\nstderr: {eval_result.stderr}"
 
-                log(f"Orchestrator: collection error detail: {error_detail[:500]}")
+                log(f"Orchestrator: collection error detail: {error_detail[:2000]}")
 
                 # Container rebuild: if we've had 3+ collection errors and
                 # a declared package can't be imported, the container state
@@ -1113,58 +1230,101 @@ class CodingOrchestrator:
         self, prompt, target_files, test_files, architecture_context,
         existing_code, extra_context, log,
     ):
-        """Code-first: generate code per file, then tests per file."""
-        # Step 1: Generate code one file at a time in dependency order
-        log(f"Orchestrator [CODE_FIRST]: generating code for {len(target_files)} file(s)...")
+        """Code-first: unified code+test generation per file."""
+        log(f"Orchestrator [CODE_FIRST]: generating code + tests for {len(target_files)} file(s)...")
         t0 = time.time()
         current_files = {}
+        current_test_files = {}
         all_deps = []
         test_scaffold = ""
+
+        # Pre-load dependency files from disk so the autocoder sees the actual
+        # API of files built by prior issues (not just architecture descriptions).
+        dep_context = {}
+        if self._dependency_edges:
+            target_fps = {tf["filepath"] for tf in target_files}
+            visited = set()
+            frontier = list(target_fps)
+            while frontier:
+                fp = frontier.pop()
+                if fp in visited:
+                    continue
+                visited.add(fp)
+                for edge in self._dependency_edges:
+                    edge_src = edge.source_filepath if hasattr(edge, 'source_filepath') else edge.get('source_filepath', '')
+                    edge_tgt = edge.target_filepath if hasattr(edge, 'target_filepath') else edge.get('target_filepath', '')
+                    if edge_src == fp and edge_tgt not in dep_context and edge_tgt not in target_fps:
+                        try:
+                            dep_path = self._workspace.path(edge_tgt)
+                            if dep_path.exists():
+                                content = dep_path.read_text()
+                                if content.strip() and not self._is_stub_file(edge_tgt, content):
+                                    dep_context[edge_tgt] = content
+                                    frontier.append(edge_tgt)
+                        except Exception:
+                            pass
+            if dep_context:
+                log(f"Orchestrator [CODE_FIRST]: loaded {len(dep_context)} dependency file(s) from prior issues")
+
+        # Unified generation: one agent writes both code and tests together.
+        # This ensures tests match the actual implementation (same types, APIs, etc).
         ordered_targets = _order_by_dependencies(target_files)
+        test_file_set = set(test_files)
         for tf in ordered_targets:
-            # Context: only already-generated files + existing code for this file
-            ctx_code = dict(current_files)
+            # Context: already-generated files + existing code + dependency files
+            ctx_code = dict(dep_context)
+            ctx_code.update(current_files)
             fp = tf["filepath"]
             if fp in existing_code:
                 ctx_code[fp] = existing_code[fp]
+
+            # Find corresponding test file(s) for this target
+            # _find_tests_for_source expects a dict, but we only have paths here
+            test_files_dict = {tfp: "" for tfp in test_files}
+            related_tests_dict = _find_tests_for_source(fp, test_files_dict)
+            related_tests = list(related_tests_dict.keys())
+            if not related_tests:
+                related_tests = list(test_file_set)[:1]  # fallback: first test file
+
             code_result = self._autocoder.generate_multi(
                 issue_description=self._language_prefix + prompt + extra_context,
                 target_files=[tf],
                 architecture_context=architecture_context,
                 existing_code=ctx_code,
+                test_files=related_tests,
             )
             for ch in code_result.changes:
-                current_files[ch.filepath] = ch.code
+                if ch.filepath in test_file_set:
+                    current_test_files[ch.filepath] = ch.code
+                else:
+                    current_files[ch.filepath] = ch.code
             all_deps.extend(code_result.dependencies)
             # Capture test scaffold from autocoder (last non-empty one wins)
             if code_result.test_scaffold:
                 test_scaffold = code_result.test_scaffold
                 self._test_scaffold = test_scaffold
-        log(f"Orchestrator [CODE_FIRST]: code generation done in {time.time() - t0:.1f}s ({len(current_files)} files)")
+        log(f"Orchestrator [CODE_FIRST]: unified generation done in {time.time() - t0:.1f}s "
+            f"({len(current_files)} source + {len(current_test_files)} test files)")
 
-        # Step 2: Generate tests one file at a time, sending only the relevant source
-        log(f"Orchestrator [CODE_FIRST]: generating {len(test_files)} test file(s)...")
-        t0 = time.time()
-        current_test_files = {}
-        test_examples = self._get_passing_test_examples()
-        scaffold_context = ""
-        if test_scaffold:
-            scaffold_context = (
-                f"\n\nTEST SCAFFOLD (from the code author — use this as your starting point):\n"
-                f"```{self._code_fence_lang}\n{test_scaffold}\n```\n"
-            )
-        for test_fp in test_files:
-            related_source = _find_source_for_test(test_fp, current_files)
-            test_prompt = self._language_prefix + prompt + extra_context + test_examples + scaffold_context
-            test_result = self._autotester.generate_multi(
-                problem_statement=test_prompt,
-                test_files=[test_fp],
-                source_code=related_source,
-            )
-            for tf in test_result.test_files:
-                current_test_files[tf.filepath] = tf.tests
-            all_deps.extend(test_result.dependencies)
-        log(f"Orchestrator [CODE_FIRST]: test generation done in {time.time() - t0:.1f}s")
+        # Fallback: if autocoder didn't produce test files, fall back to autotester
+        missing_tests = [tf for tf in test_files if tf not in current_test_files]
+        if missing_tests:
+            log(f"Orchestrator [CODE_FIRST]: {len(missing_tests)} test file(s) missing — generating via autotester...")
+            t0 = time.time()
+            for test_fp in missing_tests:
+                related_source = _find_source_for_test(test_fp, current_files)
+                if dep_context:
+                    related_source = dict(dep_context, **related_source) if related_source else dict(dep_context)
+                test_prompt = self._language_prefix + prompt + extra_context
+                test_result = self._autotester.generate_multi(
+                    problem_statement=test_prompt,
+                    test_files=[test_fp],
+                    source_code=related_source,
+                )
+                for tf_out in test_result.test_files:
+                    current_test_files[tf_out.filepath] = tf_out.tests
+                all_deps.extend(test_result.dependencies)
+            log(f"Orchestrator [CODE_FIRST]: fallback test generation done in {time.time() - t0:.1f}s")
 
         # Install LLM-declared dependencies
         if all_deps:
@@ -1468,6 +1628,55 @@ class CodingOrchestrator:
         # Determine which files are writable (current issue's target files + test files)
         writable_paths = set(tf["filepath"] for tf in target_files) | set(current_test_files.keys())
 
+        # Load dependency files from disk that the current issue's code imports from.
+        # These are files from prior issues that are already on disk but NOT in
+        # current_files (which only tracks the current issue's target files).
+        # Strategy: use dependency graph edges AND scan actual imports in source code.
+        _dep_loaded = set()
+
+        if self._dependency_edges:
+            source_fps = set(tf["filepath"] for tf in target_files)
+            visited = set()
+            frontier = list(source_fps)
+            while frontier:
+                fp = frontier.pop()
+                if fp in visited:
+                    continue
+                visited.add(fp)
+                for edge in self._dependency_edges:
+                    edge_src = edge.source_filepath if hasattr(edge, 'source_filepath') else edge.get('source_filepath', '')
+                    edge_tgt = edge.target_filepath if hasattr(edge, 'target_filepath') else edge.get('target_filepath', '')
+                    if edge_src == fp and edge_tgt not in relevant_files and edge_tgt not in visited:
+                        try:
+                            dep_path = self._workspace.path(edge_tgt)
+                            if dep_path.exists():
+                                relevant_files[edge_tgt] = dep_path.read_text()
+                                _dep_loaded.add(edge_tgt)
+                                frontier.append(edge_tgt)
+                        except Exception:
+                            pass
+
+        # Also scan actual imports in source files to catch deps not in the graph
+        for fp, content in list(current_files.items()):
+            for imp_match in re.finditer(
+                r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
+                content, re.MULTILINE,
+            ):
+                module_path = (imp_match.group(1) or imp_match.group(2) or "")
+                # Convert dotted module path to file path
+                parts = module_path.split(".")
+                for i in range(len(parts), 0, -1):
+                    candidate = "/".join(parts[:i]) + ".py"
+                    if candidate not in relevant_files and candidate not in _dep_loaded:
+                        try:
+                            dep_path = self._workspace.path(candidate)
+                            if dep_path.exists() and candidate not in writable_paths:
+                                relevant_files[candidate] = dep_path.read_text()
+                                _dep_loaded.add(candidate)
+                                break
+                        except Exception:
+                            pass
+
         # Separate into writable source, writable tests, and read-only context
         repair_source = {}
         repair_tests = {}
@@ -1486,6 +1695,10 @@ class CodingOrchestrator:
         # Truncate error output — keep head (summary) + tail (most relevant failures)
         truncated_error = _truncate_error(failure_output)
 
+        # If previous repair had read-only changes filtered, warn the LLM
+        if self._readonly_filter_warning:
+            truncated_error = self._readonly_filter_warning + "\n" + truncated_error
+
         t0 = time.time()
         repaired = self._autocoder.repair_multi_inline(
             source_files=repair_source,
@@ -1501,8 +1714,22 @@ class CodingOrchestrator:
             if ch.filepath in writable_paths
         ]
         if len(repaired_changes) < len(repaired.changes):
-            skipped = len(repaired.changes) - len(repaired_changes)
-            log(f"Orchestrator: filtered {skipped} change(s) to read-only files")
+            skipped_files = [
+                ch.filepath for ch in repaired.changes
+                if ch.filepath not in writable_paths
+            ]
+            log(f"Orchestrator: filtered {len(skipped_files)} change(s) to read-only files")
+            self._readonly_filter_warning = (
+                f"\n\nIMPORTANT: Your previous repair attempted to modify these READ-ONLY files "
+                f"(from prior issues), but those changes were REJECTED:\n"
+                + "\n".join(f"  - {fp}" for fp in skipped_files)
+                + "\n\nYou CANNOT change these files. You MUST adapt your writable source "
+                "and test files to work with the read-only API exactly as it is. "
+                "Read the read-only files carefully and match their actual interface "
+                "(field names, types, method signatures).\n"
+            )
+        else:
+            self._readonly_filter_warning = ""
         from bizniz.autocoder.types import AutocoderProcessResult
         repaired = AutocoderProcessResult(changes=repaired_changes, dependencies=repaired.dependencies)
 
@@ -2308,14 +2535,18 @@ class CodingOrchestrator:
         return "\n".join(filtered_lines)
 
     def _is_stub_file(self, filepath: str, content: str) -> bool:
-        """Check if a file contains only stubs (no real implementations)."""
+        """Check if a file contains only stubs (no real implementations).
+
+        Also treats files with syntax errors or broken imports as stubs —
+        they can't be imported safely either.
+        """
         import ast
         if not filepath.endswith(".py"):
             return False
         try:
             tree = ast.parse(content, filename=filepath)
         except SyntaxError:
-            return False
+            return True  # unparseable = unsafe to import from
         definitions = [
             n for n in ast.iter_child_nodes(tree)
             if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))

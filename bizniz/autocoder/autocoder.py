@@ -414,12 +414,16 @@ class Autocoder(BaseAIAgent):
         architecture_context: str = "",
         existing_code: Optional[dict] = None,
         on_status_message: Optional[Callable[[str], None]] = None,
+        test_files: Optional[List[str]] = None,
     ) -> AutocoderProcessResult:
         """
         Generate code across multiple files using agentic tool loop.
 
         The LLM discovers file contents via tools instead of receiving
         everything inline, keeping prompts small and token-efficient.
+
+        When test_files is provided, the same agent also generates tests
+        (unified code+test generation for consistency).
         """
         if on_status_message is not None:
             self._on_status_message = on_status_message
@@ -434,9 +438,15 @@ class Autocoder(BaseAIAgent):
             for tf in target_files
         )
 
+        # Build test files description (if unified generation)
+        test_desc = "(none — tests generated separately)"
+        if test_files:
+            test_desc = "\n".join(f"- {tf} (modify)" for tf in test_files)
+
         user_prompt = GENERATE_MULTI_USER_PROMPT_TEMPLATE.format(
             issue_description=issue_description,
             target_files_description=target_desc,
+            test_files_description=test_desc,
         )
 
         # Detect language from target files

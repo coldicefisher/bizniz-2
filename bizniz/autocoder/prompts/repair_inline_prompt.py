@@ -12,6 +12,9 @@ RULES:
   Do NOT include standard library modules.
 - NEVER modify files marked as READ-ONLY. These are dependencies from prior issues
   and their API is fixed. Adapt YOUR code to work with their existing interface.
+- CAREFULLY READ every READ-ONLY file to understand its actual fields, types, and
+  method signatures. Your code MUST match exactly — do not assume fields exist that
+  are not defined (e.g. if a model has no `id` field, do not access `.id`).
 """
 
 REPAIR_INLINE_USER_PROMPT = """Fix the code to make the tests pass.
