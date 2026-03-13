@@ -2196,35 +2196,49 @@ class CodingOrchestrator:
             log(f"Orchestrator: rejected invalid package name '{package}'")
             return
 
-        # Reject stdlib modules
-        if bare_lower in _sys.stdlib_module_names:
-            log(f"Orchestrator: rejected stdlib module '{package}'")
-            return
+        # Reject stdlib modules (Python only)
+        if not self._workspace.path("package.json").exists():
+            if bare_lower in _sys.stdlib_module_names:
+                log(f"Orchestrator: rejected stdlib module '{package}'")
+                return
 
-        # Check for duplicates in requirements.txt BEFORE PyPI check
+        # Check for duplicates in requirements.txt / package.json BEFORE install
+        existing_pkgs = set()
         try:
-            req_path = self._workspace.path("requirements.txt")
-            existing = req_path.read_text() if req_path.exists() else ""
-            existing_pkgs = set()
-            for line in existing.splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    pkg_name = _re.split(r"[><=!\[;]", line)[0].strip()
-                    existing_pkgs.add(pkg_name.lower().replace("-", "_"))
+            pkg_json_path = self._workspace.path("package.json")
+            if pkg_json_path.exists():
+                # JS/TS project — check package.json
+                import json as _json
+                pkg_data = _json.loads(pkg_json_path.read_text())
+                for section in ("dependencies", "devDependencies"):
+                    existing_pkgs.update(
+                        name.lower() for name in pkg_data.get(section, {})
+                    )
+            else:
+                # Python project — check requirements.txt
+                req_path = self._workspace.path("requirements.txt")
+                if req_path.exists():
+                    for line in req_path.read_text().splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            pkg_name = _re.split(r"[><=!\[;]", line)[0].strip()
+                            existing_pkgs.add(pkg_name.lower().replace("-", "_"))
         except Exception:
-            existing = ""
-            existing_pkgs = set()
+            pass
 
         if bare_lower in existing_pkgs:
-            return  # already in requirements.txt
+            return  # already declared
 
-        # Verify package exists on PyPI before installing
-        from bizniz.preflight.python_validator import _pypi_package_exists
-        exists = _pypi_package_exists(bare)
-        if exists is False:
-            log(f"Orchestrator: rejected '{package}' — not found on PyPI")
-            return
-        # If exists is None (network error), proceed cautiously
+        # Verify package exists before installing
+        # Skip PyPI check for npm packages (scoped @org/pkg or JS/TS project)
+        is_npm = bare.startswith("@") or self._workspace.path("package.json").exists()
+        if not is_npm:
+            from bizniz.preflight.python_validator import _pypi_package_exists
+            exists = _pypi_package_exists(bare)
+            if exists is False:
+                log(f"Orchestrator: rejected '{package}' — not found on PyPI")
+                return
+            # If exists is None (network error), proceed cautiously
 
         env = self._find_installable_environment()
         if env:
@@ -3793,14 +3807,18 @@ def _scan_imports(files: dict) -> Set[str]:
                 packages.add(match.group(1))
         elif filepath.endswith((".ts", ".tsx", ".js", ".jsx")):
             # TypeScript/JS: import ... from 'package' / require('package')
-            for match in re.finditer(r'''(?:from\s+['"]|require\s*\(\s*['"])([^./'"]\S*?)['"/]''', content):
+            for match in re.finditer(r'''(?:from\s+['"]|require\s*\(\s*['"])([^./'"][^'"]*?)['"]''', content):
                 pkg = match.group(1)
-                # Strip @scope/name to just @scope/name
                 if pkg.startswith("@"):
-                    # @scope/name → keep as-is
-                    packages.add(pkg)
+                    # Scoped: @scope/name → keep full scope/name
+                    parts = pkg.split("/")
+                    if len(parts) >= 2:
+                        packages.add(f"{parts[0]}/{parts[1]}")
+                    else:
+                        packages.add(pkg)
                 else:
-                    packages.add(pkg)
+                    # Unscoped: take just the package name (before any subpath)
+                    packages.add(pkg.split("/")[0])
     return packages
 
 
