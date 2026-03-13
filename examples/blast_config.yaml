@@ -1,0 +1,51 @@
+# ── Blast Test Configuration ──────────────────────────────────────────────────
+# Controls the cycle-based code generation loop in codegen_blast.py
+#
+# Each cycle has three rounds:
+#   Round 1 (Shot):    gpt-4o-mini, 1 attempt, 1 iteration — single shot.
+#   Round 2 (Grind):   gpt-4o-mini, up to max_attempts per issue.
+#     Bail early if: AI error, cached repeat response, or max_attempts hit.
+#   Round 3 (Agentic): gpt-4o, agentic debugger, one shot at remaining failures.
+#
+# Cycles repeat until all issues pass or max_cycles reached.
+
+# Project setup
+project_root: "/home/jamey/bizniz_projects/pet_groomer"
+workspace_subdir: "backend"
+docker_image: "pet_groomer-backend:dev"
+problem_id: 1
+test_runner: "pytest"
+
+# Phase 1: Framing (generate code, no tests, no Docker)
+frame_model: "gpt-4o-mini"
+
+# Phase 2: Cycle loop
+max_cycles: 5                    # max full cycles over all issues
+
+shot_round:
+  model: "gpt-4o-mini"
+  escalation: ["gpt-4o-mini"]
+  max_attempts_per_issue: 1      # single shot
+  max_iters_per_attempt: 1
+  stall_threshold: 2
+  stall_recovery: "none"
+  rollback_on_fail: false
+
+grind_round:
+  model: "gpt-4o-mini"
+  escalation: ["gpt-4o-mini"]   # no escalation — stay cheap
+  max_attempts_per_issue: 5     # bail after N tries per issue per cycle
+  max_iters_per_attempt: 1      # orchestrator iterations per attempt
+  stall_threshold: 2
+  stall_recovery: "none"
+  rollback_on_fail: false
+
+agentic_round:
+  model: "gpt-4o"
+  escalation: ["gpt-4o"]        # no escalation beyond gpt-4o
+  max_attempts_per_issue: 1     # one shot with agentic debugger
+  max_iters_per_attempt: 12     # doubled — let it work
+  stall_threshold: 2
+  stall_recovery: "none"
+  agentic_debug: true
+  rollback_on_fail: true

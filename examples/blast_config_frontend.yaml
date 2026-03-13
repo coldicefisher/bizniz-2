@@ -1,0 +1,48 @@
+# ── Blast Test Configuration — Frontend ──────────────────────────────────────
+# Pet Groomer React/TypeScript frontend
+#
+# Three rounds per cycle:
+#   Round 1 (Shot):    gpt-4o-mini, 1 attempt — single shot
+#   Round 2 (Grind):   gpt-4o-mini, up to 5 attempts with bail conditions
+#   Round 3 (Agentic): gpt-4o, agentic debugger, 12 iterations
+
+# Project setup
+project_root: "/home/jamey/bizniz_projects/pet_groomer"
+workspace_subdir: "frontend"
+docker_image: "pet_groomer-frontend:dev"
+problem_id: 1
+test_runner: "jest"
+
+# Phase 1: Framing (generate code, no tests, no Docker)
+frame_model: "gpt-4o-mini"
+
+# Phase 2: Cycle loop
+max_cycles: 5
+
+shot_round:
+  model: "gpt-4o-mini"
+  escalation: ["gpt-4o-mini"]
+  max_attempts_per_issue: 1
+  max_iters_per_attempt: 1
+  stall_threshold: 2
+  stall_recovery: "none"
+  rollback_on_fail: false
+
+grind_round:
+  model: "gpt-4o-mini"
+  escalation: ["gpt-4o-mini"]
+  max_attempts_per_issue: 5
+  max_iters_per_attempt: 1
+  stall_threshold: 2
+  stall_recovery: "none"
+  rollback_on_fail: false
+
+agentic_round:
+  model: "gpt-4o"
+  escalation: ["gpt-4o"]
+  max_attempts_per_issue: 1
+  max_iters_per_attempt: 12
+  stall_threshold: 2
+  stall_recovery: "none"
+  agentic_debug: true
+  rollback_on_fail: true

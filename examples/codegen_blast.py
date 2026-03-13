@@ -31,17 +31,20 @@ load_dotenv()
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-PROJECT_ROOT = Path("/home/jamey/bizniz_projects/pet_groomer")
-WORKSPACE_DIR = PROJECT_ROOT / "backend"
-DOCKER_IMAGE = "pet_groomer-backend:dev"
-PROBLEM_ID = 1  # Fresh engineer analysis with architecture context
-MAX_FAILURES = 8  # Stop after this many failed issues (high = let all passes run)
+CONFIG_PATH = Path(__file__).parent / "blast_config.yaml"
 
-# ── Model Configuration ──────────────────────────────────────────────────────
-# Phase 1 (framing) always uses the baseline model. Phase 2 (testing)
-# uses a multi-pass strategy with escalation — see PASSES config in
-# _phase2_test() for per-pass model/iteration/debug settings.
-MODEL = "gpt-4o-mini"                        # Baseline model for Phase 1
+
+def _load_blast_config(path=None):
+    """Load blast config from YAML file."""
+    import yaml
+    if path:
+        cfg_path = Path(path)
+        if not cfg_path.is_absolute():
+            cfg_path = Path(__file__).parent / cfg_path
+    else:
+        cfg_path = CONFIG_PATH
+    with open(cfg_path) as f:
+        return yaml.safe_load(f)
 
 
 # ── Metrics ──────────────────────────────────────────────────────────────────
@@ -278,7 +281,7 @@ def _run_preflight_standalone(generated_files, workspace, language="python"):
 
 # ── Phase 1: Frame (generate ALL code, no tests) ────────────────────────────
 
-def _phase1_frame(issues, workspace, arch_context, make_client, env):
+def _phase1_frame(issues, workspace, arch_context, make_client, env, model="gpt-4o-mini"):
     """Generate source code for all issues in topological order.
 
     No Docker, no tests. Writes real code to disk so later issues
@@ -301,7 +304,7 @@ def _phase1_frame(issues, workspace, arch_context, make_client, env):
         status_cb = make_status_callback(metrics)
 
         try:
-            client = make_client(MODEL)
+            client = make_client(model)
             autocoder = Autocoder(
                 client=client,
                 environment=env,
@@ -342,7 +345,7 @@ def _phase1_frame(issues, workspace, arch_context, make_client, env):
             print(f"    FAILED: {error_str}")
             phase1_metrics.append({"id": issue["id"], "title": issue["title"], "status": "failed", "error": error_str})
 
-    _nuke_shadow_files(WORKSPACE_DIR)
+    _nuke_shadow_files(workspace._root)
 
     framed = sum(1 for m in phase1_metrics if m["status"] == "framed")
     print(f"\n  Phase 1 complete: {framed}/{len(issues)} issues framed")
@@ -402,69 +405,57 @@ def _find_issues_affected_by(modified_files, issues, passed_issue_ids):
 
 def _phase2_test(
     issues, workspace, arch_context, dep_edges, make_client, env,
-    phase1_failed_ids, run_metrics,
+    phase1_failed_ids, run_metrics, blast_cfg,
     snapshot_workspace_fn, restore_workspace_fn,
 ):
-    """Multi-pass test strategy: quick passes first, then escalate.
+    """Cycle-based test strategy with response caching.
 
-    Pass 1 (Quick):   All issues, 2 iters, gpt-4o-mini, dumb repair, no rollback
-    Pass 2 (Escalate): Failed issues, 3 iters, gpt-4o, dumb repair, no rollback
-    Pass 3 (Deep):    Remaining failures, 6 iters, gpt-4o, agentic debugger, rollback
+    Each cycle has three rounds:
+      Round 1 (Shot):    single attempt per issue — quick first pass
+      Round 2 (Grind):   up to N attempts per issue, bail on AI error / cached repeat / max
+      Round 3 (Agentic): agentic debugger for remaining failures
 
-    Between passes, re-test all passed issues to catch regressions from
-    cross-issue code modifications.
+    Cycles repeat until all issues pass or max_cycles reached.
     """
+    import hashlib
     from bizniz.autocoder.autocoder import Autocoder
     from bizniz.autotester.autotester import Autotester
     from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
     from bizniz.orchestrator.strategy import CodingStrategy
     from bizniz.orchestrator.model_progression import ModelProgression
 
-    # ── Pass configuration ────────────────────────────────────────────────
-    PASSES = [
-        {
-            "name": "Quick",
-            "model": "gpt-4o-mini",
-            "escalation": ["gpt-4o-mini"],
-            "max_iters": 2,
-            "stall_threshold": 2,
-            "agentic_debug": False,
-            "stall_recovery": "none",
-            "rollback_on_fail": False,
-            "attempt": "all",  # attempt all issues
-        },
-        {
-            "name": "Escalate",
-            "model": "gpt-4o",
-            "escalation": ["gpt-4o"],
-            "max_iters": 3,
-            "stall_threshold": 2,
-            "agentic_debug": False,
-            "stall_recovery": "none",
-            "rollback_on_fail": False,
-            "attempt": "failed",  # only failed issues
-        },
-        {
-            "name": "Deep",
-            "model": "gpt-4o",
-            "escalation": ["gpt-4o", "gpt-5"],
-            "max_iters": 6,
-            "stall_threshold": 2,
-            "agentic_debug": True,
-            "stall_recovery": "none",
-            "rollback_on_fail": True,
-            "attempt": "failed",
-        },
-    ]
+    max_cycles = blast_cfg["max_cycles"]
+    shot_cfg = blast_cfg["shot_round"]
+    grind_cfg = blast_cfg["grind_round"]
+    agentic_cfg = blast_cfg["agentic_round"]
 
     passed_issue_ids: set = set()
     failed_issue_ids: set = set()
     skipped_issue_ids: set = set()
     completed_test_files: set = set()
     last_good_snapshot = "post_phase1"
-    id_to_issue = {iss["id"]: iss for iss in issues}
 
-    def _run_issue(issue, pass_cfg, label="Issue"):
+    # Response cache: issue_id -> set of content hashes from prior attempts
+    response_cache: dict[int, set[str]] = defaultdict(set)
+
+    def _snapshot_issue_files(issue):
+        """Hash the content of an issue's target + test files for cache comparison."""
+        h = hashlib.sha256()
+        for tf in sorted(issue["target_files"], key=lambda x: x["filepath"]):
+            try:
+                content = workspace.read_file(path=tf["filepath"])
+                h.update(content.encode() if content else b"")
+            except Exception:
+                pass
+        for tf in sorted(issue["test_files"]):
+            try:
+                content = workspace.read_file(path=tf)
+                h.update(content.encode() if content else b"")
+            except Exception:
+                pass
+        return h.hexdigest()
+
+    def _run_issue(issue, round_cfg, label="Issue"):
         """Run the orchestrator for a single issue. Returns (success, metrics, result)."""
         idx = next((j for j, iss in enumerate(issues) if iss["id"] == issue["id"]), 0)
 
@@ -478,8 +469,10 @@ def _phase2_test(
         status_cb = make_status_callback(issue_metrics)
 
         try:
-            model = pass_cfg["model"]
-            print(f"  Model: {model} | Pass: {pass_cfg['name']} | Max iters: {pass_cfg['max_iters']}")
+            model = round_cfg["model"]
+            max_iters = round_cfg["max_iters_per_attempt"]
+            agentic = round_cfg.get("agentic_debug", False)
+            print(f"  Model: {model} | Max iters: {max_iters} | Agentic: {agentic}")
             client = make_client(model)
 
             autocoder = Autocoder(
@@ -496,7 +489,7 @@ def _phase2_test(
                 on_status_message=status_cb,
             )
 
-            progression = ModelProgression(pass_cfg["escalation"])
+            progression = ModelProgression(round_cfg["escalation"])
 
             orchestrator = CodingOrchestrator(
                 autocoder=autocoder,
@@ -506,12 +499,12 @@ def _phase2_test(
                 client=client,
                 client_factory=make_client,
                 model_progression=progression,
-                max_iterations=pass_cfg["max_iters"],
-                stall_threshold=pass_cfg["stall_threshold"],
-                agentic_debug_threshold=pass_cfg["stall_threshold"],
+                max_iterations=max_iters,
+                stall_threshold=round_cfg["stall_threshold"],
+                agentic_debug_threshold=round_cfg["stall_threshold"],
                 on_status_message=status_cb,
-                enable_agentic_debug=pass_cfg["agentic_debug"],
-                stall_recovery=pass_cfg["stall_recovery"],
+                enable_agentic_debug=agentic,
+                stall_recovery=round_cfg["stall_recovery"],
             )
 
             # Build problem statement
@@ -519,7 +512,7 @@ def _phase2_test(
             if issue.get("test_setup_hint"):
                 problem_stmt += f"\n\nTEST SETUP HINT:\n{issue['test_setup_hint']}"
 
-            # Include dependency files as writable targets so repair can modify them
+            # Include dependency files as writable targets
             own_targets = [
                 {"filepath": tf["filepath"], "action": "modify"}
                 for tf in issue["target_files"]
@@ -553,7 +546,7 @@ def _phase2_test(
                     strategy=result.strategy_used,
                 )
 
-            return result.success, issue_metrics, result
+            return result.success, issue_metrics
 
         except Exception as e:
             error_name = type(e).__name__
@@ -563,83 +556,62 @@ def _phase2_test(
                 issue_metrics.finish(success=False, error=error_str)
                 issue_metrics.skipped = True
                 print(f"\n  SKIPPED (no tests possible): {error_str}")
-                return None, issue_metrics, None
+                return None, issue_metrics
             else:
                 issue_metrics.finish(success=False, error=error_str)
                 print(f"\n  CRASHED: {error_str}")
-                return False, issue_metrics, None
+                return False, issue_metrics
 
-    # ── Multi-pass loop ───────────────────────────────────────────────────
-    for pass_idx, pass_cfg in enumerate(PASSES):
-        pass_name = pass_cfg["name"]
-
-        # Determine which issues to attempt this pass
-        if pass_cfg["attempt"] == "all":
-            attempt_issues = list(issues)
-        else:
-            attempt_issues = [
-                iss for iss in issues
-                if iss["id"] in failed_issue_ids or iss["id"] not in passed_issue_ids
-            ]
-
-        if not attempt_issues:
-            print(f"\n  All issues passed — skipping remaining passes")
+    # ── Cycle loop ────────────────────────────────────────────────────────
+    for cycle in range(1, max_cycles + 1):
+        remaining = [iss for iss in issues if iss["id"] not in passed_issue_ids
+                      and iss["id"] not in skipped_issue_ids]
+        if not remaining:
+            print(f"\n  All issues passed!")
             break
 
         print(f"\n{'=' * 60}")
-        print(f"  PASS {pass_idx + 1}: {pass_name.upper()} "
-              f"({len(attempt_issues)} issues, "
-              f"model={pass_cfg['model']}, "
-              f"max_iters={pass_cfg['max_iters']})")
+        print(f"  CYCLE {cycle}/{max_cycles} — {len(remaining)} issues remaining")
         print(f"{'=' * 60}")
 
-        pass_newly_passed = []
+        # ── Round 1: Shot (single attempt per issue) ──────────────────
+        print(f"\n  ── Round 1: Shot (model={shot_cfg['model']}, 1 attempt) ──")
 
-        for issue in attempt_issues:
-            # Already passed in this pass (e.g. from re-test)
+        round1_newly_passed = []
+        for issue in remaining:
             if issue["id"] in passed_issue_ids:
                 continue
 
-            success, issue_metrics, result = _run_issue(issue, pass_cfg)
+            success, issue_metrics = _run_issue(issue, shot_cfg, label="Shot")
             run_metrics.add(issue_metrics)
+            post_hash = _snapshot_issue_files(issue)
+            response_cache[issue["id"]].add(post_hash)
 
             if success:
-                elapsed = issue_metrics.elapsed_seconds
-                iters = result.iterations if result else 0
-                print(f"\n  PASSED in {elapsed:.1f}s ({iters} iterations)")
+                print(f"\n  PASSED in {issue_metrics.elapsed_seconds:.1f}s "
+                      f"({issue_metrics.iterations} iters)")
                 passed_issue_ids.add(issue["id"])
                 failed_issue_ids.discard(issue["id"])
                 completed_test_files.update(issue["test_files"])
-                pass_newly_passed.append(issue["id"])
-
-                # Snapshot on success
-                snap_label = f"pass{pass_idx+1}_issue_{issue['id']}"
-                snapshot_workspace_fn(snap_label)
-                last_good_snapshot = snap_label
-
+                round1_newly_passed.append(issue["id"])
+                snap = f"c{cycle}_shot_{issue['id']}"
+                snapshot_workspace_fn(snap)
+                last_good_snapshot = snap
             elif success is None:
-                # Skipped
                 skipped_issue_ids.add(issue["id"])
             else:
-                elapsed = issue_metrics.elapsed_seconds
-                print(f"\n  FAILED in {elapsed:.1f}s — continuing")
                 failed_issue_ids.add(issue["id"])
 
-                if pass_cfg["rollback_on_fail"]:
-                    restore_workspace_fn(last_good_snapshot)
-
-        # ── Between-pass regression check ─────────────────────────────────
-        # Re-test all previously passed issues to catch regressions from
-        # cross-issue code modifications during this pass
-        if pass_newly_passed and passed_issue_ids - set(pass_newly_passed):
+        # ── Regression check after Round 1 ────────────────────────────
+        if round1_newly_passed:
             prior_passed = [
                 iss for iss in issues
-                if iss["id"] in passed_issue_ids and iss["id"] not in pass_newly_passed
+                if iss["id"] in passed_issue_ids and iss["id"] not in round1_newly_passed
             ]
             if prior_passed:
-                print(f"\n  ── Regression check: re-testing {len(prior_passed)} prior issues ──")
+                print(f"\n  ── Regression check: {len(prior_passed)} prior issues ──")
                 for iss in prior_passed:
-                    success, re_metrics, _ = _run_issue(iss, pass_cfg, label="RECHECK")
+                    success, re_metrics = _run_issue(iss, shot_cfg, label="RECHECK")
                     run_metrics.add(re_metrics)
                     if success:
                         print(f"  RECHECK OK: [{iss['id']}] {iss['title']}")
@@ -651,10 +623,131 @@ def _phase2_test(
                         failed_issue_ids.add(iss["id"])
                         completed_test_files -= set(iss["test_files"])
 
-        # Pass summary
+        # ── Round 2: Grind (multi-attempt with bail conditions) ───────
+        remaining_after_shot = [
+            iss for iss in issues
+            if iss["id"] in failed_issue_ids
+        ]
+
+        if remaining_after_shot:
+            max_attempts = grind_cfg["max_attempts_per_issue"]
+            print(f"\n  ── Round 2: Grind (model={grind_cfg['model']}, "
+                  f"max_attempts={max_attempts}) ──")
+
+            round2_newly_passed = []
+            for issue in remaining_after_shot:
+                for attempt in range(1, max_attempts + 1):
+                    print(f"\n  [Attempt {attempt}/{max_attempts}]")
+
+                    success, issue_metrics = _run_issue(issue, grind_cfg, label="Grind")
+                    run_metrics.add(issue_metrics)
+                    post_hash = _snapshot_issue_files(issue)
+
+                    if success:
+                        print(f"\n  PASSED in {issue_metrics.elapsed_seconds:.1f}s "
+                              f"({issue_metrics.iterations} iters)")
+                        passed_issue_ids.add(issue["id"])
+                        failed_issue_ids.discard(issue["id"])
+                        completed_test_files.update(issue["test_files"])
+                        round2_newly_passed.append(issue["id"])
+                        snap = f"c{cycle}_grind_{issue['id']}"
+                        snapshot_workspace_fn(snap)
+                        last_good_snapshot = snap
+                        break
+                    elif success is None:
+                        skipped_issue_ids.add(issue["id"])
+                        break
+                    else:
+                        # Bail condition 1: AI error (no output)
+                        if issue_metrics.error and "BadAIResponse" in (issue_metrics.error or ""):
+                            print(f"  ⏭  AI error — skipping to next issue")
+                            break
+                        # Bail condition 2: response is identical to a cached prior attempt
+                        if post_hash in response_cache[issue["id"]]:
+                            print(f"  ⏭  Cached repeat — skipping to next issue")
+                            break
+                        response_cache[issue["id"]].add(post_hash)
+
+                if issue["id"] not in passed_issue_ids and issue["id"] not in skipped_issue_ids:
+                    print(f"\n  Grind round exhausted for [{issue['id']}] {issue['title']}")
+
+            # Regression check after Round 2
+            if round2_newly_passed:
+                prior_passed = [
+                    iss for iss in issues
+                    if iss["id"] in passed_issue_ids and iss["id"] not in round2_newly_passed
+                ]
+                if prior_passed:
+                    print(f"\n  ── Regression check: {len(prior_passed)} prior issues ──")
+                    for iss in prior_passed:
+                        success, re_metrics = _run_issue(iss, grind_cfg, label="RECHECK")
+                        run_metrics.add(re_metrics)
+                        if success:
+                            print(f"  RECHECK OK: [{iss['id']}] {iss['title']}")
+                        elif success is None:
+                            pass
+                        else:
+                            print(f"  REGRESSION: [{iss['id']}] {iss['title']}")
+                            passed_issue_ids.discard(iss["id"])
+                            failed_issue_ids.add(iss["id"])
+                            completed_test_files -= set(iss["test_files"])
+
+        # ── Round 3: Agentic debugger ─────────────────────────────────
+        remaining_after_grind = [
+            iss for iss in issues
+            if iss["id"] in failed_issue_ids
+        ]
+
+        if remaining_after_grind:
+            print(f"\n  ── Round 3: Agentic (model={agentic_cfg['model']}, "
+                  f"max_iters={agentic_cfg['max_iters_per_attempt']}) ──")
+
+            round3_newly_passed = []
+            for issue in remaining_after_grind:
+                success, issue_metrics = _run_issue(issue, agentic_cfg, label="Agentic")
+                run_metrics.add(issue_metrics)
+
+                if success:
+                    print(f"\n  PASSED in {issue_metrics.elapsed_seconds:.1f}s")
+                    passed_issue_ids.add(issue["id"])
+                    failed_issue_ids.discard(issue["id"])
+                    completed_test_files.update(issue["test_files"])
+                    round3_newly_passed.append(issue["id"])
+                    snap = f"c{cycle}_agentic_{issue['id']}"
+                    snapshot_workspace_fn(snap)
+                    last_good_snapshot = snap
+                elif success is None:
+                    skipped_issue_ids.add(issue["id"])
+                else:
+                    print(f"\n  FAILED in {issue_metrics.elapsed_seconds:.1f}s")
+                    if agentic_cfg.get("rollback_on_fail", False):
+                        restore_workspace_fn(last_good_snapshot)
+
+            # Regression check after Round 3
+            if round3_newly_passed:
+                prior_passed = [
+                    iss for iss in issues
+                    if iss["id"] in passed_issue_ids and iss["id"] not in round3_newly_passed
+                ]
+                if prior_passed:
+                    print(f"\n  ── Regression check: {len(prior_passed)} prior issues ──")
+                    for iss in prior_passed:
+                        success, re_metrics = _run_issue(iss, agentic_cfg, label="RECHECK")
+                        run_metrics.add(re_metrics)
+                        if success:
+                            print(f"  RECHECK OK: [{iss['id']}] {iss['title']}")
+                        elif success is None:
+                            pass
+                        else:
+                            print(f"  REGRESSION: [{iss['id']}] {iss['title']}")
+                            passed_issue_ids.discard(iss["id"])
+                            failed_issue_ids.add(iss["id"])
+                            completed_test_files -= set(iss["test_files"])
+
+        # Cycle summary
         total_passed = len(passed_issue_ids)
         total_failed = len(failed_issue_ids)
-        print(f"\n  Pass {pass_idx+1} ({pass_name}) complete: "
+        print(f"\n  Cycle {cycle} complete: "
               f"{total_passed} passed, {total_failed} failed, "
               f"{len(skipped_issue_ids)} skipped")
 
@@ -666,10 +759,11 @@ def _phase2_test(
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def main():
+def main(config_path=None):
     from bizniz.config.bizniz_config import BiznizConfig
     from bizniz.workspace.local_workspace import LocalWorkspace
     from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
+    from bizniz.environment.docker_jest_environment import DockerJestEnvironment
     from bizniz.clients.chatgpt.openai_chatgpt_client import OpenAIChat4GPTClient
     from bizniz.clients.chatgpt.chatgpt_client_config import ChatGPTClientConfig
     from bizniz.clients.claude.claude_client import ClaudeClient
@@ -677,16 +771,28 @@ def main():
     from bizniz.engineer.types import ArchitecturePlan
 
     print("=" * 60)
-    print("  Two-Phase Code Generation Blast Test")
+    print("  Cycle-Based Code Generation Blast Test")
     print("=" * 60)
 
-    # Load config
+    # Load blast config: explicit arg > CLI arg > default
+    cfg_path = config_path or (sys.argv[1] if len(sys.argv) > 1 else None)
+    blast_cfg = _load_blast_config(cfg_path)
+    PROJECT_ROOT = Path(blast_cfg["project_root"])
+    WORKSPACE_DIR = PROJECT_ROOT / blast_cfg["workspace_subdir"]
+    DOCKER_IMAGE = blast_cfg["docker_image"]
+    PROBLEM_ID = blast_cfg["problem_id"]
+    MODEL = blast_cfg["frame_model"]
+
     config = BiznizConfig.find_and_load()
-    model = MODEL
-    print(f"\n  Model: {model}")
+    print(f"\n  Frame model: {MODEL}")
+    print(f"  Shot round:    {blast_cfg['shot_round']['model']} (1 attempt)")
+    print(f"  Grind round:   {blast_cfg['grind_round']['model']} "
+          f"(max {blast_cfg['grind_round']['max_attempts_per_issue']} attempts)")
+    print(f"  Agentic round: {blast_cfg['agentic_round']['model']} "
+          f"(agentic, {blast_cfg['agentic_round']['max_iters_per_attempt']} iters)")
+    print(f"  Max cycles: {blast_cfg['max_cycles']}")
     print(f"  Project: {PROJECT_ROOT}")
     print(f"  Docker image: {DOCKER_IMAGE}")
-    print(f"  Strategy: multi-pass (quick → escalate → deep)")
 
     # Setup workspace
     workspace = LocalWorkspace(root=WORKSPACE_DIR)
@@ -699,7 +805,7 @@ def main():
     rows = conn.execute(
         "SELECT id, title, description, target_files_json, test_files_json, "
         "depends_on_json, suggested_model, test_setup_hint "
-        "FROM issues WHERE problem_id=? ORDER BY id",
+        "FROM issues WHERE problem_id=? AND status='open' ORDER BY id",
         (PROBLEM_ID,)
     ).fetchall()
     conn.close()
@@ -905,10 +1011,17 @@ def main():
     snapshot_workspace("baseline")
 
     # Setup Docker environment (needed for Phase 1 autocoder env.describe() and Phase 2)
-    env = DockerPytestEnvironment(
-        workspace_root=WORKSPACE_DIR,
-        image=DOCKER_IMAGE,
-    )
+    test_runner = blast_cfg.get("test_runner", "pytest")
+    if test_runner == "jest":
+        env = DockerJestEnvironment(
+            workspace_root=WORKSPACE_DIR,
+            image=DOCKER_IMAGE,
+        )
+    else:
+        env = DockerPytestEnvironment(
+            workspace_root=WORKSPACE_DIR,
+            image=DOCKER_IMAGE,
+        )
 
     run_metrics = RunMetrics()
 
@@ -920,6 +1033,7 @@ def main():
             arch_context=arch_context,
             make_client=make_client,
             env=env,
+            model=MODEL,
         )
 
         # Snapshot after Phase 1 so Phase 2 can rollback to this state
@@ -936,6 +1050,7 @@ def main():
             env=env,
             phase1_failed_ids=phase1_failed_ids,
             run_metrics=run_metrics,
+            blast_cfg=blast_cfg,
             snapshot_workspace_fn=snapshot_workspace,
             restore_workspace_fn=restore_workspace,
         )
