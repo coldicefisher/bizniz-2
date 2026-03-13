@@ -573,7 +573,7 @@ class CodingOrchestrator:
                 rel_str = str(rel_path)
                 if rel_str in target_fps or not rel_str.endswith(".py"):
                     continue
-                if rel_str.startswith("tests") or "__pycache__" in rel_str:
+                if rel_str.startswith("tests") or self._should_skip_path(rel_str):
                     continue
                 try:
                     content = self._workspace.read_file(path=rel_str)
@@ -601,7 +601,7 @@ class CodingOrchestrator:
                         continue
                     if rel_str in stub_warnings:
                         continue
-                    if rel_str.startswith("tests") or "__pycache__" in rel_str:
+                    if rel_str.startswith("tests") or self._should_skip_path(rel_str):
                         continue
                     try:
                         content = self._workspace.read_file(path=rel_str)
@@ -2192,7 +2192,7 @@ class CodingOrchestrator:
         bare_lower = bare.lower().replace("-", "_")
 
         # Reject empty or malformed names
-        if not bare or not _re.match(r"^[a-zA-Z][a-zA-Z0-9._-]*$", bare):
+        if not bare or not _re.match(r"^(@[a-zA-Z0-9._-]+/)?[a-zA-Z][a-zA-Z0-9._-]*$", bare):
             log(f"Orchestrator: rejected invalid package name '{package}'")
             return
 
@@ -2319,6 +2319,14 @@ class CodingOrchestrator:
 
         return "\n".join(lines) if lines else ""
 
+    _SKIP_DIRS = {"node_modules", "__pycache__", ".bizniz", "dist", "build", ".next", ".git", "bin", "obj"}
+
+    @classmethod
+    def _should_skip_path(cls, rel_path: str) -> bool:
+        """Return True if path is inside a directory that should be excluded from analysis."""
+        parts = rel_path.replace("\\", "/").split("/")
+        return any(p in cls._SKIP_DIRS or p.startswith(".") for p in parts[:-1])
+
     def _build_workspace_manifest(self) -> str:
         """
         Build a lightweight manifest of existing workspace files.
@@ -2336,7 +2344,7 @@ class CodingOrchestrator:
             return ""
 
         for rel_path in sorted(str(p) for p in rel_files):
-            if rel_path.startswith(".") or "__pycache__" in rel_path:
+            if rel_path.startswith(".") or self._should_skip_path(rel_path):
                 continue
             if not any(rel_path.endswith(ext) for ext in (".py", ".ts", ".tsx", ".js", ".jsx", ".cs")):
                 continue
@@ -2421,7 +2429,7 @@ class CodingOrchestrator:
             return ""
 
         for rel_path in sorted(str(p) for p in rel_files):
-            if rel_path.startswith(".") or "__pycache__" in rel_path:
+            if rel_path.startswith(".") or self._should_skip_path(rel_path):
                 continue
             if not rel_path.endswith(".py"):
                 continue
