@@ -1,6 +1,4 @@
-from enum import Enum
+# Backward-compatibility shim — implementation moved to bizniz.core.types
+from bizniz.core.types import Role
 
-class Role(Enum):
-    SYSTEM = "system"
-    USER = "user"
-    ASSISTANT = "assistant"
+__all__ = ["Role"]

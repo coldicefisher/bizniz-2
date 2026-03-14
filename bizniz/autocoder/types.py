@@ -15,11 +15,8 @@ class AutocoderBadAIResponseError(AutocoderProcessError):
     pass
 
 
-class FileChange(BaseModel):
-    """A single file create/modify/delete in a multi-file code generation."""
-    filepath: str
-    code: str
-    action: Literal["create", "modify", "delete"]
+# FileChange lives in bizniz.core.types — re-exported here for backward compatibility
+from bizniz.core.types import FileChange
 
 
 class AutocoderProcessResult(BaseModel):

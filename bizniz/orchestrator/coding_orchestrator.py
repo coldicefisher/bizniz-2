@@ -50,6 +50,7 @@ from bizniz.autocoder.types import FileChange
 from bizniz.autotester.types import GeneratedTestFile
 from bizniz.orchestrator.strategy import CodingStrategy
 from bizniz.preflight.registry import get_validator
+from bizniz.languages import get_language_strategy, LanguageStrategy
 from bizniz.orchestrator.types import (
     OrchestratorResult,
     OrchestratorStalledError,
@@ -132,6 +133,7 @@ class CodingOrchestrator:
         self._max_iterations = max_iterations
         self._on_status_message = on_status_message
         self._language = language
+        self._lang: LanguageStrategy = get_language_strategy(language)
         self._enable_agentic_debug = enable_agentic_debug
         self._stall_recovery = stall_recovery  # "full", "regenerate", or "none"
         self._stall_detector = StallDetector(
@@ -143,67 +145,39 @@ class CodingOrchestrator:
         self._readonly_filter_warning = ""  # set when read-only changes are filtered from repair
 
         # Override system prompts for non-Python languages
-        if language == "typescript":
-            self._apply_typescript_system_prompts()
+        if language != "python":
+            self._apply_language_system_prompts()
 
-    def _apply_typescript_system_prompts(self):
-        """Override autocoder/autotester system prompts for TypeScript."""
-        from bizniz.autocoder.prompts.generate_multi_prompt import get_generate_multi_system_prompt as get_autocoder_prompt
-        from bizniz.autotester.prompts.generate_multi_prompt import get_generate_multi_system_prompt as get_autotester_prompt
-
-        autocoder_prompt = get_autocoder_prompt("typescript")
+    def _apply_language_system_prompts(self):
+        """Override autocoder/autotester system prompts for the configured language."""
+        eval_env = ""
         if hasattr(self._test_environment, 'describe'):
-            autocoder_prompt = autocoder_prompt.format(evaluation_environment=self._test_environment.describe())
+            eval_env = self._test_environment.describe()
+        autocoder_prompt = self._lang.get_autocoder_system_prompt(eval_env)
         self._autocoder.set_system_prompt_override(autocoder_prompt)
 
-        autotester_prompt = get_autotester_prompt("typescript")
+        autotester_prompt = self._lang.get_autotester_system_prompt()
         self._autotester.set_system_prompt_override(autotester_prompt)
 
-    # ── Language helpers ──────────────────────────────────────────────────────
+    # ── Language helpers (delegated to LanguageStrategy) ─────────────────────
 
     @property
     def _test_symbol(self) -> str:
-        return "jest" if self._language == "typescript" else "pytest"
+        return self._lang.test_symbol
 
     @property
     def _code_fence_lang(self) -> str:
-        return "typescript" if self._language == "typescript" else "python"
+        return self._lang.code_fence_lang
 
     @property
     def _language_prefix(self) -> str:
-        if self._language == "typescript":
-            return (
-                "IMPORTANT: This is a TypeScript project. "
-                "All source files must use .ts or .tsx extensions. "
-                "All test files must end in .test.ts or .test.tsx (Jest convention). "
-                "Use ES module imports. Do NOT generate Python code.\n\n"
-            )
-        return ""
+        return self._lang.language_prefix
 
     def _is_test_file(self, filepath: str) -> bool:
-        if self._language == "typescript":
-            return (
-                not filepath.startswith("node_modules/")
-                and (
-                    filepath.endswith(".test.ts")
-                    or filepath.endswith(".test.tsx")
-                    or filepath.endswith(".spec.ts")
-                    or filepath.endswith(".spec.tsx")
-                )
-            )
-        return (
-            filepath.startswith("tests/")
-            and filepath.endswith(".py")
-            and filepath != "tests/__init__.py"
-        )
+        return self._lang.is_test_file(filepath)
 
     def _strip_extension(self, filepath: str) -> str:
-        if self._language == "typescript":
-            for ext in (".test.tsx", ".test.ts", ".spec.tsx", ".spec.ts", ".tsx", ".ts"):
-                if filepath.endswith(ext):
-                    return filepath[:-len(ext)]
-            return filepath
-        return filepath.replace(".py", "")
+        return self._lang.strip_extension(filepath)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -2196,42 +2170,25 @@ class CodingOrchestrator:
             log(f"Orchestrator: rejected invalid package name '{package}'")
             return
 
-        # Reject stdlib modules (Python only)
-        if not self._workspace.path("package.json").exists():
-            if bare_lower in _sys.stdlib_module_names:
-                log(f"Orchestrator: rejected stdlib module '{package}'")
-                return
+        # Reject stdlib modules
+        if self._lang.is_stdlib(bare_lower):
+            log(f"Orchestrator: rejected stdlib module '{package}'")
+            return
 
         # Check for duplicates in requirements.txt / package.json BEFORE install
         existing_pkgs = set()
-        try:
-            pkg_json_path = self._workspace.path("package.json")
-            if pkg_json_path.exists():
-                # JS/TS project — check package.json
-                import json as _json
-                pkg_data = _json.loads(pkg_json_path.read_text())
-                for section in ("dependencies", "devDependencies"):
-                    existing_pkgs.update(
-                        name.lower() for name in pkg_data.get(section, {})
-                    )
-            else:
-                # Python project — check requirements.txt
-                req_path = self._workspace.path("requirements.txt")
-                if req_path.exists():
-                    for line in req_path.read_text().splitlines():
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            pkg_name = _re.split(r"[><=!\[;]", line)[0].strip()
-                            existing_pkgs.add(pkg_name.lower().replace("-", "_"))
-        except Exception:
-            pass
+        installed_str = self._lang.get_installed_packages(self._workspace)
+        if installed_str:
+            for line in installed_str.splitlines():
+                pkg_name = _re.split(r"[><=!\[;@]", line.strip())[0].strip()
+                existing_pkgs.add(pkg_name.lower().replace("-", "_"))
 
         if bare_lower in existing_pkgs:
             return  # already declared
 
         # Verify package exists before installing
         # Skip PyPI check for npm packages (scoped @org/pkg or JS/TS project)
-        is_npm = bare.startswith("@") or self._workspace.path("package.json").exists()
+        is_npm = bare.startswith("@") or self._lang.name != "python"
         if not is_npm:
             from bizniz.preflight.python_validator import _pypi_package_exists
             exists = _pypi_package_exists(bare)
@@ -2291,47 +2248,9 @@ class CodingOrchestrator:
         for pkg in to_install:
             self._install_package(pkg, log)
 
-    def _get_installed_packages(self) -> list:
-        """Read declared dependencies from requirements.txt if it exists."""
-        try:
-            req_path = self._workspace.path("requirements.txt")
-            if req_path.exists():
-                content = req_path.read_text()
-                return [
-                    line.strip() for line in content.splitlines()
-                    if line.strip() and not line.strip().startswith("#")
-                ]
-        except Exception:
-            pass
-        return []
-
     def _get_installed_packages(self) -> str:
-        """Read requirements.txt (Python) or package.json (JS/TS) to list installed packages."""
-        lines = []
-        try:
-            req_path = self._workspace.path("requirements.txt")
-            if req_path.exists():
-                for line in req_path.read_text().splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#") and not line.startswith("-"):
-                        lines.append(f"  {line}")
-        except Exception:
-            pass
-
-        if not lines:
-            # Try package.json for JS/TS
-            try:
-                pkg_path = self._workspace.path("package.json")
-                if pkg_path.exists():
-                    import json
-                    pkg = json.loads(pkg_path.read_text())
-                    for section in ("dependencies", "devDependencies"):
-                        for name, version in pkg.get(section, {}).items():
-                            lines.append(f"  {name}@{version}")
-            except Exception:
-                pass
-
-        return "\n".join(lines) if lines else ""
+        """Read installed packages using the language strategy."""
+        return self._lang.get_installed_packages(self._workspace)
 
     _SKIP_DIRS = {"node_modules", "__pycache__", ".bizniz", "dist", "build", ".next", ".git", "bin", "obj"}
 
@@ -2679,7 +2598,7 @@ class CodingOrchestrator:
         Checks import resolution and auto-stubs missing modules.
         Returns updated current_files dict with any stubs added.
         """
-        validator = get_validator(self._language, self._workspace)
+        validator = get_validator(self._lang.name, self._workspace)
         if validator is None:
             return current_files
 
@@ -2731,7 +2650,7 @@ class CodingOrchestrator:
         Auto-fixes wrong paths, pip-installs missing deps, and asks the agent
         about ambiguous cases — all before the first test iteration.
         """
-        if self._language != "python":
+        if self._lang.name != "python":
             return current_files
 
         env = self._find_installable_environment()
@@ -3186,7 +3105,7 @@ class CodingOrchestrator:
         packages, and install them before running tests.
         """
         all_files = {**current_files, **current_test_files}
-        imports = _scan_imports(all_files)
+        imports = self._lang.scan_imports(all_files)
         if not imports:
             return
 
@@ -3207,7 +3126,7 @@ class CodingOrchestrator:
         except Exception:
             pass
 
-        third_party = _filter_third_party_packages(imports, workspace_modules, self._language)
+        third_party = self._lang.filter_third_party(imports, workspace_modules)
         if not third_party:
             return
 
