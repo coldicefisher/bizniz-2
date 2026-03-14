@@ -1,0 +1,45 @@
+# ── Gemini Blast Test Configuration ────────────────────────────────────────────
+# Round 1: gemini-2.5-flash-lite (cheapest, single shot)
+# Round 2: gemini-3.1-flash-lite-preview (mid tier, grind)
+# Round 3: gemini-3.1-pro-preview (agentic debugger)
+
+# Project setup
+project_root: "/home/jamey/bizniz_projects/pet_groomer"
+workspace_subdir: "backend"
+docker_image: "pet_groomer-backend:dev"
+problem_id: 1
+test_runner: "pytest"
+
+# Phase 1: Framing (generate code, no tests, no Docker)
+frame_model: "gemini-flash-lite"
+
+# Phase 2: Cycle loop
+max_cycles: 5
+
+shot_round:
+  model: "gemini-flash-lite"
+  escalation: ["gemini-flash-lite"]
+  max_attempts_per_issue: 1
+  max_iters_per_attempt: 1
+  stall_threshold: 2
+  stall_recovery: "none"
+  rollback_on_fail: false
+
+grind_round:
+  model: "gemini-3.1-flash-lite-preview"
+  escalation: ["gemini-3.1-flash-lite-preview"]
+  max_attempts_per_issue: 5
+  max_iters_per_attempt: 1
+  stall_threshold: 2
+  stall_recovery: "none"
+  rollback_on_fail: false
+
+agentic_round:
+  model: "gemini-3.1-pro-preview"
+  escalation: ["gemini-3.1-pro-preview"]
+  max_attempts_per_issue: 1
+  max_iters_per_attempt: 12
+  stall_threshold: 2
+  stall_recovery: "none"
+  agentic_debug: true
+  rollback_on_fail: true
