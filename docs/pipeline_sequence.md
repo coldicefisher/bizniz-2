@@ -65,7 +65,7 @@ Problem Statement
    - Generate Dockerfile from templates (language-specific)
    - Write `requirements.txt` (Python) or `package.json` (TypeScript)
    - Register service in project DB
-2. Write `docker-compose.yml` and `.env` to `project_root/dockerfiles/development/`
+2. Write `docker-compose.yml` and `.env` to `project_root/infra/development/`
 3. Build Docker images: `docker build -t <project>-<service>:dev`
 
 **Output:** Running Docker images per service, workspace directories initialized

@@ -176,7 +176,7 @@ def test_architect_build_backend_only(api_key, workspace_path):
     # Check project structure
     from pathlib import Path
     project_root = Path(result.project_root)
-    dev_root = project_root / "dockerfiles" / "development"
+    dev_root = project_root / "infra" / "development"
     assert dev_root.exists(), f"Development directory should exist at {dev_root}"
     assert (dev_root / "docker-compose.yml").exists()
     assert (dev_root / ".env").exists()

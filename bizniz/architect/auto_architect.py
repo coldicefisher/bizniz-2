@@ -15,7 +15,7 @@ Project structure:
     ├── frontend/                 (service source code)
     │   ├── src/...
     │   └── tests/...
-    └── dockerfiles/
+    └── infra/
         └── development/
             ├── docker-compose.yml
             ├── .env
@@ -154,7 +154,7 @@ class AutoArchitect(BaseAIAgent):
         """
         Full pipeline:
         1. Decompose problem into services
-        2. Create project structure (dockerfiles/development/...)
+        2. Create project structure (infra/development/...)
         3. Generate Dockerfiles, requirements.txt, docker-compose.yml, .env
         4. Build Docker images for application services
         5. Dispatch AutoEngineer for each application service
@@ -185,7 +185,7 @@ class AutoArchitect(BaseAIAgent):
 
         # Step 3: Create service workspaces and Docker configs
         # Source code goes in project_root/<service>/
-        # Docker configs go in dockerfiles/development/<service>/
+        # Docker configs go in infra/development/<service>/
         log("AutoArchitect: creating service workspaces and Docker configs...")
         service_workspaces = {}
         for service in architecture.services:
@@ -543,7 +543,7 @@ class AutoArchitect(BaseAIAgent):
     ):
         """Build the Docker image for a service.
 
-        The Dockerfile lives in docker_dir (dockerfiles/development/<service>/)
+        The Dockerfile lives in docker_dir (infra/development/<service>/)
         and the build context is the workspace root (project_root/<service>/).
         """
         def log(msg: str):

@@ -9,7 +9,7 @@ Output structure:
     project_root/
     ├── backend/                  (service source code)
     ├── frontend/                 (service source code)
-    └── dockerfiles/
+    └── infra/
         └── development/
             ├── docker-compose.yml
             ├── .env

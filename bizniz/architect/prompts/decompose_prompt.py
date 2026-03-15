@@ -29,17 +29,17 @@ IMPORTANT framework rules:
 - C#/.NET is ONLY for enterprise refactors, never for new projects
 
 Project directory structure:
-Source code lives at project_root/<service>/, Docker configs at dockerfiles/development/:
+Source code lives at project_root/<service>/, Docker configs at infra/development/:
   project_root/backend/         <- source code + requirements.txt
   project_root/frontend/        <- source code + package.json
-  project_root/dockerfiles/development/backend/   <- Dockerfile
-  project_root/dockerfiles/development/frontend/  <- Dockerfile
-  project_root/dockerfiles/development/docker-compose.yml
-  project_root/dockerfiles/development/.env
+  project_root/infra/development/backend/   <- Dockerfile
+  project_root/infra/development/frontend/  <- Dockerfile
+  project_root/infra/development/docker-compose.yml
+  project_root/infra/development/.env
 
 The docker-compose.yml must:
 - Use build contexts pointing to "../../<workspace_name>" for application services (source code root)
-- Reference Dockerfiles at "../../dockerfiles/development/<workspace_name>/Dockerfile"
+- Reference Dockerfiles at "../../infra/development/<workspace_name>/Dockerfile"
 - Use standard Docker Hub images for infrastructure (postgres, redis, etc.)
 - Define proper port mappings, environment variables, and dependencies
 - Include volume mounts for development (live code reloading)
@@ -50,7 +50,7 @@ Example docker-compose service for a Python backend:
   backend:
     build:
       context: ../../backend
-      dockerfile: ../../dockerfiles/development/backend/Dockerfile
+      dockerfile: ../../infra/development/backend/Dockerfile
     ports:
       - "8000:8000"
     volumes:
