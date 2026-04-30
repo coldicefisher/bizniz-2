@@ -251,7 +251,7 @@ class Coder(BaseAIAgent):
 
         for attempt in range(1, attempts + 1):
             try:
-                text, job_id, output_messages = self._client.get_text(
+                text, job_id, output_messages = self._ai_client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=GeneratePromptSchema,
@@ -319,7 +319,7 @@ class Coder(BaseAIAgent):
             new_code = None
             text = None
             try:
-                text, job_id, output_messages = self._client.get_text(
+                text, job_id, output_messages = self._ai_client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=RepairPromptSchema,
@@ -617,7 +617,7 @@ class Coder(BaseAIAgent):
         for attempt in range(1, attempts + 1):
             try:
                 t0 = time.time()
-                text, job_id, output_messages = self._client.get_text(
+                text, job_id, output_messages = self._ai_client.get_text(
                     messages=messages,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=RepairPromptSchema,
@@ -689,7 +689,7 @@ class Coder(BaseAIAgent):
             try:
                 log(f"Coder: generate_multi AI call (attempt {attempt}/{attempts})...")
                 t0 = time.time()
-                text, job_id, output_messages = self._client.get_text(
+                text, job_id, output_messages = self._ai_client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=GeneratePromptSchema,
@@ -752,7 +752,7 @@ class Coder(BaseAIAgent):
             try:
                 log(f"Coder: repair_multi AI call (attempt {attempt}/{attempts})...")
                 t0 = time.time()
-                text, job_id, output_messages = self._client.get_text(
+                text, job_id, output_messages = self._ai_client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=RepairPromptSchema,

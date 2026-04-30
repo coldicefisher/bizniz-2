@@ -57,9 +57,11 @@ class BaseAIAgent(ABC):
         self._workspace = workspace
 
         # Tag the client with the agent class name so cost-tracker records
-        # show which agent each AI call belongs to (coder, tester,
-        # engineer, architect, agentic_debugger, …). Best-effort —
-        # if the client doesn't accept the attribute we silently skip.
+        # show which agent each AI call belongs to. This is best-effort
+        # at construction time — when several agents share a client (the
+        # orchestrator's coder + tester + quickdebugger pattern), the
+        # last constructor wins. ``_ai_client`` (below) re-tags
+        # immediately before each call to handle that case correctly.
         try:
             self._client._caller_agent = type(self).__name__.lower()
         except Exception:
@@ -111,6 +113,29 @@ class BaseAIAgent(ABC):
         }])
 
     # ATTRIBUTES AND PROPERTIES ////////////////////////////////////////////////////////////////////////////
+
+    @property
+    def _ai_client(self):
+        """The AI client, with ``_caller_agent`` set to this agent's name.
+
+        Use this in place of ``self._client`` for every AI call. The
+        cost-tracker reads ``_caller_agent`` off the client when
+        recording each call, so we must (re-)tag the client immediately
+        before invoking it. Setting at construction-time isn't enough
+        because the orchestrator's coder/tester/quickdebugger share a
+        single client object — the last constructor's tag wins,
+        misattributing all later calls.
+
+        Best-effort: clients that reject the attribute (e.g. ``__slots__``)
+        are returned untouched; their calls show up as ``unknown`` in
+        the cost report.
+        """
+        try:
+            self._client._caller_agent = type(self).__name__.lower()
+        except Exception:
+            pass
+        return self._client
+
     @property
     def message_history(self) -> List[dict]:
         '''

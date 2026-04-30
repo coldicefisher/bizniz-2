@@ -271,7 +271,7 @@ class QuickDebugger(BaseDebugger, BaseAIAgent):
 
         for attempt in range(1, attempts + 1):
             try:
-                text, job_id, output_messages = self._client.get_text(
+                text, job_id, output_messages = self._ai_client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=QuickDebuggerSchema,

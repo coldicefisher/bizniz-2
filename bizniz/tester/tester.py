@@ -378,7 +378,7 @@ class Tester(BaseAIAgent):
             try:
                 log(f"Tester: generate_multi AI call (attempt {attempt}/{attempts})...")
                 t0 = time.time()
-                text, job_id, output_messages = self._client.get_text(
+                text, job_id, output_messages = self._ai_client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=TesterSchema,
@@ -452,7 +452,7 @@ class Tester(BaseAIAgent):
 
         for attempt in range(1, attempts + 1):
             try:
-                text, job_id, output_messages = self._client.get_text(
+                text, job_id, output_messages = self._ai_client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
                     schema=TesterSchema,

@@ -146,7 +146,7 @@ class AgenticDebugger(BaseDebugger):
 
             # Call LLM
             try:
-                text, _, _ = self._client.get_text(
+                text, _, _ = self._ai_client.get_text(
                     messages=messages,
                     use_message_history=False,
                     response_format=ResponseFormat.JSON_SCHEMA,
@@ -278,7 +278,7 @@ class AgenticDebugger(BaseDebugger):
 
         # One final call
         try:
-            text, _, _ = self._client.get_text(
+            text, _, _ = self._ai_client.get_text(
                 messages=messages,
                 use_message_history=False,
                 response_format=ResponseFormat.JSON_SCHEMA,
