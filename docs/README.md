@@ -10,14 +10,20 @@ High-level cross-cutting design.
 
 - [architecture/overview.md](architecture/overview.md) — component map and how the agents wire together
 - [architecture/data_flow.md](architecture/data_flow.md) — what data each agent passes to the next
-- [architecture/skeleton_seeding.md](architecture/skeleton_seeding.md) — the new skeleton-based service seeding flow
+- [architecture/architect_provisioner_split.md](architecture/architect_provisioner_split.md) — Architect plans, Provisioner materializes
+- [architecture/skeleton_seeding.md](architecture/skeleton_seeding.md) — skeleton-based service seeding
+- [architecture/planner.md](architecture/planner.md) — milestone sequencing
+- [architecture/evolve_mode.md](architecture/evolve_mode.md) — milestone-driven incremental builds
+- [architecture/cost_tracking.md](architecture/cost_tracking.md) — per-call usage capture, pricing, persistence
+- [architecture/error_classification.md](architecture/error_classification.md) — collection-error routing + config-aware repair
 
 ## Agents
 
 Each AI agent (one page per agent), top-down from coarsest to finest.
 
 - [agents/base_ai_agent.md](agents/base_ai_agent.md) — common base class
-- [agents/architect.md](agents/architect.md) — system decomposer (the top of the pipeline)
+- [agents/planner.md](agents/planner.md) — milestone sequencer (top of the stack)
+- [agents/architect.md](agents/architect.md) — system decomposer (also runs `evolve()` per milestone)
 - [agents/engineer.md](agents/engineer.md) — per-service requirements + architecture planning
 - [agents/coding_orchestrator.md](agents/coding_orchestrator.md) — per-issue iterative loop
 - [agents/coder.md](agents/coder.md) — code generation (single & multi-file)
