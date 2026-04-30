@@ -35,6 +35,11 @@ class FusionAuthTemplate(InfraTemplate):
     # Customize per-project by deriving from project_slug if you want.
     APPLICATION_ID = "85a03867-dccf-4882-adde-1a79aeec50df"
     ADMIN_USER_ID = "00000000-0000-0000-0000-000000000001"
+    # FusionAuth ships with this default tenant ID built-in. We do NOT
+    # set this as a kickstart variable — kickstart treats `defaultTenantId`
+    # specially (a "rename the default tenant" trigger), and renaming it
+    # to itself fails with a tenants_pkey unique-constraint violation.
+    # Instead, reference the UUID literally in PATCH URLs.
     DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000000"
 
     def render(self, ctx: TemplateContext) -> TemplateOutput:
@@ -48,7 +53,6 @@ class FusionAuthTemplate(InfraTemplate):
 
         kickstart = {
             "variables": {
-                "defaultTenantId": self.DEFAULT_TENANT_ID,
                 "applicationId": self.APPLICATION_ID,
                 "adminUserId": self.ADMIN_USER_ID,
                 "adminEmail": admin_email,
@@ -65,10 +69,11 @@ class FusionAuthTemplate(InfraTemplate):
             "requests": [
                 # Patch the default tenant — issuer must match how the
                 # application services will see FusionAuth from inside the
-                # docker network.
+                # docker network. UUID is hardcoded (see DEFAULT_TENANT_ID
+                # comment above) instead of being a kickstart variable.
                 {
                     "method": "PATCH",
-                    "url": "/api/tenant/#{defaultTenantId}",
+                    "url": f"/api/tenant/{self.DEFAULT_TENANT_ID}",
                     "body": {
                         "tenant": {
                             "issuer": issuer,

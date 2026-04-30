@@ -154,12 +154,15 @@ def test_full_stack_smoke_no_ai(tmp_path):
                 f"docker-compose.yml: {compose_path}"
             )
 
+        print(f"[smoke] docker compose up -d (project={slug})...")
+        t0 = time.time()
         up = compose(compose_path, "up", "-d", timeout=180)
         if up.returncode != 0:
             pytest.fail(
                 f"`docker compose up -d` failed (rc={up.returncode}):\n"
                 f"STDOUT:\n{up.stdout}\nSTDERR:\n{up.stderr}"
             )
+        print(f"[smoke] compose up succeeded in {time.time() - t0:.1f}s")
 
         services_by_type = {s.service_type: s for s in architecture.services}
         backend = services_by_type.get("backend")
@@ -167,20 +170,35 @@ def test_full_stack_smoke_no_ai(tmp_path):
         auth = services_by_type.get("auth")
 
         # Backend: any HTTP response = the server is reachable.
-        assert http_alive(
+        print(f"[smoke] polling backend http://localhost:{backend.port}/ ...")
+        t0 = time.time()
+        backend_alive = http_alive(
             f"http://localhost:{backend.port}/", timeout=120,
-        ), f"Backend on http://localhost:{backend.port}/ did not respond within 120s"
+        )
+        print(f"[smoke] backend alive={backend_alive} in {time.time() - t0:.1f}s")
+        assert backend_alive, \
+            f"Backend on http://localhost:{backend.port}/ did not respond within 120s"
 
         # Frontend: any HTTP response.
-        assert http_alive(
+        print(f"[smoke] polling frontend http://localhost:{frontend.port}/ ...")
+        t0 = time.time()
+        frontend_alive = http_alive(
             f"http://localhost:{frontend.port}/", timeout=120,
-        ), f"Frontend on http://localhost:{frontend.port}/ did not respond within 120s"
+        )
+        print(f"[smoke] frontend alive={frontend_alive} in {time.time() - t0:.1f}s")
+        assert frontend_alive, \
+            f"Frontend on http://localhost:{frontend.port}/ did not respond within 120s"
 
         # FusionAuth: must reach 200 on /api/status (slow boot, kickstart).
-        assert http_alive(
+        print(f"[smoke] polling fusionauth http://localhost:{auth.port}/api/status (expect 200, may take 60-180s) ...")
+        t0 = time.time()
+        auth_ok = http_alive(
             f"http://localhost:{auth.port}/api/status",
             timeout=300, expect_ok=True,
-        ), f"FusionAuth on http://localhost:{auth.port} did not reach /api/status 200 within 300s"
+        )
+        print(f"[smoke] fusionauth ok={auth_ok} in {time.time() - t0:.1f}s")
+        assert auth_ok, \
+            f"FusionAuth on http://localhost:{auth.port} did not reach /api/status 200 within 300s"
 
     except Exception:
         capture_diagnostics(compose_path, log_dir)

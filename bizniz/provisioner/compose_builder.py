@@ -67,8 +67,15 @@ def build_compose(
             if "app-network" not in networks:
                 networks.append("app-network")
 
-    # Top-level structure
-    compose: Dict[str, object] = {"services": services_block}
+    # Top-level structure. ``name`` pins the compose project name to the
+    # slug. Without this, compose derives the project name from the parent
+    # directory ("development"), and EVERY bizniz project would collide on
+    # that name — `docker compose up` for project A would replace project
+    # B's containers, and `compose down` would tear down the wrong stack.
+    compose: Dict[str, object] = {
+        "name": project_slug,
+        "services": services_block,
+    }
     if volumes:
         compose["volumes"] = {v: None for v in volumes}
     if networks:
@@ -90,8 +97,17 @@ def _build_app_service_entry(
 
     The ``dockerfile`` field is relative to the *build context*, not the
     compose file, so it's one ``..`` fewer than the volume / context paths.
+
+    For Node-based services we add an anonymous volume on
+    ``/app/node_modules`` so the workspace bind-mount doesn't mask the
+    npm-installed dependencies inside the image. Python's pip installs to
+    system site-packages outside ``/app``, so it needs no equivalent.
     """
     ws = service.workspace_name
+    volumes = [f"../../{ws}:/app"]
+    if service.language in ("typescript", "javascript"):
+        volumes.append("/app/node_modules")
+
     entry: dict = {
         "image": f"{project_slug}-{service.name}:dev",
         "build": {
@@ -99,7 +115,7 @@ def _build_app_service_entry(
             "dockerfile": f"../infra/development/{ws}/Dockerfile",
         },
         "env_file": ".env",
-        "volumes": [f"../../{ws}:/app"],
+        "volumes": volumes,
         "networks": ["app-network"],
     }
 

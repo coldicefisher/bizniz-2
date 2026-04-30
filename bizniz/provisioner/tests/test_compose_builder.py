@@ -36,8 +36,40 @@ def test_app_service_only_produces_build_entry():
     assert "8001:8000" in backend["ports"]
     assert "../../backend:/app" in backend["volumes"]
     assert backend["env_file"] == ".env"
+    # Python services don't get the node_modules anonymous volume.
+    assert "/app/node_modules" not in backend["volumes"]
     # network registered
     assert "app-network" in parsed["networks"]
+
+
+def test_compose_pins_project_name_to_slug():
+    """Compose project name MUST be the slug, not the parent directory.
+
+    Without this, every bizniz-generated project at `infra/development/`
+    inherits project name `development` from the parent dir, and
+    `docker compose up` for project A would stomp on project B's
+    containers (and `down` would tear down the wrong stack)."""
+    arch = _arch(
+        _svc("postgres", "database", "postgres", "sql", port=5433),
+    )
+    yml = build_compose(arch, template_outputs={}, project_slug="vehinexa")
+    parsed = yaml.safe_load(yml)
+    assert parsed["name"] == "vehinexa"
+
+
+def test_typescript_app_service_preserves_node_modules_with_anon_volume():
+    """Without an anonymous volume on /app/node_modules, the host
+    workspace bind-mount masks the npm-installed deps and `npm run dev`
+    fails with `vite: not found`."""
+    arch = _arch(
+        _svc("frontend", "frontend", "react", "typescript",
+             port=5173, skeleton="react"),
+    )
+    yml = build_compose(arch, template_outputs={}, project_slug="x")
+    parsed = yaml.safe_load(yml)
+    frontend = parsed["services"]["frontend"]
+    assert "../../frontend:/app" in frontend["volumes"]
+    assert "/app/node_modules" in frontend["volumes"]
 
 
 def test_template_provided_compose_used_when_present():

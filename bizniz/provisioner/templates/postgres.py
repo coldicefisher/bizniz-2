@@ -18,12 +18,16 @@ class PostgresTemplate(InfraTemplate):
 
     def render(self, ctx: TemplateContext) -> TemplateOutput:
         host_port = ctx.service.port or 5432
+        # Emit the asyncpg-flavored URL because every shipped Python
+        # skeleton (FastAPI) uses ``create_async_engine`` and would
+        # otherwise fall back to psycopg2 — which we don't install.
+        # A sync-Python skeleton can transform this URL at config-load.
         env_vars = {
             "POSTGRES_USER": "dev",
             "POSTGRES_PASSWORD": "dev",
             "POSTGRES_DB": ctx.project_slug,
             "DATABASE_URL": (
-                f"postgresql://dev:dev@postgres:5432/{ctx.project_slug}"
+                f"postgresql+asyncpg://dev:dev@postgres:5432/{ctx.project_slug}"
             ),
         }
 

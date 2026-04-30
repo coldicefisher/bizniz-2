@@ -67,6 +67,9 @@ def test_env_vars_include_database_url_with_project_slug():
     assert env["POSTGRES_USER"] == "dev"
     assert env["POSTGRES_DB"] == "petgroomer"
     assert "petgroomer" in env["DATABASE_URL"]
+    # Driver tag matters: SQLAlchemy's create_async_engine defaults to
+    # psycopg2 without it, but skeletons install asyncpg, not psycopg2.
+    assert env["DATABASE_URL"].startswith("postgresql+asyncpg://")
 
 
 def test_compose_volumes_include_pgdata():
