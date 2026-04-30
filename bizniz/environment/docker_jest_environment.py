@@ -25,6 +25,7 @@ The workspace root is bind-mounted at ``/workspace`` inside the container and
 tests run with ``npx jest``.
 """
 
+import hashlib
 import subprocess
 import traceback
 import uuid
@@ -65,6 +66,7 @@ class DockerJestEnvironment(BaseExecutionEnvironment):
         self._installed_packages: List[str] = []
         self._container_id: Optional[str] = None
         self._container_name = f"bizniz-jest-{uuid.uuid4().hex[:12]}"
+        self._last_pkg_json_hash: Optional[str] = None
 
     @property
     def image(self) -> str:
@@ -114,6 +116,7 @@ class DockerJestEnvironment(BaseExecutionEnvironment):
             capture_output=True, timeout=10,
         )
         self._sync_workspace()
+        self._ensure_node_modules()
 
     def _sync_workspace(self):
         """Copy workspace files into the container via docker cp."""
@@ -128,6 +131,105 @@ class DockerJestEnvironment(BaseExecutionEnvironment):
             raise RuntimeError(
                 f"Failed to sync workspace to container: {proc.stderr.strip()}"
             )
+
+    def _ensure_node_modules(self):
+        """Make sure /workspace/node_modules is present and up to date with
+        /workspace/package.json. Skeleton-built images install packages at
+        /app/node_modules during docker build; the workspace mount (/workspace)
+        is empty until we wire it up.
+
+        Strategy:
+          1. If /workspace/package.json doesn't exist, no-op.
+          2. If /workspace/node_modules is missing:
+             - If /app/node_modules exists (skeleton image), symlink it.
+             - Otherwise run ``npm install`` in /workspace.
+          3. If package.json hash changed since last run, re-run ``npm install``
+             so any deps the AI added get installed.
+        """
+        if self._container_id is None:
+            return
+
+        pkg_json = self._workspace_root / "package.json"
+        if not pkg_json.exists():
+            return
+
+        try:
+            current_hash = hashlib.sha256(pkg_json.read_bytes()).hexdigest()
+        except Exception:
+            current_hash = None
+
+        # Detect node_modules state inside the container
+        check = subprocess.run(
+            ["docker", "exec", self._container_id,
+             "sh", "-c", "[ -d /workspace/node_modules ] && echo present || echo missing"],
+            capture_output=True, text=True, timeout=10,
+        )
+        ws_present = "present" in check.stdout
+
+        if not ws_present:
+            # Prefer the image's /app/node_modules (skeleton already ran npm install
+            # at build time) so we don't pay the cost of re-installing.
+            app_check = subprocess.run(
+                ["docker", "exec", self._container_id,
+                 "sh", "-c", "[ -d /app/node_modules ] && echo yes || echo no"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if "yes" in app_check.stdout:
+                subprocess.run(
+                    ["docker", "exec", self._container_id,
+                     "sh", "-c", "ln -sfn /app/node_modules /workspace/node_modules"],
+                    capture_output=True, timeout=10,
+                )
+            else:
+                self._npm_install_in_workspace()
+            self._last_pkg_json_hash = current_hash
+            return
+
+        # node_modules is present. If package.json has changed since the last
+        # install we triggered, run npm install to pick up new deps.
+        if current_hash and self._last_pkg_json_hash and current_hash != self._last_pkg_json_hash:
+            self._npm_install_in_workspace()
+        self._last_pkg_json_hash = current_hash
+
+    def _npm_install_in_workspace(self):
+        """Run ``npm install`` inside the container's /workspace dir.
+
+        Temporarily reconnects the bridge network if the container was started
+        with ``--network none`` so the registry is reachable.
+        """
+        if self._container_id is None:
+            return
+        # If the workspace is using a symlink to /app/node_modules, replace it
+        # with a real directory so npm install writes into /workspace and
+        # picks up workspace-specific package.json edits.
+        subprocess.run(
+            ["docker", "exec", self._container_id,
+             "sh", "-c",
+             "if [ -L /workspace/node_modules ]; then "
+             "rm /workspace/node_modules && cp -a /app/node_modules /workspace/node_modules 2>/dev/null || mkdir -p /workspace/node_modules; "
+             "fi"],
+            capture_output=True, timeout=30,
+        )
+
+        needs_network_restore = False
+        if not self._network_enabled:
+            subprocess.run(
+                ["docker", "network", "connect", "bridge", self._container_id],
+                capture_output=True, timeout=10,
+            )
+            needs_network_restore = True
+        try:
+            subprocess.run(
+                ["docker", "exec", "-w", "/workspace", self._container_id,
+                 "npm", "install", "--no-audit", "--no-fund"],
+                capture_output=True, text=True, timeout=300,
+            )
+        finally:
+            if needs_network_restore:
+                subprocess.run(
+                    ["docker", "network", "disconnect", "bridge", self._container_id],
+                    capture_output=True, timeout=10,
+                )
 
     def stop(self):
         """Stop and remove the persistent container."""
@@ -230,6 +332,7 @@ class DockerJestEnvironment(BaseExecutionEnvironment):
         # Sync latest workspace files into container before running tests
         try:
             self._sync_workspace()
+            self._ensure_node_modules()
         except Exception as e:
             return ExecutionEnvironmentResult(
                 success=False,

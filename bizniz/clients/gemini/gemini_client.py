@@ -55,7 +55,7 @@ class GeminiClient(BaseAIClient):
         self,
         api_key: Optional[str] = None,
         model_name: str = "gemini-2.5-flash",
-        max_tokens: int = 16_000,
+        max_tokens: int = 32_000,
         on_message_callback: Optional[Callable[[Message], None]] = None,
     ):
         self._api_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")

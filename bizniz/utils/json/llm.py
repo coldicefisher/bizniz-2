@@ -128,4 +128,62 @@ def clean_llm_json(text: str) -> str:
     except (json.JSONDecodeError, ValueError):
         text = fix_string_escapes(text)
 
+    # Last-resort: response was truncated mid-string (Gemini hit max_tokens
+    # while emitting a long file body). Try to close the open string and any
+    # unbalanced braces/brackets so partial content can still be salvaged.
+    try:
+        json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        repaired = _close_truncated_json(text)
+        if repaired is not None:
+            text = repaired
+
     return text
+
+
+def _close_truncated_json(text: str) -> str | None:
+    """Best-effort fix for JSON truncated mid-value.
+
+    Walks the text tracking string state and brace/bracket depth. If the text
+    ends inside an open string, closes it. Then balances trailing ``}`` / ``]``
+    in last-opened-first-closed order. Returns the repaired text only if it
+    parses; otherwise returns None.
+    """
+    stack: list = []
+    in_string = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if ch == '\\':
+                i += 2  # skip escape and its target
+                continue
+            if ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == '{':
+                stack.append('}')
+            elif ch == '[':
+                stack.append(']')
+            elif ch in ('}', ']'):
+                if stack and stack[-1] == ch:
+                    stack.pop()
+        i += 1
+
+    candidate = text
+    if in_string:
+        candidate += '"'
+    # Strip a trailing comma if present (we may now need to close after it)
+    candidate = candidate.rstrip()
+    if candidate.endswith(','):
+        candidate = candidate[:-1]
+    while stack:
+        candidate += stack.pop()
+    try:
+        json.loads(candidate)
+        return candidate
+    except (json.JSONDecodeError, ValueError):
+        return None
