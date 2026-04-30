@@ -28,8 +28,11 @@ def test_app_service_only_produces_build_entry():
     yml = build_compose(arch, template_outputs={}, project_slug="x")
     parsed = yaml.safe_load(yml)
     backend = parsed["services"]["backend"]
+    assert backend["image"] == "x-backend:dev"
     assert backend["build"]["context"] == "../../backend"
-    assert backend["build"]["dockerfile"] == "../../infra/development/backend/Dockerfile"
+    # dockerfile is relative to the build context (compose semantics),
+    # so only ONE ../ to climb out of the workspace before descending.
+    assert backend["build"]["dockerfile"] == "../infra/development/backend/Dockerfile"
     assert "8001:8000" in backend["ports"]
     assert "../../backend:/app" in backend["volumes"]
     assert backend["env_file"] == ".env"

@@ -82,12 +82,21 @@ def _build_app_service_entry(
     project_slug: str,
     architecture: SystemArchitecture,
 ) -> dict:
-    """Compose entry for an application service (backend/frontend/worker)."""
+    """Compose entry for an application service (backend/frontend/worker).
+
+    The image is tagged ``<slug>-<svc>:dev`` so compose reuses the
+    Provisioner-built image when available; ``build:`` is included so
+    ``docker compose build`` and CI rebuilds still work.
+
+    The ``dockerfile`` field is relative to the *build context*, not the
+    compose file, so it's one ``..`` fewer than the volume / context paths.
+    """
     ws = service.workspace_name
     entry: dict = {
+        "image": f"{project_slug}-{service.name}:dev",
         "build": {
             "context": f"../../{ws}",
-            "dockerfile": f"../../infra/development/{ws}/Dockerfile",
+            "dockerfile": f"../infra/development/{ws}/Dockerfile",
         },
         "env_file": ".env",
         "volumes": [f"../../{ws}:/app"],

@@ -12,6 +12,9 @@ silent failures unit tests can't see: Dockerfiles that don't build,
 compose files that won't parse, services that crash on startup,
 network/depends_on misconfigurations.
 
+For a faster, free version that uses a hand-crafted architecture,
+see test_full_stack_smoke_no_ai.py.
+
 Skipped automatically when:
   - GEMINI_API_KEY isn't set
   - docker isn't on PATH or the daemon isn't responsive
@@ -25,11 +28,7 @@ Engineer dispatch is stubbed — we test the infrastructure path only.
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 import pytest
@@ -38,6 +37,14 @@ from bizniz.architect.architect import Architect
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.provisioner import Provisioner
+from bizniz.provisioner.tests.functional._smoke_helpers import (
+    capture_diagnostics,
+    compose,
+    compose_down,
+    ensure_docker,
+    http_alive,
+    image_present,
+)
 from bizniz.workspace.local_workspace import LocalWorkspace
 
 
@@ -58,97 +65,9 @@ pytestmark = [
 ]
 
 
-# ── Skip helpers ─────────────────────────────────────────────────────────────
-
-
 def _ensure_keys():
     if not os.environ.get("GEMINI_API_KEY"):
         pytest.skip("GEMINI_API_KEY not set — skipping smoke test")
-
-
-def _ensure_docker():
-    if shutil.which("docker") is None:
-        pytest.skip("docker not in PATH — skipping smoke test")
-    try:
-        proc = subprocess.run(
-            ["docker", "info"], capture_output=True, timeout=10,
-        )
-        if proc.returncode != 0:
-            pytest.skip("docker daemon not responsive — skipping smoke test")
-    except Exception as e:
-        pytest.skip(f"docker daemon check failed ({e}) — skipping smoke test")
-
-
-# ── Compose helpers ──────────────────────────────────────────────────────────
-
-
-def _compose(compose_path: Path, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["docker", "compose", "-f", str(compose_path), *args],
-        capture_output=True, text=True, timeout=timeout,
-    )
-
-
-def _capture_diagnostics(compose_path: Path, log_dir: Path) -> None:
-    """Best-effort: dump compose ps + logs on failure for debugging."""
-    log_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        ps = _compose(compose_path, "ps", "-a")
-        (log_dir / "compose-ps.txt").write_text(
-            ps.stdout + "\n--- STDERR ---\n" + ps.stderr,
-        )
-    except Exception as e:
-        (log_dir / "compose-ps.txt").write_text(f"ps failed: {e}")
-    try:
-        logs = _compose(compose_path, "logs", "--no-color", "--tail=200", timeout=60)
-        (log_dir / "compose-logs.txt").write_text(
-            logs.stdout + "\n--- STDERR ---\n" + logs.stderr,
-        )
-    except Exception as e:
-        (log_dir / "compose-logs.txt").write_text(f"logs failed: {e}")
-
-
-def _compose_down(compose_path: Path) -> None:
-    """Always-runs cleanup. Removes containers, volumes, and the
-    project's own images. Best effort — we never raise from cleanup."""
-    try:
-        _compose(
-            compose_path, "down", "-v", "--rmi", "all", "--remove-orphans",
-            timeout=180,
-        )
-    except Exception:
-        pass
-
-
-# ── HTTP polling ─────────────────────────────────────────────────────────────
-
-
-def _http_alive(url: str, timeout: float, expect_ok: bool = False) -> bool:
-    """Poll GET <url> until it returns any HTTP response, or timeout.
-
-    With expect_ok=True, only 2xx counts as success — useful for
-    services like FusionAuth where we want to know it's actually
-    initialized, not just listening.
-    """
-    deadline = time.time() + timeout
-    last_err: Exception | None = None
-    while time.time() < deadline:
-        try:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                if expect_ok:
-                    if 200 <= resp.status < 300:
-                        return True
-                else:
-                    return True  # any HTTP response is "alive"
-        except urllib.error.HTTPError as e:
-            if not expect_ok:
-                return True  # 4xx/5xx still means the server is up
-            last_err = e
-        except Exception as e:
-            last_err = e
-        time.sleep(2)
-    return False
 
 
 # ── Engineer stub ────────────────────────────────────────────────────────────
@@ -179,7 +98,7 @@ class _NoopEngineerCM:
 
 def test_full_stack_smoke(tmp_path):
     _ensure_keys()
-    _ensure_docker()
+    ensure_docker()
 
     project_name = f"Smoke CRM {int(time.time())}"
     log_dir = tmp_path / "_diagnostics"
@@ -213,13 +132,10 @@ def test_full_stack_smoke(tmp_path):
     compose_path = project_root / "infra" / "development" / "docker-compose.yml"
     assert compose_path.is_file(), f"docker-compose.yml not created at {compose_path}"
 
-    # Verify all expected images were built. If skeleton seeding worked
-    # and `_build_images_per_action` ran, every app service should have
-    # an image_built=True entry in the architect's provision result.
     failed_builds = [
         svc.name for svc in result.architecture.services
         if svc.service_type in ("backend", "frontend", "worker")
-        and not _image_present(f"{result.architecture.project_slug}-{svc.name}:dev")
+        and not image_present(f"{result.architecture.project_slug}-{svc.name}:dev")
     ]
 
     # 2. Bring stack up + poll endpoints (in try/finally for guaranteed teardown).
@@ -230,42 +146,36 @@ def test_full_stack_smoke(tmp_path):
                 f"docker-compose.yml: {compose_path}"
             )
 
-        up = _compose(compose_path, "up", "-d", timeout=180)
+        up = compose(compose_path, "up", "-d", timeout=180)
         if up.returncode != 0:
             pytest.fail(
                 f"`docker compose up -d` failed (rc={up.returncode}):\n"
                 f"STDOUT:\n{up.stdout}\nSTDERR:\n{up.stderr}"
             )
 
-        services_by_type = {
-            s.service_type: s for s in result.architecture.services
-        }
+        services_by_type = {s.service_type: s for s in result.architecture.services}
         backend = services_by_type.get("backend")
         frontend = services_by_type.get("frontend")
         auth = services_by_type.get("auth")
 
-        # Backend should respond on its host port (any HTTP status counts).
         if backend and backend.port:
-            assert _http_alive(
+            assert http_alive(
                 f"http://localhost:{backend.port}/", timeout=120,
             ), (
                 f"Backend on http://localhost:{backend.port}/ did not "
                 f"respond within 120s — image likely starts then crashes"
             )
 
-        # Frontend dev server (Vite) takes a moment to start.
         if frontend and frontend.port:
-            assert _http_alive(
+            assert http_alive(
                 f"http://localhost:{frontend.port}/", timeout=120,
             ), (
                 f"Frontend on http://localhost:{frontend.port}/ did not "
                 f"respond within 120s"
             )
 
-        # FusionAuth — slow boot (kickstart takes a while). Use /api/status
-        # which returns 200 only when fully initialized.
         if auth and auth.port:
-            assert _http_alive(
+            assert http_alive(
                 f"http://localhost:{auth.port}/api/status",
                 timeout=300, expect_ok=True,
             ), (
@@ -274,20 +184,9 @@ def test_full_stack_smoke(tmp_path):
             )
 
     except Exception:
-        _capture_diagnostics(compose_path, log_dir)
+        capture_diagnostics(compose_path, log_dir)
         print(f"[smoke] diagnostics dumped to {log_dir}")
         raise
 
     finally:
-        _compose_down(compose_path)
-
-
-def _image_present(image_tag: str) -> bool:
-    try:
-        proc = subprocess.run(
-            ["docker", "image", "inspect", image_tag],
-            capture_output=True, timeout=10,
-        )
-        return proc.returncode == 0
-    except Exception:
-        return False
+        compose_down(compose_path)
