@@ -40,7 +40,7 @@ decisions.
 **Tests.** 14 unit tests (mocked client) + 2 functional tests
 (real Gemini, CRM problem) all pass.
 
-**Doc:** [`docs/agents/planner.md`](../agents/planner.md) (per-agent
+**Doc:** [`docs/roles/planner.md`](../roles/planner.md) (per-agent
 reference), [`docs/architecture/planner.md`](../architecture/planner.md)
 (design rationale).
 

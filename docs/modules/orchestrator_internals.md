@@ -1,6 +1,6 @@
 # Orchestrator Internals
 
-`bizniz/orchestrator/`. Internal helpers that support `CodingOrchestrator` (documented separately at [agents/coding_orchestrator.md](../agents/coding_orchestrator.md)).
+`bizniz/orchestrator/`. Internal helpers that support `CodingOrchestrator` (documented separately at [roles/coding_orchestrator.md](../roles/coding_orchestrator.md)).
 
 ## Files
 
