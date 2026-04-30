@@ -147,7 +147,20 @@ def _build_app_service_entry(
 
 
 def _container_port_for(service: ServiceDefinition) -> int:
-    """Best guess for the in-container port a service exposes."""
+    """Best guess for the in-container port a service exposes.
+
+    Resolution order:
+      1. Skeleton-declared ``container_port`` (most authoritative — the
+         skeleton author knows which port their dev server binds).
+      2. Framework default (covers generated boilerplate without a
+         skeleton).
+      3. Fallback to the host port, then 8000.
+    """
+    if service.skeleton and service.skeleton != "none":
+        from bizniz.architect.skeletons import get_skeleton
+        info = get_skeleton(service.skeleton)
+        if info is not None and info.container_port is not None:
+            return info.container_port
     framework_ports = {
         "fastapi": 8000,
         "flask": 5000,

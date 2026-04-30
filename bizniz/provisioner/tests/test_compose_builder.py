@@ -57,6 +57,21 @@ def test_compose_pins_project_name_to_slug():
     assert parsed["name"] == "vehinexa"
 
 
+def test_skeleton_container_port_overrides_framework_default():
+    """saas-frontend (angular) declares container_port=5173 (matches its
+    dev server) — compose must use that, not the angular framework default
+    of 4200."""
+    arch = _arch(_svc("frontend", "frontend", "angular", "typescript",
+                      port=5177, skeleton="saas-frontend"))
+    yml = build_compose(arch, template_outputs={}, project_slug="x")
+    parsed = yaml.safe_load(yml)
+    frontend = parsed["services"]["frontend"]
+    assert "5177:5173" in frontend["ports"], (
+        f"Expected host:5177 → container:5173 from skeleton override, "
+        f"got {frontend['ports']}"
+    )
+
+
 def test_typescript_app_service_preserves_node_modules_with_anon_volume():
     """Without an anonymous volume on /app/node_modules, the host
     workspace bind-mount masks the npm-installed deps and `npm run dev`
