@@ -522,6 +522,7 @@ class AutoEngineer(BaseAIAgent):
         self,
         problem_statement: str,
         analysis: Optional[EngineeringAnalysis] = None,
+        framing: bool = True,
     ) -> List[OrchestratorResult]:
         """
         Full pipeline with layered generation: analyze the problem,
@@ -540,6 +541,12 @@ class AutoEngineer(BaseAIAgent):
         ----------
         analysis:
             Pre-computed analysis. If None, analyze() is called.
+        framing:
+            When True (default), runs a Phase 1 framing pass before the layer
+            dispatch loop: cheaply generate baseline source for every issue in
+            topological order with no tests/Docker, so the test loop in each
+            layer starts from a coherent codebase. Disable to fall back to
+            stub-only scaffolding from analyze().
         """
 
         def log(msg: str):
@@ -571,6 +578,12 @@ class AutoEngineer(BaseAIAgent):
             titles = [i.title for i in layer.issues]
             log(f"  Layer {layer.layer_index}: {titles}")
 
+        # Phase 1: framing — populate workspace with real baseline code per
+        # issue (in topological order) before any test loop runs. Cheap pass,
+        # no tests, no Docker.
+        if framing:
+            self._frame_all_issues(analysis, layers)
+
         results = []
         workspace_context = {}
 
@@ -596,6 +609,53 @@ class AutoEngineer(BaseAIAgent):
                     workspace_context[change.filepath] = change.code
 
         return results
+
+    def _frame_all_issues(self, analysis: EngineeringAnalysis, layers) -> None:
+        """
+        Phase 1 framing: walk every issue in topological order and run the
+        autocoder once with no tests / no Docker to populate the workspace
+        with real baseline code. Borrows an autocoder from a fresh
+        orchestrator (uses the cheapest configured model + Docker env so
+        env.describe() informs the LLM about the runtime).
+
+        Best-effort — failures are logged and the layer dispatch loop will
+        retry with the full test/repair cycle.
+        """
+        from bizniz.engineer.framing import frame_issues, flatten_layers_topo
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        try:
+            framing_orchestrator = self._orchestrator_factory()
+        except Exception as e:
+            log(f"AutoEngineer: skipping framing — orchestrator factory failed: {e}")
+            return
+
+        autocoder = getattr(framing_orchestrator, "_autocoder", None)
+        if autocoder is None:
+            log("AutoEngineer: skipping framing — no autocoder on orchestrator")
+            return
+
+        arch_context = ""
+        if analysis.architecture is not None:
+            arch_context = self.format_architecture_context(analysis.architecture)
+
+        issues_topo = flatten_layers_topo(layers)
+        try:
+            frame_issues(
+                issues_topo=issues_topo,
+                autocoder=autocoder,
+                workspace=self._workspace,
+                architecture_context=arch_context,
+                on_status_message=self._on_status_message,
+                language=self._language,
+            )
+        except AIInsufficientFunds:
+            raise
+        except Exception as e:
+            log(f"AutoEngineer: framing pass aborted ({type(e).__name__}: {e})")
 
     def _dispatch_layer(
         self,
