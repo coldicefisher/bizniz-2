@@ -45,6 +45,21 @@ def test_redis_url_env_var():
     assert out.env_vars["REDIS_URL"] == "redis://redis:6379/0"
 
 
+def test_redis_url_uses_actual_service_name():
+    """If the architect names the service "cache" or "queue", REDIS_URL
+    must use that hostname — hardcoding "redis" causes DNS failures
+    inside containers."""
+    from bizniz.architect.types import ServiceDefinition
+    cache = ServiceDefinition(
+        name="cache",  # architect's pick
+        service_type="cache", framework="redis", language="yaml",
+        description="cache + queue", workspace_name="cache", port=6379,
+        depends_on=[], requirements=[], skeleton="none",
+    )
+    out = RedisTemplate().render(_ctx(cache))
+    assert out.env_vars["REDIS_URL"] == "redis://cache:6379/0"
+
+
 def test_no_workspace_or_infra_files():
     out = RedisTemplate().render(_ctx(_service()))
     assert out.workspace_files == {}

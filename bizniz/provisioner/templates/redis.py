@@ -32,5 +32,9 @@ class RedisTemplate(InfraTemplate):
         return TemplateOutput(
             compose_service=compose_service,
             compose_networks=["app-network"],
-            env_vars={"REDIS_URL": "redis://redis:6379/0"},
+            # Hostname is the actual service name — architect may pick
+            # "redis", "cache", "queue", etc. Hardcoding "redis" causes
+            # DNS failures inside containers when the architect picks
+            # a different name.
+            env_vars={"REDIS_URL": f"redis://{ctx.service.name}:6379/0"},
         )

@@ -18,6 +18,11 @@ class PostgresTemplate(InfraTemplate):
 
     def render(self, ctx: TemplateContext) -> TemplateOutput:
         host_port = ctx.service.port or 5432
+        # Use this service's actual name — the architect can call it
+        # anything ("db", "data", "postgres"). Hardcoding "postgres" in
+        # the DATABASE_URL causes a DNS lookup failure inside containers
+        # whenever the architect picks a different name.
+        own_name = ctx.service.name
         # Emit the asyncpg-flavored URL because every shipped Python
         # skeleton (FastAPI) uses ``create_async_engine`` and would
         # otherwise fall back to psycopg2 — which we don't install.
@@ -27,7 +32,7 @@ class PostgresTemplate(InfraTemplate):
             "POSTGRES_PASSWORD": "dev",
             "POSTGRES_DB": ctx.project_slug,
             "DATABASE_URL": (
-                f"postgresql+asyncpg://dev:dev@postgres:5432/{ctx.project_slug}"
+                f"postgresql+asyncpg://dev:dev@{own_name}:5432/{ctx.project_slug}"
             ),
         }
 

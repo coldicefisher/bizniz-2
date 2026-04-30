@@ -72,6 +72,26 @@ def test_env_vars_include_database_url_with_project_slug():
     assert env["DATABASE_URL"].startswith("postgresql+asyncpg://")
 
 
+def test_database_url_uses_actual_service_name_not_hardcoded_postgres():
+    """The architect can name the database service anything ("db", "data").
+    The DATABASE_URL hostname must use the ACTUAL service name — hardcoding
+    'postgres' causes DNS failures inside containers when the architect
+    picks a different name. (Heavy AI smoke surfaced this 2026-04-30.)
+    """
+    db_svc = ServiceDefinition(
+        name="db",  # ← architect's pick, not "postgres"
+        service_type="database", framework="postgres", language="sql",
+        description="primary db", workspace_name="postgres", port=5433,
+        depends_on=[], requirements=[], skeleton="none",
+    )
+    out = PostgresTemplate().render(_ctx(db_svc, slug="myapp"))
+    assert "@db:5432/" in out.env_vars["DATABASE_URL"], (
+        f"DATABASE_URL hardcoded a hostname instead of using the service "
+        f"name. Got: {out.env_vars['DATABASE_URL']}"
+    )
+    assert "@postgres:5432" not in out.env_vars["DATABASE_URL"]
+
+
 def test_compose_volumes_include_pgdata():
     out = PostgresTemplate().render(_ctx(_service()))
     assert "pgdata" in out.compose_volumes
