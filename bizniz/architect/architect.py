@@ -24,6 +24,7 @@ Project structure:
 """
 
 import concurrent.futures
+import datetime
 import json
 import threading
 import time
@@ -109,6 +110,35 @@ class Architect(BaseAIAgent):
         return ARCHITECT_SYSTEM_PROMPT
 
     # ── Public API ─────────────────────────────────────────────────────────────
+
+    def _models_snapshot(self) -> dict:
+        """Best-effort snapshot of the model configuration for the run report.
+
+        Reads from BiznizConfig if it loads cleanly; otherwise returns
+        whatever we can pull off the architect's own AI client.
+        """
+        snap: dict = {}
+        try:
+            from bizniz.config.bizniz_config import BiznizConfig
+            cfg = BiznizConfig.find_and_load()
+            for key in (
+                "default_model", "architect_model", "engineer_model",
+                "coder_model", "tester_model", "debugger_model",
+                "agentic_debugger_model", "planner_model",
+            ):
+                v = getattr(cfg, key, None)
+                if v:
+                    snap[key] = v
+        except Exception:
+            pass
+        if not snap:
+            try:
+                snap["architect_client_model"] = getattr(
+                    self._client, "_model", None,
+                ) or getattr(self._client.ai_agent, "_model", None)
+            except Exception:
+                pass
+        return {k: v for k, v in snap.items() if v is not None}
 
     def decompose(
         self, problem_statement: str, project_name: str,
@@ -682,6 +712,7 @@ class Architect(BaseAIAgent):
         # records flush at that point.
         tracker = get_tracker()
         provisional_slug = slugify(project_name)
+        run_started_at = datetime.datetime.now(datetime.timezone.utc)
         job_id = tracker.start_job(
             project_slug=provisional_slug,
             problem_statement=problem_statement,
@@ -690,9 +721,17 @@ class Architect(BaseAIAgent):
         log(f"Architect: cost job {job_id[:8]}… opened for '{project_name}'")
         job_status = "succeeded"
 
+        # Captured during the try-block so the finally-block report can
+        # still write something useful when an early step raises.
+        _captured_architecture = None
+        _captured_service_results: list = []
+        _captured_project_root: Optional[Path] = None
+        _captured_compose_path: Optional[str] = None
+
         try:
             # Step 1: Decompose
             architecture = self.decompose(problem_statement, project_name)
+            _captured_architecture = architecture
             tracker.set_phase(None)
 
             # Step 2: Provisioner — turn the plan into a real project on disk +
@@ -710,6 +749,7 @@ class Architect(BaseAIAgent):
                 root=Path(provision_result.project_root),
                 project_name=project_name,
             )
+            _captured_project_root = Path(provision_result.project_root)
 
             # Wire the project DB into the cost tracker. This flushes any
             # records buffered before the project existed (architect's
@@ -762,8 +802,10 @@ class Architect(BaseAIAgent):
                         layer, service_workspaces, problem_statement, architecture, project, layered,
                     )
                 service_results.extend(layer_results)
+                _captured_service_results = list(service_results)
 
             compose_path = str(project.dev_root / "docker-compose.yml")
+            _captured_compose_path = compose_path
             # Determine job status from service results
             if service_results and not all(getattr(r, "success", False) for r in service_results):
                 job_status = "failed"
@@ -790,6 +832,34 @@ class Architect(BaseAIAgent):
                 )
             except Exception as e:
                 log(f"Architect: cost job finish failed ({e})")
+                summary = None
+
+            # Per-run efficiency doc — best-effort. Skip when there's no
+            # project root (provisioner step never ran). Failures here
+            # never crash the build.
+            if _captured_project_root is not None:
+                try:
+                    from bizniz.run_report import write_run_report
+                    md_path = write_run_report(
+                        project_name=project_name,
+                        project_slug=(
+                            _captured_architecture.project_slug
+                            if _captured_architecture else provisional_slug
+                        ),
+                        project_root=_captured_project_root,
+                        job_id=job_id,
+                        started_at=run_started_at,
+                        finished_at=datetime.datetime.now(datetime.timezone.utc),
+                        status=job_status,
+                        architecture=_captured_architecture,
+                        service_results=_captured_service_results,
+                        cost_summary=summary if summary is not None else tracker.summary(),
+                        models=self._models_snapshot(),
+                        docker_compose_path=_captured_compose_path,
+                    )
+                    log(f"Architect: run report written to {md_path}")
+                except Exception as e:
+                    log(f"Architect: run report write failed ({e}) — continuing")
 
     # ── Private helpers ────────────────────────────────────────────────────────
 

@@ -16,6 +16,7 @@ High-level cross-cutting design.
 - [architecture/evolve_mode.md](architecture/evolve_mode.md) — milestone-driven incremental builds
 - [architecture/cost_tracking.md](architecture/cost_tracking.md) — per-call usage capture, pricing, persistence
 - [architecture/error_classification.md](architecture/error_classification.md) — collection-error routing + config-aware repair
+- [architecture/run_reports.md](architecture/run_reports.md) — per-run efficiency doc + delta-since-last-run
 
 ## Roles
 
