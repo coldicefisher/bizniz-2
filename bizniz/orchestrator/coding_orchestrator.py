@@ -1942,45 +1942,91 @@ class CodingOrchestrator:
 
     def _is_source_import_error(self, error_detail: str, current_files: dict) -> bool:
         """
-        Detect if a collection error is caused by broken imports in our source
-        code (not the test file).
+        Detect if a collection error is caused by broken code in our source
+        files (not the test file). If True, the orchestrator repairs the
+        source; if False, it regenerates the test.
 
-        Only returns True when the failing import line directly references one
-        of the files we're generating. If the test imports from an unrelated
-        module (e.g. a stub app factory), this is a test problem, not a source
-        problem — return False so the test gets regenerated instead.
+        Triple-check, in order of strength:
+
+          1. **Traceback frame match.** If the pytest traceback includes a
+             frame located inside any of the workspace's source files
+             (``<filepath>:<line>:`` style markers, or ``File "<filepath>"``),
+             the failure is happening inside our code regardless of what the
+             test tried to import. This catches NameError / AttributeError /
+             SyntaxError surfacing during import.
+
+          2. **Failing-import module match.** The first ``> from X import``
+             line in the error matches one of our source modules. Catches
+             the classic "test imports our broken module" case.
+
+          3. **Source-file path mention.** The error text references any of
+             our workspace source paths verbatim. Cheapest fallback.
+
+        Any positive signal returns True. All three negative → False (test
+        is the problem, regenerate it).
         """
         import re
 
-        # Extract the FIRST failing import line from pytest output.
-        # Pytest marks lines with ">" prefix. The first one is the test file's
-        # import; subsequent ones are the traceback chain through source files.
-        # We only care about the test's own import — if the test imports a
-        # non-target module, that's a test problem, not a source problem.
-        first_match = re.search(r'>\s*(?:from\s+(\S+)\s+import|import\s+(\S+))', error_detail)
-        failing_imports = [first_match.groups()] if first_match else []
-        if not failing_imports:
-            # Fallback: look for "from X import" in the error section header
-            first_match = re.search(r'(?:from\s+(\S+)\s+import|import\s+(\S+))', error_detail)
-            failing_imports = [first_match.groups()] if first_match else []
+        if not error_detail:
+            return False
 
-        # Build module paths from our source files
-        our_modules = set()
+        # Build module paths AND filepath strings from our source files
+        our_modules: set = set()
+        our_paths: set = set()
         for fp in current_files:
+            our_paths.add(fp)
             module = fp.replace("/", ".").replace(".py", "")
             our_modules.add(module)
-            # Also add parent package paths
             parts = module.split(".")
             if len(parts) >= 2:
                 our_modules.add(".".join(parts[-2:]))
 
-        # Check if the failing import references one of OUR source files
+        # ── Signal 1: traceback frames pointing into our source files ───────
+        # Match common formats:
+        #   /workspace/pet_groomer/app.py:7: NameError
+        #   File "/workspace/pet_groomer/app.py", line 7
+        #   pet_groomer/app.py:7: SomeError
+        for source_path in our_paths:
+            # Skip test files when matching frames — those are the test
+            # framework's own report on test code, not "source broke".
+            if source_path.startswith("tests/") or "/tests/" in source_path:
+                continue
+            if source_path in error_detail:
+                # Check it's used in a frame-like context (line number nearby)
+                # to avoid false positives where the path appears only in a
+                # repair-prompt header.
+                pattern = re.escape(source_path) + r'(?:":?\s*,?\s*line\s*\d+|:\d+:)'
+                if re.search(pattern, error_detail):
+                    return True
+
+        # ── Signal 2: first failing import line references our module ──────
+        first_match = re.search(r'>\s*(?:from\s+(\S+)\s+import|import\s+(\S+))', error_detail)
+        failing_imports = [first_match.groups()] if first_match else []
+        if not failing_imports:
+            first_match = re.search(r'(?:from\s+(\S+)\s+import|import\s+(\S+))', error_detail)
+            failing_imports = [first_match.groups()] if first_match else []
+
         for groups in failing_imports:
             imported_module = groups[0] or groups[1]
             if not imported_module:
                 continue
             for our_mod in our_modules:
                 if imported_module == our_mod or imported_module.endswith("." + our_mod):
+                    return True
+
+        # ── Signal 3: any of our source paths mentioned (last resort) ──────
+        # Only counts if the path is non-test and the error was an
+        # ImportError/ModuleNotFoundError (otherwise we'd over-trigger on
+        # paths in repair-prompt fragments).
+        is_import_failure = any(
+            phrase in error_detail
+            for phrase in ("ImportError:", "ModuleNotFoundError:")
+        )
+        if is_import_failure:
+            for source_path in our_paths:
+                if source_path.startswith("tests/") or "/tests/" in source_path:
+                    continue
+                if source_path in error_detail:
                     return True
 
         return False
