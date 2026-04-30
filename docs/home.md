@@ -1,344 +1,219 @@
-# Bizniz Autocoder System Architecture
+# Bizniz Auto-Engineering System Architecture
 
-_Last updated: 2026-03-08 05:31 UTC_
+_Last updated: 2026-04-30 UTC_
 
 ## Overview
 
-The **Bizniz Autocoder System** is an autonomous code generation and validation framework designed to:
-- Generate code from natural language requirements
-- Validate functionality through automated testing
-- Iteratively repair and refine generated code
-- Architect and plan complex systems through AI-driven agents
+The **Bizniz** auto-engineering system takes a natural-language problem
+statement and produces a working multi-service application: planning,
+infrastructure provisioning, code generation, automated testing, and
+iterative repair — all driven by AI agents.
 
-The system is built around a core abstraction called **BaseAIAgent**, which provides the foundation for specialized agents such as the Autocoder, Autotester, AutoEngineer, and AutoArchitect.
+The pipeline has four levels of agents and one materializer:
 
-A **CodingOrchestrator** coordinates these agents, managing the lifecycle and loopback between generation, testing, and repair phases.
+| Component | Role | Has AI? |
+|---|---|---|
+| `AutoArchitect` | Decompose problem into services + dependencies + ports | Yes (one call) |
+| `Provisioner` | Materialize the plan: directory tree, skeletons, infra templates, compose, .env, Docker images | No |
+| `AutoEngineer` | Per service: produce issues, architecture plan, dispatch | Yes (multi-pass analysis) |
+| `CodingOrchestrator` | Per issue: codegen + tests + repair loop | Yes (per-iteration) |
+| `Autocoder` / `Autotester` / `AgenticDebugger` | Specialized sub-agents the orchestrator dispatches | Yes |
+
+A `CostTracker` records every AI call to the project SQLite DB so cross-run
+analysis (per issue, per service, per model, per phase) is just a SQL query.
 
 ---
 
-# High-Level Architecture
+## High-level architecture
 
 ```
+                  problem statement
+                          │
+                          ▼
                 ┌────────────────────┐
-                │    AutoArchitect   │
-                │ System Design &    │
-                │ Requirements       │
+                │    AutoArchitect   │   plan only — one AI call
+                │   .decompose()     │   → SystemArchitecture
                 └─────────┬──────────┘
                           │
                           ▼
                 ┌────────────────────┐
-                │   AutoEngineer     │
-                │ Implementation     │
-                │ Planning           │
+                │    Provisioner     │   no AI — materialize plan
+                │   .provision()     │   → directory tree, skeletons,
+                │                    │      infra templates (postgres,
+                │                    │      redis, fusionauth), compose,
+                │                    │      .env, Docker images
                 └─────────┬──────────┘
                           │
                           ▼
-                 ┌───────────────────┐
-                 │ CodingOrchestrator│
-                 │ Controls Loop     │
-                 └───────┬───────────┘
-                         │
-        ┌────────────────┼────────────────┐
-        ▼                ▼                ▼
-  ┌────────────┐  ┌────────────┐  ┌────────────┐
-  │  Autocoder │  │ Autotester │  │ Environment│
-  │ Code Gen   │  │ Validation │  │ Execution  │
-  └────────────┘  └────────────┘  └────────────┘
+                ┌────────────────────┐
+                │    AutoEngineer    │   per service
+                │ .run_three_phase() │   Phase 1 frame → Phase 2 escalate
+                │                    │   → Phase 3 agentic debug
+                └─────────┬──────────┘
+                          │
+        ┌─────────────────┼─────────────────┐
+        ▼                 ▼                 ▼
+  ┌──────────┐  ┌────────────┐  ┌────────────────┐
+  │ Autocoder│  │ Autotester │  │ AgenticDebugger│
+  │  + tools │  │            │  │ + run_command  │
+  │          │  │            │  │ + run_tests    │
+  └──────────┘  └────────────┘  └────────────────┘
+                          │
+                          ▼
+                ┌────────────────────┐
+                │  Test Loop         │   pytest / jest in Docker
+                │  + repair          │   + collection-error routing
+                │  + regression check│   + config-aware repair
+                └────────────────────┘
 ```
 
 ---
 
-# Core Components
+## Core components
 
-## BaseAIAgent
+### `BaseAIAgent` (`bizniz/core/agent.py`)
 
-The **BaseAIAgent** class is the foundational abstraction for all AI-driven components.
+Foundation class for AI-driven agents. Standardizes:
+- AI client wiring (OpenAI, Claude, Gemini)
+- Execution environment access
+- Workspace I/O
+- Message-history management with system-prompt override
+- Tagging the client with `_caller_agent` so cost tracking knows which
+  agent made each AI call
 
-It standardizes:
+### `AutoArchitect` (`bizniz/architect/auto_architect.py`)
 
-- Interaction with the AI client (ChatGPT or others)
-- Execution environments (Python sandbox, Docker, etc)
-- Workspace management (saving/loading generated code)
-- Event callbacks
-- Message normalization and structured prompting
+**Pure planning.** One AI call (`decompose`) returns a `SystemArchitecture`
+listing services with name, type, framework, language, port, depends_on,
+and skeleton choice. Orchestrates the rest of the pipeline (provision →
+dispatch engineers) but does not write files or build images directly.
 
-### Responsibilities
+The architect's prompt instructs the LLM to:
+- Pick from registered skeletons (fastapi / react / angular / teams-*)
+  for any application service.
+- Add a `fusionauth` auth service AND `postgres` database whenever the
+  project has user accounts.
+- Emit only the structured plan; the Provisioner generates compose
+  deterministically.
 
-- AI prompt orchestration
-- Tool execution through environments
-- Structured response handling
-- Retry and error management
-- Workspace integration
+See [architect_provisioner_split.md](architecture/architect_provisioner_split.md).
 
-### Dependencies
+### `Provisioner` (`bizniz/provisioner/`)
 
-| Component | Purpose |
-|----------|--------|
-| AI Client | Communicates with the LLM |
-| Execution Environment | Runs generated code |
-| Workspace | Saves code artifacts |
-| Event Callbacks | Observability and logging |
+**Pure materialization.** Takes a `SystemArchitecture` and produces:
+- Project directory tree at `project_root/`
+- Per-service workspaces under `project_root/<workspace_name>/`
+- Skeleton seeding from `~/bizniz-skeleton-*` for app services
+- Infrastructure templates: postgres (with `init.sql`), redis,
+  fusionauth (with full `kickstart.json` — realm, application, roles,
+  OAuth redirects, admin user, bootstrap API key)
+- Generic Dockerfile + requirements.txt / package.json for app services
+  without skeletons
+- Deterministic `docker-compose.yml` (built from the plan, not parsed
+  from an AI string)
+- `.env` with template-contributed env vars grouped by prefix
+- Built Docker images per app service
 
----
+Free-port allocation and stale-image cleanup are also handled here.
 
-# Specialized AI Agents
+### `AutoEngineer` (`bizniz/engineer/auto_engineer.py`)
 
-## Autocoder
+**Per-service planner + dispatcher.** Calls AI for engineering analysis
+(requirements, use cases, issues, architecture plan), runs deterministic
+scaffold to write stub files, then runs the **three-phase strategy**:
 
-The **Autocoder** is responsible for generating code that satisfies a provided problem statement.
+- **Phase 1 (frame)** — cheapest model, every issue once with no tests,
+  populates the workspace with real baseline code in topological order.
+- **Phase 2 (escalate)** — for each model in `autocoder_models[1:]`,
+  one attempt per still-failing issue with `max_iterations=2`.
+- **Phase 3 (debug)** — for any remaining failures, the agentic
+  debugger on `debugger_model` (default gemini-pro) with full tools
+  (`view_file`, `list_directory`, `search_files`, `run_command`,
+  `run_tests`) and `max_iterations=12`.
 
-### Responsibilities
+### `CodingOrchestrator` (`bizniz/orchestrator/coding_orchestrator.py`)
 
-- Convert problem statements into executable code
-- Wrap output inside a standardized `process()` entrypoint
-- Produce structured JSON output containing:
-  - generated code
-  - analysis
-  - fix plan (if repairing)
+**Per-issue test/repair loop.** Coordinates Autocoder + Autotester +
+optional AgenticDebugger inside a Docker test environment. Handles:
+- Model escalation on stalls
+- Stall recovery cycles (regenerate tests → flip strategy → full regen)
+- Collection-error routing (source vs test, see
+  [error_classification.md](architecture/error_classification.md))
+- Config-aware repair — universal config files (jest.config,
+  package.json, pyproject.toml, Dockerfile, etc.) are always writable
+  for repair, not only when listed in `target_files`
+- npm install propagation when `package.json` changes inside the Jest
+  test container
 
-### Workflow
+### `CostTracker` (`bizniz/cost/`)
 
-1. Receive input data and problem prompt
-2. Generate code
-3. Execute the code in the environment
-4. Return results to the orchestrator
-
-### Key Goals
-
-- Deterministic code output
-- Structured responses
-- Repair capability
-
----
-
-## Autotester
-
-The **Autotester** validates generated code against requirements.
-
-### Responsibilities
-
-- Execute the generated code
-- Validate output using a **Validator**
-- Provide structured error information
-- Produce debugging information for repair attempts
-
-### Validation Output
-
-The tester returns a **ValidationResult** containing:
-
-- `is_valid`
-- `errors`
-- `expected_output`
-- `actual_output`
-
-This information feeds back into the repair loop.
-
----
-
-## AutoEngineer
-
-The **AutoEngineer** acts as the **implementation planner**.
-
-### Responsibilities
-
-- Break system requirements into implementation tasks
-- Define module boundaries
-- Specify function contracts
-- Generate step-by-step coding plans
-
-### Example Output
-
-- Module architecture
-- Function definitions
-- Interface contracts
-- Implementation sequence
-
-The output of the engineer becomes input for the **Autocoder**.
+Captures every AI call (token counts, duration, USD cost) and persists
+to `ProjectDB` as `jobs` + `api_calls` rows tagged with
+`(job_id, service_name, issue_id, phase)`. Built-in rollups:
+`cost_by_issue()`, `cost_by_service()`, `cost_by_model()`. See
+[cost_tracking.md](architecture/cost_tracking.md).
 
 ---
 
-## AutoArchitect
+## Data flow per build
 
-The **AutoArchitect** is the highest-level planning agent.
-
-### Responsibilities
-
-- Interpret high-level system requirements
-- Design system architecture
-- Define modules and service boundaries
-- Produce engineering plans
-
-### Outputs
-
-- System architecture documents
-- Component breakdowns
-- Engineering plans for AutoEngineer
+1. **Architect.decompose** → one AI call → `SystemArchitecture`
+2. **Provisioner.provision** → no AI → project on disk + Docker images
+3. **For each service** (in dependency order):
+   a. **AutoEngineer.analyze** → 3-pass AI: rough → plan → refined issues
+   b. **Scaffold** → deterministic stub files
+   c. **Phase 1: frame_issues()** → cheap-tier autocoder per issue, no tests
+   d. **Phase 2: escalation chain** → one attempt per issue per model tier
+   e. **Phase 3: agentic debug** → top tier with full tools (only if needed)
+4. **Per issue, per phase, per model** — every call landed in `api_calls`
 
 ---
 
-# CodingOrchestrator
+## Persistence
 
-The **CodingOrchestrator** is responsible for coordinating the entire system.
+Every project gets two SQLite databases:
 
-It controls:
+- `<project_root>/.bizniz/project.db` — project-level (`ProjectDB`):
+  services, architecture snapshots, issue log, build events, drift
+  events, **jobs**, **api_calls**.
+- `<project_root>/<service>/.bizniz/bizniz.db` — workspace-level
+  (`WorkspaceDB`) per service: problems, requirements, use cases,
+  issues, architecture plans, namespaces/modules/dependencies, test
+  results, environment packages.
 
-- agent sequencing
-- retry logic
-- repair loops
-- result aggregation
-
-### Core Responsibilities
-
-- Manage code generation attempts
-- Invoke testing
-- Trigger repair cycles
-- Track attempt history
-- Manage stopping conditions
+A unified `BiznizDB` (MySQL or SQLite) is also available for
+multi-project deployments but is opt-in.
 
 ---
 
-# Code Generation Loop
+## Key references
 
-The core system loop works as follows:
-
-```
-Problem Statement
-        │
-        ▼
-AutoEngineer (implementation plan)
-        │
-        ▼
-Autocoder (generate code)
-        │
-        ▼
-Execution Environment
-        │
-        ▼
-Autotester (validate output)
-        │
-        ├── PASS → Return result
-        │
-        └── FAIL → Repair Loop
-                        │
-                        ▼
-                  Autocoder Repair
-                        │
-                        ▼
-                    Retest
-```
+- [Pipeline sequence](pipeline_sequence.md) — step-by-step flow
+- [Architect/Provisioner split](architecture/architect_provisioner_split.md)
+- [Skeleton seeding](architecture/skeleton_seeding.md)
+- [Cost tracking](architecture/cost_tracking.md)
+- [Error classification (3b/3c)](architecture/error_classification.md)
+- [Library docs index](README.md)
+- [Per-run efficiency logs](runs/) — one `.md` per end-to-end run
+- [Config reference](reference/config_reference.md)
+- [Skeleton reference](reference/skeleton_reference.md)
 
 ---
 
-# Execution Environments
+## Design principles
 
-The system supports multiple execution environments:
-
-## Python Sandbox Environment
-
-- restricted execution
-- limited imports
-- safe builtins
-
-Used primarily for testing.
-
-## Docker Execution Environment
-
-- full Python runtime
-- resource limits
-- process isolation
-
-Used for production execution.
-
----
-
-# Workspace
-
-The **Workspace** stores artifacts generated during execution.
-
-Artifacts may include:
-
-- generated code
-- test results
-- repair attempts
-- debugging information
-
-Example structure:
-
-```
-workspace/
-    code/
-        attempt_1.py
-        attempt_2.py
-    logs/
-    outputs/
-```
-
----
-
-# Error Handling Model
-
-Execution failures are normalized into a structured format:
-
-```
-ExecutionEnvironmentErrorDetails
-```
-
-Fields include:
-
-- stage
-- error type
-- message
-- line number
-- code line
-- traceback
-- stdout
-- stderr
-
-This structure enables reliable debugging feedback to the AI agents.
-
----
-
-# Design Goals
-
-The system was designed around the following principles:
-
-### Determinism
-
-Structured outputs reduce hallucination risk.
-
-### Observability
-
-Events, artifacts, and errors are persisted.
-
-### Repairability
-
-Every failure feeds back into a repair loop.
-
-### Environment Isolation
-
-Code execution occurs inside controlled environments.
-
-### Agent Specialization
-
-Each AI agent has a clearly defined role.
-
----
-
-# Future Extensions
-
-Potential extensions include:
-
-- distributed execution environments
-- multi-language support
-- automated dependency resolution
-- multi-agent debate systems
-- performance benchmarking
-- cost-aware code generation
-
----
-
-# Summary
-
-The **Bizniz Autocoder System** combines AI agents, execution environments, and orchestrators to form a fully automated code development pipeline.
-
-By separating responsibilities between architecture, planning, generation, testing, and orchestration, the system achieves a modular and extensible design suitable for autonomous software engineering workflows.
+- **Determinism first.** Templates beat AI for anything where structure
+  matters (compose, Dockerfile, kickstart, requirements). AI is reserved
+  for decisions that genuinely require judgment (decomposition,
+  codegen, debugging).
+- **One AI call per agent step.** Architect = one decompose call.
+  Engineer = three structured passes. Orchestrator's repair = one inline
+  call per iteration. No hidden multi-call loops.
+- **Cost transparency.** Every AI call leaves a row. Cross-run analysis
+  via SQL.
+- **Skeletons over from-scratch.** Real working baselines (FastAPI auth,
+  React+Vite, Angular+Material, Teams fan-out) bring tests + Docker +
+  config so the AI only has to add app-specific code.
+- **Recoverable failure.** Test loop catches regressions, config-aware
+  repair fixes config files, three-phase strategy escalates only when
+  cheap tiers fail. Stalls become explicit, not silent loops.
