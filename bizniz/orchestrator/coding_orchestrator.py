@@ -58,6 +58,44 @@ from bizniz.orchestrator.types import (
 )
 
 
+# Project config files the repair loop is always allowed to edit, even when
+# they are NOT in the current issue's target_files. These are universal
+# project config (build, test runner, dependency manifests, container) that
+# the AI legitimately needs to fix when a misconfiguration is the actual root
+# cause of test failures (e.g. jest preset missing, requirements.txt incomplete).
+# Match by basename so paths anywhere in the workspace qualify.
+_CONFIG_FILENAMES = frozenset({
+    # Python project config
+    "pyproject.toml", "setup.cfg", "setup.py",
+    "pytest.ini", "tox.ini", "conftest.py",
+    "requirements.txt", "requirements-dev.txt", "requirements-test.txt",
+    # JS/TS project config
+    "package.json", "tsconfig.json",
+    "tsconfig.app.json", "tsconfig.spec.json", "tsconfig.base.json",
+    # Test runner configs
+    "jest.config.js", "jest.config.ts", "jest.config.mjs",
+    "jest.config.cjs", "jest.config.json",
+    "vitest.config.js", "vitest.config.ts",
+    "karma.conf.js",
+    # Build configs
+    "vite.config.js", "vite.config.ts",
+    "webpack.config.js",
+    "angular.json",
+    "babel.config.js", ".babelrc.json",
+    # Containerization
+    "Dockerfile",
+    "docker-compose.yml", "docker-compose.yaml",
+})
+
+
+def _is_config_file(filepath: str) -> bool:
+    """True when the path's basename is in the universal config allowlist."""
+    if not filepath:
+        return False
+    basename = Path(filepath).name
+    return basename in _CONFIG_FILENAMES
+
+
 class CodingOrchestrator:
     """
     Orchestrates Autocoder + Autotester + Autodebugger in an iterative repair loop.
@@ -1601,6 +1639,21 @@ class CodingOrchestrator:
 
         # Determine which files are writable (current issue's target files + test files)
         writable_paths = set(tf["filepath"] for tf in target_files) | set(current_test_files.keys())
+
+        # Universal project config files (jest.config, package.json, pyproject.toml,
+        # Dockerfile, etc.) are always writable for repair, even when not declared in
+        # target_files. Without this, the AI repeatedly identifies a missing test
+        # preset or missing dependency manifest as the actual fix and gets blocked.
+        # We load any that exist on disk, hand them to the autocoder as writable
+        # source, and permit edits in the post-repair filter.
+        for cfg_path in self._workspace.list_relative_files():
+            cfg_str = str(cfg_path)
+            if _is_config_file(cfg_str) and cfg_str not in writable_paths:
+                try:
+                    relevant_files[cfg_str] = self._workspace.path(cfg_str).read_text()
+                    writable_paths.add(cfg_str)
+                except Exception:
+                    pass
 
         # Load dependency files from disk that the current issue's code imports from.
         # These are files from prior issues that are already on disk but NOT in
