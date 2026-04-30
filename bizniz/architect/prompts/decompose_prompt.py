@@ -8,7 +8,7 @@ Problem statement:
 Project name: {project_name}
 
 Decompose this into a service-based architecture. For each service, specify:
-- name: short identifier (e.g. "backend", "frontend", "db")
+- name: short identifier (e.g. "backend", "frontend", "db", "auth")
 - service_type: one of "backend", "frontend", "database", "cache", "proxy", "worker", "auth"
 - framework: the framework to use (e.g. "fastapi", "react", "angular", "nginx", "postgres", "redis", "fusionauth")
 - language: primary language ("python", "typescript", "yaml", "sql")
@@ -23,7 +23,10 @@ Also provide:
 - project_name: the human-readable project name
 - project_slug: the slugified project name (e.g. "{project_slug}")
 - description: overall system description
-- docker_compose: a complete docker-compose.yml file content as a string
+
+You do NOT generate docker-compose.yml. The Provisioner builds compose
+deterministically from your service list and the registered infrastructure
+templates (postgres, redis, fusionauth).
 
 IMPORTANT framework rules:
 - Backend: ALWAYS use Python with FastAPI unless client explicitly requests otherwise
@@ -31,6 +34,18 @@ IMPORTANT framework rules:
 - Dashboard apps: Use Angular with TypeScript
 - NEVER use Node.js for backends
 - C#/.NET is ONLY for enterprise refactors, never for new projects
+
+Authentication (REQUIRED whenever the project has user accounts, login,
+or any concept of "user"):
+- Add an auth service with framework="fusionauth", service_type="auth",
+  language="yaml", workspace_name="fusionauth", port=9011, skeleton="none".
+- FusionAuth REQUIRES postgres. If you add a fusionauth service, you MUST
+  also add a postgres service: framework="postgres", service_type="database",
+  language="sql", workspace_name="postgres", port=5432, skeleton="none".
+- The Provisioner ships a complete kickstart.json (realm, application,
+  roles admin+user, OAuth redirect URLs for the frontend, an initial
+  admin user) so you don't need to plan any FusionAuth config yourself.
+- Backend services that need auth should list "auth" in their depends_on.
 
 Available skeletons (pre-built starter repos that come with auth, Docker, tests, README):
 {skeletons}
@@ -45,48 +60,22 @@ Skeleton selection rules:
   realtime fan-out feeds (Microsoft Teams-like channels, activity streams, group chat, etc.).
   When you pick the teams pattern, generate exactly three services: one with skeleton=teams-backend,
   one with skeleton=teams-consumer, one with skeleton=teams-frontend.
-- "none" only for infrastructure services (postgres/redis/nginx) or when no skeleton fits.
+- Infrastructure services (database, cache, proxy, auth) ALWAYS use skeleton="none" — the
+  Provisioner has dedicated templates for them.
 
-Container-port reference (use these on the right side of port mappings when the service has a skeleton):
+Container-port reference (used by the Provisioner's compose builder; you only need to
+set the HOST port via service.port — the Provisioner picks the container side):
 - fastapi → 8000   |   teams-backend → 8000
 - react → 5173
 - angular → 4200   |   teams-frontend → 4200
 - teams-consumer → no port (worker)
+- fusionauth → 9011  |  postgres → 5432  |  redis → 6379
 
-Project directory structure:
-Source code lives at project_root/<service>/, Docker configs at infra/development/:
-  project_root/backend/         <- source code + requirements.txt
-  project_root/frontend/        <- source code + package.json
-  project_root/infra/development/backend/   <- Dockerfile
-  project_root/infra/development/frontend/  <- Dockerfile
+Project directory layout the Provisioner produces (informational — you don't write these):
+  project_root/<workspace_name>/    <- source code per app service (skeleton or generated)
+  project_root/infra/development/<workspace_name>/Dockerfile
+  project_root/infra/development/postgres/init.sql
+  project_root/infra/development/fusionauth/kickstart/kickstart.json
   project_root/infra/development/docker-compose.yml
   project_root/infra/development/.env
-
-The docker-compose.yml must:
-- Use build contexts pointing to "../../<workspace_name>" for application services (source code root)
-- Reference Dockerfiles at "../../infra/development/<workspace_name>/Dockerfile"
-- Use standard Docker Hub images for infrastructure (postgres, redis, etc.)
-- Define proper port mappings as "<host>:<container>" — pick a sensible host port for dev,
-  and use the container-port reference above for the right side when a skeleton is in use.
-  The host port may be re-allocated if it collides with something else on the dev machine.
-- Include volume mounts for development (live code reloading)
-- Use a shared network for inter-service communication
-
-Example docker-compose service for a Python/FastAPI backend with skeleton=fastapi:
-```yaml
-  backend:
-    build:
-      context: ../../backend
-      dockerfile: ../../infra/development/backend/Dockerfile
-    ports:
-      - "8000:8000"
-    volumes:
-      - ../../backend:/app
-    environment:
-      - DATABASE_URL=postgresql://user:pass@db:5432/dbname
-    depends_on:
-      - db
-    networks:
-      - app-network
-```
 """.replace("{skeletons}", skeletons_summary_for_prompt())
