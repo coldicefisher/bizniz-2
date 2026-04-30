@@ -27,11 +27,21 @@ from bizniz.architect.types import (
 )
 from bizniz.architect.skeletons import get_skeleton, seed_workspace
 from bizniz.project.project import Project
+from bizniz.provisioner.ai_fallback import (
+    AIClientFactory,
+    AIFallbackTemplate,
+    generate_ai_fallback_response,
+)
+from bizniz.provisioner.ai_recovery import try_ai_recovery
 from bizniz.provisioner.compose_builder import build_compose
 from bizniz.provisioner.docker_builder import build_image
 from bizniz.provisioner.env_builder import build_env_file
 from bizniz.provisioner.templates import lookup as lookup_template
-from bizniz.provisioner.templates.base import TemplateContext, TemplateOutput
+from bizniz.provisioner.templates.base import (
+    InfraTemplate,
+    TemplateContext,
+    TemplateOutput,
+)
 from bizniz.provisioner.types import (
     ProbedService,
     ProvisionedService,
@@ -57,6 +67,29 @@ class Provisioner:
         Optional log callback.
     build_images:
         When False, skip the docker-build phase (useful in tests).
+    ai_client_factory:
+        Optional ``Callable[[model_name: str], BaseAIClient]``. Required
+        when either AI escape hatch is enabled. Lets the caller decide
+        the model per call without coupling the Provisioner to
+        ``BiznizConfig``.
+    ai_fallback_enabled:
+        When True, infrastructure services with no registered template
+        get an AI-generated fallback (model: ``ai_fallback_model``).
+        Cached at ``~/.bizniz/template_cache``. Defaults to False.
+    ai_fallback_model:
+        Model name passed to ``ai_client_factory`` for the fallback call.
+        Defaults to ``"gemini-flash"``.
+    ai_recovery_enabled:
+        When True, failed Docker builds are retried with an AI-patched
+        Dockerfile (model: ``ai_recovery_model``). Defaults to False.
+    ai_recovery_model:
+        Model name for recovery calls. Defaults to ``"gemini-pro"``.
+    ai_recovery_max_retries:
+        Hard cap on AI recovery retries per service. Defaults to 2.
+    ai_template_cache_dir:
+        Override the template cache location (otherwise uses
+        ``BIZNIZ_TEMPLATE_CACHE_DIR`` env var or
+        ``~/.bizniz/template_cache``).
     """
 
     def __init__(
@@ -64,10 +97,30 @@ class Provisioner:
         project_parent: str | Path,
         on_status_message: Optional[Callable[[str], None]] = None,
         build_images: bool = True,
+        ai_client_factory: Optional["AIClientFactory"] = None,
+        ai_fallback_enabled: bool = False,
+        ai_fallback_model: str = "gemini-flash",
+        ai_recovery_enabled: bool = False,
+        ai_recovery_model: str = "gemini-pro",
+        ai_recovery_max_retries: int = 2,
+        ai_template_cache_dir: Optional[Path] = None,
     ):
         self._project_parent = Path(project_parent)
         self._on_status_message = on_status_message
         self._build_images = build_images
+
+        if (ai_fallback_enabled or ai_recovery_enabled) and ai_client_factory is None:
+            raise ProvisionerError(
+                "ai_fallback_enabled / ai_recovery_enabled require "
+                "ai_client_factory to be set."
+            )
+        self._ai_client_factory = ai_client_factory
+        self._ai_fallback_enabled = ai_fallback_enabled
+        self._ai_fallback_model = ai_fallback_model
+        self._ai_recovery_enabled = ai_recovery_enabled
+        self._ai_recovery_model = ai_recovery_model
+        self._ai_recovery_max_retries = ai_recovery_max_retries
+        self._ai_template_cache_dir = ai_template_cache_dir
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -355,7 +408,7 @@ class Provisioner:
         # Infrastructure: render template, write infra files, register
         # service in project DB, no workspace.
         if service.service_type in _INFRASTRUCTURE_TYPES:
-            template = lookup_template(service.framework)
+            template = self._resolve_infra_template(service)
             if template is None:
                 log(
                     f"Provisioner: no template for infrastructure service "
@@ -492,7 +545,7 @@ class Provisioner:
         # template output is a pure function of the architecture; writes
         # are deterministic.
         if service.service_type in _INFRASTRUCTURE_TYPES:
-            template = lookup_template(service.framework)
+            template = self._resolve_infra_template(service)
             if template is None:
                 log(
                     f"Provisioner: evolve — no template for '{service.name}' "
@@ -623,25 +676,121 @@ class Provisioner:
             image_tag = f"{architecture.project_slug}-{ps.name}:dev"
             docker_dir = project.get_docker_service_dir(ps.workspace_name)
             dockerfile = docker_dir / "Dockerfile"
-            try:
+
+            def _do_build():
                 build_image(
                     image_tag=image_tag,
                     context=Path(ps.workspace_path),
                     dockerfile=dockerfile,
                     log=self._on_status_message,
                 )
-                ps.image_name = image_tag
-                ps.image_built = True
-                project.db.update_service_image(ps.name, image_tag)
-                project.db.update_service_status(ps.name, "ready")
-                project.db.log_build_event(
-                    ps.name, "image_build", True,
-                    f"{action.action}: built {image_tag}",
-                )
+
+            try:
+                _do_build()
+                self._record_image_built(project, ps, image_tag, action.action)
             except Exception as e:
-                project.db.update_service_status(ps.name, "failed")
-                project.db.log_build_event(ps.name, "image_build", False, str(e))
                 log(f"Provisioner: image build failed for '{ps.name}': {e}")
+                if self._try_ai_recovery_for_build(
+                    dockerfile_path=dockerfile,
+                    build_error=str(e),
+                    rebuild=_do_build,
+                ):
+                    self._record_image_built(
+                        project, ps, image_tag,
+                        f"{action.action}+ai_recovery",
+                    )
+                else:
+                    project.db.update_service_status(ps.name, "failed")
+                    project.db.log_build_event(ps.name, "image_build", False, str(e))
+
+    def _record_image_built(
+        self,
+        project: Project,
+        ps: ProvisionedService,
+        image_tag: str,
+        action_label: str,
+    ) -> None:
+        ps.image_name = image_tag
+        ps.image_built = True
+        project.db.update_service_image(ps.name, image_tag)
+        project.db.update_service_status(ps.name, "ready")
+        project.db.log_build_event(
+            ps.name, "image_build", True, f"{action_label}: built {image_tag}",
+        )
+
+    def _try_ai_recovery_for_build(
+        self,
+        dockerfile_path: Path,
+        build_error: str,
+        rebuild: Callable[[], None],
+    ) -> bool:
+        if not self._ai_recovery_enabled or self._ai_client_factory is None:
+            return False
+        try:
+            client = self._ai_client_factory(self._ai_recovery_model)
+        except Exception as e:
+            self._log(f"Provisioner: AI recovery client construction failed ({e})")
+            return False
+        return try_ai_recovery(
+            client=client,
+            dockerfile_path=dockerfile_path,
+            build_error=build_error,
+            rebuild=rebuild,
+            max_retries=self._ai_recovery_max_retries,
+            on_status=self._on_status_message,
+        )
+
+    def _resolve_infra_template(
+        self, service: ServiceDefinition,
+    ) -> Optional[InfraTemplate]:
+        """Static registry lookup, with optional AI fallback.
+
+        Returns ``None`` only when the static registry misses AND
+        AI fallback is disabled / fails. Caller decides what to do
+        with that — currently logs and emits a service with no
+        compose entry.
+        """
+        template = lookup_template(service.framework)
+        if template is not None:
+            return template
+        if not self._ai_fallback_enabled or self._ai_client_factory is None:
+            return None
+        return self._build_ai_fallback_template(service)
+
+    def _build_ai_fallback_template(
+        self, service: ServiceDefinition,
+    ) -> Optional[InfraTemplate]:
+        log = self._log
+        try:
+            client = self._ai_client_factory(self._ai_fallback_model)
+        except Exception as e:
+            log(f"Provisioner: AI fallback client construction failed ({e})")
+            return None
+        try:
+            log(
+                f"Provisioner: AI fallback for '{service.name}' "
+                f"(framework={service.framework}, type={service.service_type}, "
+                f"model={self._ai_fallback_model})"
+            )
+            response = generate_ai_fallback_response(
+                client=client,
+                framework=service.framework,
+                service_type=service.service_type,
+                description=service.description,
+                cache_dir=self._ai_template_cache_dir,
+            )
+        except Exception as e:
+            log(
+                f"Provisioner: AI fallback for '{service.framework}' failed "
+                f"({e}); falling through to no-template path"
+            )
+            return None
+        kind = "upstream_image" if response.upstream_image else "dockerfile"
+        log(
+            f"Provisioner: AI fallback produced {kind} for '{service.name}' — "
+            f"{response.notes[:160]}"
+        )
+        return AIFallbackTemplate(response, framework=service.framework)
 
     def _write_infra_files(self, dev_root: Path, files: Dict[str, str]) -> None:
         for rel, content in files.items():
