@@ -1,21 +1,21 @@
-default_model: gpt-4o-mini
-engineer_model: gpt-4o
-architect_model: gpt-4o
+default_model: gemini-flash-lite
+engineer_model: gemini-flash
+architect_model: gemini-flash
 models:
-  - gpt-4o-mini
-  - gpt-4o
-  - claude-sonnet
+  - gemini-flash-lite
+  - gemini-flash
+  - gemini-pro
 autocoder_models:
-  - gpt-4o-mini
-  - gpt-4o
-  - claude-sonnet
+  - gemini-flash-lite
+  - gemini-flash
+  - gemini-pro
 autotester_models:
-  - gpt-4o-mini
-  - gpt-4o
-  - claude-sonnet
+  - gemini-flash-lite
+  - gemini-flash
+  - gemini-pro
 repair_models:
-  - gpt-4o
-  - claude-sonnet
+  - gemini-flash
+  - gemini-pro
 stall_threshold: 3
 agentic_debug_threshold: 2
 enable_agentic_debug: false
