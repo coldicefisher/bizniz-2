@@ -1,6 +1,9 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.4
 Name: bizniz
 Version: 0.1.0
 Summary: AI Coding system
 Author-email: Jamey Harris <jameycharris@yahoo.com>
 Requires-Python: >=3.10
+Requires-Dist: openai~=2.26.0
+Requires-Dist: pymysql~=1.1.0
+Requires-Dist: google-genai>=1.0.0

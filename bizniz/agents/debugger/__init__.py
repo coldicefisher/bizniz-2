@@ -9,11 +9,11 @@ from bizniz.agents.debugger.agentic import AgenticDebugger
 from bizniz.agents.debugger.base import BaseDebugger
 
 # Backward-compatible alias
-Autodebugger = QuickDebugger
+QuickDebugger = QuickDebugger
 
 __all__ = [
     "BaseDebugger",
     "QuickDebugger",
     "AgenticDebugger",
-    "Autodebugger",
+    "QuickDebugger",
 ]

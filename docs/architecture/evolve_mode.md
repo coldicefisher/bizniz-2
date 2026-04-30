@@ -55,7 +55,7 @@ problem statement
    tracker.finish_job(status)
 ```
 
-Entry point: `AutoArchitect.build_with_plan(problem_statement, project_name, ...)`.
+Entry point: `Architect.build_with_plan(problem_statement, project_name, ...)`.
 
 ## What's "evolve_state"?
 
@@ -69,7 +69,7 @@ Every `ServiceDefinition` carries an `evolve_state` field set by
 | `unchanged` | Service existed and the milestone doesn't touch it. Provisioner re-runs the infra template (idempotent, deterministic). Engineer skips it. |
 | `None` | Treated as `unchanged` defensively. |
 
-`AutoArchitect.decompose()` (the fresh / non-evolve path) tags every
+`Architect.decompose()` (the fresh / non-evolve path) tags every
 service it produces as `new` so downstream code can rely on the field.
 
 ## Architect.evolve
@@ -125,7 +125,7 @@ milestones are **not** trampled. The Dockerfile in
 `infra/development/<svc>/` is refreshed if it drifted from the
 workspace's source, but app code stays put.
 
-## Director loop (`AutoArchitect.build_with_plan`)
+## Director loop (`Architect.build_with_plan`)
 
 The top-level entry point that ties planner + evolve calls together:
 
@@ -173,7 +173,7 @@ For each milestone:
 
 Once evolve mode runs, `api_calls` rows carry `milestone_id` for every
 call made inside the milestone iteration (architect.evolve,
-provisioner.evolve, engineer.analyze, autocoder/autotester per phase).
+provisioner.evolve, engineer.analyze, coder/tester per phase).
 `ProjectDB.cost_by_milestone(plan_id)` aggregates:
 
 ```python

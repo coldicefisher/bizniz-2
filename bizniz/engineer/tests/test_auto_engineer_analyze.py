@@ -5,7 +5,7 @@ from bizniz.engineer.types import (
     EngineeringUseCase,
     EngineeringIssue,
     ArchitecturePlan,
-    AutoEngineerBadAIResponseError,
+    EngineerBadAIResponseError,
 )
 
 PROBLEM = "Build a task management system."
@@ -76,18 +76,18 @@ def test_analyze_creates_package_structure(engineer, mock_workspace):
 
 
 def test_analyze_raises_on_bad_ai_response(mock_client, mock_environment, mock_orchestrator, tmp_path):
-    from bizniz.engineer.auto_engineer import AutoEngineer
+    from bizniz.engineer.engineer import Engineer
     from bizniz.workspace.base_workspace import BaseWorkspace
 
     ws = BaseWorkspace(root=tmp_path)
     mock_client.get_text.side_effect = Exception("Network error")
 
-    eng = AutoEngineer(
+    eng = Engineer(
         client=mock_client,
         environment=mock_environment,
         workspace=ws,
         orchestrator_factory=lambda: mock_orchestrator,
         max_retries=2,
     )
-    with pytest.raises(AutoEngineerBadAIResponseError):
+    with pytest.raises(EngineerBadAIResponseError):
         eng.analyze(PROBLEM)

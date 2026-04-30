@@ -1,7 +1,7 @@
 """
 Shared tool-use conversation loop.
 
-All agentic agents (autocoder, autotester, agentic debugger) use this loop
+All agentic agents (coder, tester, agentic debugger) use this loop
 to iteratively explore the workspace via discovery tools before submitting
 their final output.
 """

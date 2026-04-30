@@ -1,6 +1,6 @@
 """JSON schema for Architect.evolve responses.
 
-Mirrors AutoArchitectSchema but adds the required ``evolve_state`` field
+Mirrors ArchitectSchema but adds the required ``evolve_state`` field
 on each service.
 """
 EvolveArchitectSchema = {

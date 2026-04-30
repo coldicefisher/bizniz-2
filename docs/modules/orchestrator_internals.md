@@ -32,7 +32,7 @@ DEFAULT_PROGRESSION = [
 | `reset()` | None | Back to index 0 |
 | `set_start(name)` | None | Set the index to the given model name; silently no-op if not present |
 
-The orchestrator builds three of these (autocoder, autotester, repair) plus an optional shared one. `BiznizConfig.make_*_progression()` constructs them from the YAML.
+The orchestrator builds three of these (coder, tester, repair) plus an optional shared one. `BiznizConfig.make_*_progression()` constructs them from the YAML.
 
 ## `StallDetector`
 
@@ -110,7 +110,7 @@ class OrchestratorResult(BaseModel):
     failure_context: Optional[str] = None        # last failure output for retry strategies
     strategy_used: Optional[str] = None          # "tdd" or "code_first"
     architecture_drift_detected: bool = False
-    drift_files: List[str] = []                   # autocoder-created files not in plan
+    drift_files: List[str] = []                   # coder-created files not in plan
 
 class OrchestratorStalledError(Exception): ...
 class OrchestratorMaxIterationsError(Exception): ...
@@ -127,14 +127,14 @@ from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 cfg = BiznizConfig.find_and_load()
 
 orchestrator = CodingOrchestrator(
-    autocoder=...,
-    autotester=...,
+    coder=...,
+    tester=...,
     test_environment=...,
     workspace=...,
-    autodebugger=...,
+    quick_debugger=...,
     client=...,
-    autocoder_progression=cfg.make_autocoder_progression(),
-    autotester_progression=cfg.make_autotester_progression(),
+    coder_progression=cfg.make_autocoder_progression(),
+    tester_progression=cfg.make_autotester_progression(),
     repair_progression=cfg.make_repair_progression(),
     stall_threshold=cfg.stall_threshold,
     agentic_debug_threshold=cfg.agentic_debug_threshold,
@@ -146,7 +146,7 @@ orchestrator = CodingOrchestrator(
 
 ## Interactions
 
-- **Used by:** `CodingOrchestrator`, `AutoEngineer._run_orchestrator`, `BiznizConfig.make_*_progression`.
+- **Used by:** `CodingOrchestrator`, `Engineer._run_orchestrator`, `BiznizConfig.make_*_progression`.
 - **Calls into:** nothing external — these are pure utility classes.
 
 ## Gotchas

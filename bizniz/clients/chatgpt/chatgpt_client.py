@@ -1,3 +1,3 @@
 # Backward-compatibility shim — implementation moved to bizniz.clients.openai
 from bizniz.clients.openai.chatgpt_client import *
-from bizniz.clients.openai.chatgpt_client import ChatGPTClient, ChatGPTClientConfig, AutocoderClientError
+from bizniz.clients.openai.chatgpt_client import ChatGPTClient, ChatGPTClientConfig, OpenAIClientError

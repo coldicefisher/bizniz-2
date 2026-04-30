@@ -1,5 +1,5 @@
 """
-Example: Autotester standalone usage
+Example: Tester standalone usage
 
 Generates pytest test suites from prompts or existing code.
 
@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from bizniz.autotester.autotester import Autotester
+from bizniz.tester.tester import Tester
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
 from bizniz.workspace.temp_workspace import TempWorkspace
@@ -23,7 +23,7 @@ if __name__ == "__main__":
     environment = DockerExecutionEnvironment()
     workspace = TempWorkspace()
 
-    autotester = Autotester(
+    tester = Tester(
         client=client,
         environment=environment,
         workspace=workspace,
@@ -32,7 +32,7 @@ if __name__ == "__main__":
 
     # ── Generate tests from a prompt ──────────────────────────────────
     print("=== Tests from Prompt ===")
-    result = autotester.process_from_prompt(
+    result = tester.process_from_prompt(
         prompt="Write a calculator module with add and subtract functions.",
         output_path="tests/test_calculator.py",
         code_filename="calculator.py",
@@ -50,7 +50,7 @@ if __name__ == "__main__":
 
     source_code = {"calculator.py": workspace.read_file("calculator.py")}
 
-    result = autotester.generate_multi(
+    result = tester.generate_multi(
         problem_statement="A calculator module with add and subtract.",
         test_files=["tests/test_calculator.py"],
         source_code=source_code,

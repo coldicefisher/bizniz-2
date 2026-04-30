@@ -5,7 +5,7 @@ import json
 import pytest
 from unittest.mock import MagicMock
 
-from bizniz.clients.openai.chatgpt_client import ChatGPTClient, ChatGPTClientConfig, AutocoderClientError
+from bizniz.clients.openai.chatgpt_client import ChatGPTClient, ChatGPTClientConfig, OpenAIClientError
 from bizniz.clients.openai.messages import Message, MessageList
 from bizniz.clients.openai.types.roles import Role
 from bizniz.clients.openai.errors import OpenAIAuthError
@@ -149,7 +149,7 @@ def test_missing_api_key_raises(openai_config, monkeypatch):
 
 
 def test_missing_config_for_azure_raises():
-    with pytest.raises(AutocoderClientError) as exc_info:
+    with pytest.raises(OpenAIClientError) as exc_info:
         ChatGPTClient(config={
             "is_azure": True,    
         }, api_key="key")

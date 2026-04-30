@@ -5,10 +5,10 @@ and documentation.
 
 ## 1. Architect / Provisioner split (commit `6168282`, merged `960b4cb`)
 
-**What changed.** `AutoArchitect` was doing three things in one class:
+**What changed.** `Architect` was doing three things in one class:
 planning, infra provisioning, and engineer orchestration. Split into:
 
-- `AutoArchitect` (planning) — `decompose()` is now the only AI call.
+- `Architect` (planning) — `decompose()` is now the only AI call.
   `build()` is a thin shell: `decompose → Provisioner.provision →
   dispatch engineers`. The architect prompt no longer emits
   docker-compose YAML.
@@ -32,7 +32,7 @@ PostgresTemplate creates a `fusionauth` DB alongside the app DB. The
 architect prompt instructs the LLM to add fusionauth + postgres any
 time the project has user accounts.
 
-**Schema cleanup.** `AutoArchitectSchema` no longer requires
+**Schema cleanup.** `ArchitectSchema` no longer requires
 `docker_compose`; `SystemArchitecture.docker_compose` is optional and
 only used for the human-readable `architecture.md` preview.
 
@@ -75,8 +75,8 @@ tracker.set_issue(7)
 tracker.finish_job(status="succeeded")  # rolls up totals onto jobs row
 ```
 
-`AutoArchitect.build()` opens and finishes the job in a try/finally so
-even failed runs leave a complete cost record. `AutoEngineer.run_three_phase`
+`Architect.build()` opens and finishes the job in a try/finally so
+even failed runs leave a complete cost record. `Engineer.run_three_phase`
 sets the phase tag to `phase1.frame`, `phase2.<model>`, or
 `phase3.agentic` so per-phase rollups reflect which tier solved which
 ticket.

@@ -1,4 +1,4 @@
-"""Functional test for AutoArchitect.evolve() against real Gemini.
+"""Functional test for Architect.evolve() against real Gemini.
 
 Verifies the AI can take an existing architecture + a new milestone
 and return a sensible delta (existing services preserved, new ones
@@ -10,7 +10,7 @@ import os
 
 import pytest
 
-from bizniz.architect.auto_architect import AutoArchitect
+from bizniz.architect.architect import Architect
 from bizniz.architect.types import ServiceDefinition, SystemArchitecture
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
@@ -77,7 +77,7 @@ def test_evolve_adds_notes_to_existing_project(tmp_path):
     architect_client = config.make_client(model=config.architect_model)
     workspace = LocalWorkspace(root=tmp_path / "_arch_workspace")
 
-    architect = AutoArchitect(
+    architect = Architect(
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,

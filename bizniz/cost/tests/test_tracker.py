@@ -4,9 +4,9 @@ from bizniz.cost.tracker import CostTracker, get_tracker, set_tracker
 
 def test_record_appends():
     t = CostTracker()
-    rec = t.record(agent="autocoder", model="gpt-4o-mini",
+    rec = t.record(agent="coder", model="gpt-4o-mini",
                    input_tokens=1000, output_tokens=500, duration_ms=1234)
-    assert rec.agent == "autocoder"
+    assert rec.agent == "coder"
     assert rec.model == "gpt-4o-mini"
     assert rec.input_tokens == 1000
     assert rec.output_tokens == 500
@@ -18,11 +18,11 @@ def test_record_appends():
 
 def test_summary_aggregates_by_model_and_agent():
     t = CostTracker()
-    t.record(agent="autocoder", model="gpt-4o-mini",
+    t.record(agent="coder", model="gpt-4o-mini",
              input_tokens=1_000_000, output_tokens=0)
-    t.record(agent="autotester", model="gpt-4o-mini",
+    t.record(agent="tester", model="gpt-4o-mini",
              input_tokens=0, output_tokens=1_000_000)
-    t.record(agent="autocoder", model="gpt-4o",
+    t.record(agent="coder", model="gpt-4o",
              input_tokens=100_000, output_tokens=0)
 
     s = t.summary()
@@ -35,8 +35,8 @@ def test_summary_aggregates_by_model_and_agent():
     assert abs(s.total_cost - 1.00) < 1e-9
     assert "gpt-4o-mini" in s.by_model
     assert s.by_model["gpt-4o-mini"]["calls"] == 2
-    assert s.by_agent["autocoder"]["calls"] == 2
-    assert s.by_agent["autotester"]["calls"] == 1
+    assert s.by_agent["coder"]["calls"] == 2
+    assert s.by_agent["tester"]["calls"] == 1
 
 
 def test_summary_flags_unpriced_models():
@@ -90,7 +90,7 @@ def test_set_tracker_replaces_global():
 
 def test_format_summary_smoke():
     t = CostTracker()
-    t.record(agent="autocoder", model="gpt-4o-mini",
+    t.record(agent="coder", model="gpt-4o-mini",
              input_tokens=1000, output_tokens=500)
     text = t.summary().format()
     assert "calls=1" in text

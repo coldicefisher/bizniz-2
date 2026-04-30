@@ -1,5 +1,5 @@
 # Schema for the initial analysis step (requirements, use cases, issues)
-AutoEngineerSchema = {
+EngineerSchema = {
     "name": "engineering_analysis",
     "strict": True,
     "schema": {

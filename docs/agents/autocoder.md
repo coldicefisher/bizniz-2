@@ -1,10 +1,10 @@
-# Autocoder
+# Coder
 
-`bizniz/agents/autocoder/autocoder.py` (with a backward-compat shim at `bizniz/autocoder/autocoder.py`). The agent that writes code.
+`bizniz/agents/coder/coder.py` (with a backward-compat shim at `bizniz/coder/coder.py`). The agent that writes code.
 
 ## Purpose
 
-Given a prompt — possibly with tests as constraints — the autocoder produces source files. It supports:
+Given a prompt — possibly with tests as constraints — the coder produces source files. It supports:
 
 - **Single-file** modes (`generate_only`, `generate`, `repair`) for the legacy single-file orchestrator.
 - **Multi-file tool-loop** modes (`generate_multi`, `repair_multi`) that use the agentic discovery tools to read existing files on demand.
@@ -40,24 +40,24 @@ So the prompt includes a `describe()`-formatted block listing allowed globals/bu
 
 | Method | Behavior |
 |--------|----------|
-| `generate_only(prompt, filename) → AutocoderProcessResult` | One AI call, save the code, NO execution. Caller validates externally. |
-| `generate(prompt, filename) → AutocoderProcessResult` | Generate, run via `environment.execute`, repair-on-failure up to `max_retries`. |
-| `repair(previous_code, error_message, filename) → AutocoderProcessResult` | One repair pass — used by the orchestrator's collection-error fallback. |
+| `generate_only(prompt, filename) → CoderProcessResult` | One AI call, save the code, NO execution. Caller validates externally. |
+| `generate(prompt, filename) → CoderProcessResult` | Generate, run via `environment.execute`, repair-on-failure up to `max_retries`. |
+| `repair(previous_code, error_message, filename) → CoderProcessResult` | One repair pass — used by the orchestrator's collection-error fallback. |
 
 ### Multi-file modes
 
 | Method | Behavior |
 |--------|----------|
-| `generate_multi(issue_description, target_files, architecture_context="", existing_code=None, test_files=None) → AutocoderProcessResult` | Tool loop with `AutocoderGenerateActionSchema` and terminal action `submit_code`. The LLM uses `view_file` / `list_directory` / `search_files` to explore the workspace, then submits multi-file changes. Detects language from extensions to swap system prompts. |
-| `repair_multi(current_files, error_message, architecture_context="") → AutocoderProcessResult` | Same shape but with the repair schema; the LLM only sees a list of failing file paths. |
-| `repair_multi_inline(source_files, test_files, error_message, readonly_context=None) → AutocoderProcessResult` | NO tool loop — all source/test/readonly files inlined in the prompt. Two-shot: system + user → analysis + changes. Used by the orchestrator when the file set is small enough. `readonly_context` files are reference-only and must not be modified. |
+| `generate_multi(issue_description, target_files, architecture_context="", existing_code=None, test_files=None) → CoderProcessResult` | Tool loop with `CoderGenerateActionSchema` and terminal action `submit_code`. The LLM uses `view_file` / `list_directory` / `search_files` to explore the workspace, then submits multi-file changes. Detects language from extensions to swap system prompts. |
+| `repair_multi(current_files, error_message, architecture_context="") → CoderProcessResult` | Same shape but with the repair schema; the LLM only sees a list of failing file paths. |
+| `repair_multi_inline(source_files, test_files, error_message, readonly_context=None) → CoderProcessResult` | NO tool loop — all source/test/readonly files inlined in the prompt. Two-shot: system + user → analysis + changes. Used by the orchestrator when the file set is small enough. `readonly_context` files are reference-only and must not be modified. |
 
-All multi-file methods return `AutocoderProcessResult` containing `changes: List[FileChange]`, optional `dependencies: List[str]`, and `test_scaffold: str` (carried from the LLM if present so the autotester can pick up scaffolding hints).
+All multi-file methods return `CoderProcessResult` containing `changes: List[FileChange]`, optional `dependencies: List[str]`, and `test_scaffold: str` (carried from the LLM if present so the tester can pick up scaffolding hints).
 
 ## Result type
 
 ```python
-class AutocoderProcessResult(BaseModel):
+class CoderProcessResult(BaseModel):
     changes: List[FileChange]      # filepath, code, action
     dependencies: List[str] = []   # pip / npm packages declared by the LLM
     test_scaffold: str = ""        # unified gen+test scaffold hint
@@ -77,16 +77,16 @@ class AutocoderProcessResult(BaseModel):
 ## Example
 
 ```python
-from bizniz.agents.autocoder.autocoder import Autocoder
+from bizniz.agents.coder.coder import Coder
 
-autocoder = Autocoder(
+coder = Coder(
     client=client,
     environment=docker_env,
     workspace=workspace,
     on_status_message=print,
 )
 
-result = autocoder.generate_multi(
+result = coder.generate_multi(
     issue_description="Add a Calculator class with add/subtract/multiply/divide.",
     target_files=[
         {"filepath": "calc/calculator.py", "action": "create"},
@@ -108,6 +108,6 @@ for change in result.changes:
 - **`generate` re-uses message history across retries.** That's why a JSON-parse error during retry triggers `clear_message_history()` to prevent token bloat (see `_generate_multi_code`).
 - **`generate_only` does NOT execute.** It's the safe "let the orchestrator decide how to validate" mode. `generate` still exists for the legacy single-file flow.
 - **Hallucinated paths get auto-recovered.** If the LLM emits `absolute/path/to/pet_groomer_backend/foo.py`, `_parse_changes(known_files=...)` looks for any `kf` such that the LLM's path ends with `/kf`. The first match wins.
-- **Test scaffold pass-through.** When the autocoder's response includes a `test_scaffold`, the orchestrator caches it and feeds it into the autotester's regen step — keeps fixture / import shape consistent across iterations.
+- **Test scaffold pass-through.** When the coder's response includes a `test_scaffold`, the orchestrator caches it and feeds it into the tester's regen step — keeps fixture / import shape consistent across iterations.
 - **`describe()` lists allowed modules.** If your environment has nothing exposed (e.g. `DockerPytestEnvironment`), the prompt will say `Allowed modules: None`, which can confuse the LLM into thinking it can't import `pytest`. The orchestrator overrides the system prompt for non-Python languages, but for Python the `describe()` text is included verbatim.
 - **`call_spec` is largely vestigial in multi-file mode.** It's only used by `generate` (single-file) — the orchestrator runs pytest directly and ignores any `call_spec` fields the LLM emits in multi-file mode.

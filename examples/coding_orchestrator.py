@@ -13,10 +13,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from bizniz.autocoder.autocoder import Autocoder
-from bizniz.autodebugger.autodebugger import Autodebugger
-from bizniz.agentic_debugger.agentic_debugger import AgenticDebugger
-from bizniz.autotester.autotester import Autotester
+from bizniz.agents.coder.coder import Coder
+from bizniz.agents.debugger.quick import QuickDebugger
+from bizniz.agents.debugger.agentic import AgenticDebugger
+from bizniz.tester.tester import Tester
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.orchestrator.types import OrchestratorStalledError, OrchestratorMaxIterationsError
 from bizniz.config.bizniz_config import BiznizConfig
@@ -50,9 +50,9 @@ if __name__ == "__main__":
         return config.make_client(model=model_name)
 
     orchestrator = CodingOrchestrator(
-        autocoder=Autocoder(client=client, environment=sandbox, workspace=workspace),
-        autotester=Autotester(client=client, environment=sandbox, workspace=workspace),
-        autodebugger=Autodebugger(client=client, environment=sandbox, workspace=workspace),
+        coder=Coder(client=client, environment=sandbox, workspace=workspace),
+        tester=Tester(client=client, environment=sandbox, workspace=workspace),
+        quick_debugger=QuickDebugger(client=client, environment=sandbox, workspace=workspace),
         test_environment=test_env,
         workspace=workspace,
         client=client,

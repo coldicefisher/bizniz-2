@@ -64,7 +64,7 @@ def test_save_api_call_persists_with_full_context(project):
     project.db.start_job("job-1", "myproj")
     rec = CallRecord(
         timestamp="2026-04-30T00:00:00Z",
-        agent="autocoder",
+        agent="coder",
         model="gemini-flash",
         input_tokens=1000,
         output_tokens=500,
@@ -84,7 +84,7 @@ def test_save_api_call_persists_with_full_context(project):
         "SELECT * FROM api_calls WHERE id=?", (rowid,)
     ).fetchone()
     assert row["job_id"] == "job-1"
-    assert row["agent"] == "autocoder"
+    assert row["agent"] == "coder"
     assert row["service_name"] == "backend"
     assert row["issue_id"] == 7
     assert row["phase"] == "phase2.gemini-flash"
@@ -232,7 +232,7 @@ def test_tracker_set_context_propagates(project):
     t.set_service("backend")
     t.set_issue(7)
     t.set_phase("phase2.gemini-flash")
-    t.record(agent="autocoder", model="gemini-flash",
+    t.record(agent="coder", model="gemini-flash",
              input_tokens=1000, output_tokens=500)
 
     row = project.db._conn.execute(

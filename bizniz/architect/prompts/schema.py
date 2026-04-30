@@ -1,4 +1,4 @@
-AutoArchitectSchema = {
+ArchitectSchema = {
     "name": "system_architecture",
     "strict": True,
     "schema": {

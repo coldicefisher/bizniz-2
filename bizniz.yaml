@@ -9,11 +9,11 @@ models:
   - gemini-flash-lite
   - gemini-flash
   - gemini-pro
-autocoder_models:
+coder_models:
   - gemini-flash-lite
   - gemini-flash
   - gemini-pro
-autotester_models:
+tester_models:
   - gemini-flash-lite
   - gemini-flash
   - gemini-pro

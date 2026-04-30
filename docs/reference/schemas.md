@@ -6,8 +6,8 @@ The schema bodies live in:
 
 - `bizniz/architect/prompts/schema.py`
 - `bizniz/engineer/prompts/schema.py`
-- `bizniz/agents/autocoder/prompts/{prompt_schemas,tool_action_schema}.py`
-- `bizniz/autotester/prompts/{schema,tool_action_schema}.py`
+- `bizniz/agents/coder/prompts/{prompt_schemas,tool_action_schema}.py`
+- `bizniz/tester/prompts/{schema,tool_action_schema}.py`
 - `bizniz/agents/debugger/prompts/{quick_schema,agentic_schema}.py`
 - `bizniz/tools/schemas.py` (the schema builder for tool-loop schemas)
 
@@ -15,9 +15,9 @@ Most are constructed in OpenAI **strict mode** — every property is required, `
 
 ---
 
-## `AutoArchitectSchema`
+## `ArchitectSchema`
 
-Returned by `AutoArchitect.decompose`. Drives the entire system decomposition.
+Returned by `Architect.decompose`. Drives the entire system decomposition.
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -41,9 +41,9 @@ The skeleton enum is the **source of truth for valid skeleton names** — adding
 
 ---
 
-## `AutoEngineerSchema`
+## `EngineerSchema`
 
-Returned by `AutoEngineer.analyze`. Two AI calls use this schema (draft pass + refined pass with architecture context).
+Returned by `Engineer.analyze`. Two AI calls use this schema (draft pass + refined pass with architecture context).
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -69,7 +69,7 @@ Per-issue object:
 
 ## `ArchitecturePlanSchema`
 
-Returned by `AutoEngineer.plan_architecture`.
+Returned by `Engineer.plan_architecture`.
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -98,7 +98,7 @@ Returned by `AutoEngineer.plan_architecture`.
 
 ## `ArchitectureGovernanceSchema`
 
-Returned by `AutoEngineer.review_drift`.
+Returned by `Engineer.review_drift`.
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -110,17 +110,17 @@ Returned by `AutoEngineer.review_drift`.
 
 ---
 
-## Autocoder schemas
+## Coder schemas
 
 ### `GeneratePromptSchema` and `RepairPromptSchema`
 
-`bizniz/agents/autocoder/prompts/prompt_schemas.py`. Used by single-file `generate` and `repair`.
+`bizniz/agents/coder/prompts/prompt_schemas.py`. Used by single-file `generate` and `repair`.
 
 Both contain a `changes[]` array of `{filepath, code, action}` and an optional `dependencies[]` list.
 
-### `AutocoderGenerateActionSchema` and `AutocoderRepairActionSchema`
+### `CoderGenerateActionSchema` and `CoderRepairActionSchema`
 
-`bizniz/agents/autocoder/prompts/tool_action_schema.py`. Built by `bizniz.tools.schemas.build_tool_action_schema(...)`.
+`bizniz/agents/coder/prompts/tool_action_schema.py`. Built by `bizniz.tools.schemas.build_tool_action_schema(...)`.
 
 Common fields (every tool-loop schema has these):
 
@@ -132,23 +132,23 @@ Terminal action (`submit_code`) adds:
 
 - `changes[]` — `{filepath, code, action}`.
 - `dependencies[]` — pip / npm packages to install.
-- `test_scaffold` — optional fixture / import scaffolding hint for the autotester.
+- `test_scaffold` — optional fixture / import scaffolding hint for the tester.
 
 ---
 
-## Autotester schemas
+## Tester schemas
 
-### `AutotesterSchema`
+### `TesterSchema`
 
-`bizniz/autotester/prompts/schema.py`. Used by single-file `process_from_*` modes.
+`bizniz/tester/prompts/schema.py`. Used by single-file `process_from_*` modes.
 
 - `test_files[]` — `{filepath, tests}` array.
 - `tests` (legacy) — single test code string. The agent handles both shapes.
 - `dependencies[]` — pip packages.
 
-### `AutotesterGenerateActionSchema`
+### `TesterGenerateActionSchema`
 
-`bizniz/autotester/prompts/tool_action_schema.py`. Tool-loop schema with terminal action `submit_tests`.
+`bizniz/tester/prompts/tool_action_schema.py`. Tool-loop schema with terminal action `submit_tests`.
 
 Same `thinking` / `action` / `path` shell, plus:
 
@@ -159,7 +159,7 @@ Same `thinking` / `action` / `path` shell, plus:
 
 ## Debugger schemas
 
-### `AutodebuggerSchema` (QuickDebugger)
+### `QuickDebuggerSchema` (QuickDebugger)
 
 `bizniz/agents/debugger/prompts/quick_schema.py`.
 
@@ -197,4 +197,4 @@ Every field is required — the LLM emits empty strings / arrays for the fields 
 
 `bizniz/tools/schemas.py:build_tool_action_schema(name, terminal_action, terminal_properties, terminal_required, extra_actions=None)` constructs OpenAI strict-mode tool-loop schemas. It always includes `view_file`, `list_directory`, `search_files`. The terminal action's properties are merged in, all listed in `required`, and `additionalProperties: false`.
 
-This is how the autocoder/autotester/agentic-debugger schemas are kept consistent.
+This is how the coder/tester/agentic-debugger schemas are kept consistent.

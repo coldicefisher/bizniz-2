@@ -7,7 +7,7 @@ This page traces the typed data that moves between agents. Every transform is a 
 ```
 str (problem statement)
    │
-   ▼  AutoArchitect.decompose
+   ▼  Architect.decompose
 SystemArchitecture
    ├── project_name, project_slug, description
    ├── docker_compose: str (compose file as YAML text)
@@ -16,13 +16,13 @@ SystemArchitecture
         ├── workspace_name, port, depends_on, requirements
         └── skeleton: Optional[str]   # picked from skeleton registry
    │
-   ▼  AutoArchitect.build (per application service)
+   ▼  Architect.build (per application service)
 ServiceResult
    ├── service_name, workspace_name
    ├── success, issues_total, issues_passed
    └── error: Optional[str]
    │
-   ▼  AutoEngineer.analyze (one engineer per service)
+   ▼  Engineer.analyze (one engineer per service)
 EngineeringAnalysis
    ├── problem_id: int
    ├── requirements: List[EngineeringRequirement]
@@ -37,7 +37,7 @@ EngineeringAnalysis
          ├── package_name, root_namespace
          ├── namespaces, domain_models, modules, dependencies
    │
-   ▼  AutoEngineer.run_layered (one issue or one layer at a time)
+   ▼  Engineer.run_layered (one issue or one layer at a time)
 List[OrchestratorResult]
    │
    ▼  CodingOrchestrator.run_multi (per issue / per layer)
@@ -56,9 +56,9 @@ Both directions of the flow above also write to durable state:
 
 | Step | Writes to |
 |------|-----------|
-| `AutoArchitect.decompose` | `architecture_snapshots` (project DB) + `docs/architecture.md` |
-| `AutoArchitect.build` (per service) | `services`, `build_log` (project DB) |
-| `AutoEngineer.analyze` | `problems`, `requirements`, `use_cases`, `issues`, `architecture_plans`, `architecture_namespaces`, `architecture_domain_models`, `architecture_modules`, `architecture_dependencies` (workspace DB) |
+| `Architect.decompose` | `architecture_snapshots` (project DB) + `docs/architecture.md` |
+| `Architect.build` (per service) | `services`, `build_log` (project DB) |
+| `Engineer.analyze` | `problems`, `requirements`, `use_cases`, `issues`, `architecture_plans`, `architecture_namespaces`, `architecture_domain_models`, `architecture_modules`, `architecture_dependencies` (workspace DB) |
 | Orchestrator iterations | `test_results`, `environment_packages` (workspace DB) |
 | Issue close/reopen | `issues.status` (workspace DB) + `issue_log` (project DB) |
 
@@ -66,7 +66,7 @@ See [modules/db.md](../modules/db.md) for the schema and [modules/workspace.md](
 
 ## Cross-issue learning
 
-`AutoEngineer.run` and `run_layered` accumulate `workspace_context: dict[filepath, content]` from successfully closed issues and pass it as `workspace_context` to the next issue. The orchestrator forwards this through to `Autocoder.repair_multi_inline` so prior code is visible as `READ-ONLY` reference (it must not be modified).
+`Engineer.run` and `run_layered` accumulate `workspace_context: dict[filepath, content]` from successfully closed issues and pass it as `workspace_context` to the next issue. The orchestrator forwards this through to `Coder.repair_multi_inline` so prior code is visible as `READ-ONLY` reference (it must not be modified).
 
 ## Cross-layer context
 
@@ -78,15 +78,15 @@ Every agent uses `ResponseFormat.JSON_SCHEMA` for structured output:
 
 | Agent | Schema | Returned model |
 |-------|--------|----------------|
-| `AutoArchitect.decompose` | `AutoArchitectSchema` | `SystemArchitecture` |
-| `AutoEngineer.analyze` | `AutoEngineerSchema` | `EngineeringAnalysis` (without `architecture`) |
-| `AutoEngineer.plan_architecture` | `ArchitecturePlanSchema` | `ArchitecturePlan` |
-| `AutoEngineer.review_drift` | `ArchitectureGovernanceSchema` | `GovernanceDecision` |
-| `Autocoder.generate_multi` | `AutocoderGenerateActionSchema` (tool loop) | `AutocoderProcessResult` |
-| `Autocoder.repair_multi` / `repair_multi_inline` | `RepairPromptSchema` / `AutocoderRepairActionSchema` | `AutocoderProcessResult` |
-| `Autotester.generate_multi` | `AutotesterGenerateActionSchema` (tool loop) | `AutotesterResult` |
-| `Autotester.process_*` | `AutotesterSchema` | `AutotesterResult` |
-| `QuickDebugger.diagnose` | `AutodebuggerSchema` | `AutodebuggerDiagnosis` |
+| `Architect.decompose` | `ArchitectSchema` | `SystemArchitecture` |
+| `Engineer.analyze` | `EngineerSchema` | `EngineeringAnalysis` (without `architecture`) |
+| `Engineer.plan_architecture` | `ArchitecturePlanSchema` | `ArchitecturePlan` |
+| `Engineer.review_drift` | `ArchitectureGovernanceSchema` | `GovernanceDecision` |
+| `Coder.generate_multi` | `CoderGenerateActionSchema` (tool loop) | `CoderProcessResult` |
+| `Coder.repair_multi` / `repair_multi_inline` | `RepairPromptSchema` / `CoderRepairActionSchema` | `CoderProcessResult` |
+| `Tester.generate_multi` | `TesterGenerateActionSchema` (tool loop) | `TesterResult` |
+| `Tester.process_*` | `TesterSchema` | `TesterResult` |
+| `QuickDebugger.diagnose` | `QuickDebuggerSchema` | `QuickDebuggerDiagnosis` |
 | `AgenticDebugger.diagnose` | `AgenticDebuggerActionSchema` (tool loop) | `AgenticDiagnosis` |
 
 The full schema bodies are documented in [reference/schemas.md](../reference/schemas.md).
@@ -103,7 +103,7 @@ str (failure_output: stdout + traceback + error message, capped)
    │
    ▼  StallDetector.record_failure  →  stall_reason, repair_history
    ▼  AgenticDebugger.diagnose       →  AgenticDiagnosis (with code_fixes)
-   ▼  Autocoder.repair_multi_inline  →  AutocoderProcessResult
+   ▼  Coder.repair_multi_inline  →  CoderProcessResult
 ```
 
 If a stall is detected (see [modules/orchestrator_internals.md](../modules/orchestrator_internals.md)), `ModelProgression.escalate()` is called and the next iteration uses a stronger model.

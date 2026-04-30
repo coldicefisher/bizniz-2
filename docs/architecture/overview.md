@@ -6,13 +6,13 @@ Bizniz is an autonomous code-generation pipeline. A single problem statement ent
 
 ```
                              ┌──────────────────────┐
-   problem statement ───────▶│    AutoArchitect     │  decompose → port-alloc → seed
+   problem statement ───────▶│    Architect     │  decompose → port-alloc → seed
                              │  (architect/)        │  → docker-build → engineer-dispatch
                              └──────────┬───────────┘
                                         │ ServiceDefinition (per service)
                                         ▼
                              ┌──────────────────────┐
-                             │     AutoEngineer     │  analyze → architecture-plan →
+                             │     Engineer     │  analyze → architecture-plan →
                              │  (engineer/)         │  scaffold → run_layered
                              └──────────┬───────────┘
                                         │ EngineeringIssue (per layer)
@@ -25,8 +25,8 @@ Bizniz is an autonomous code-generation pipeline. A single problem statement ent
         ┌───────────────────────┼───────┐   │   ┌──────────────────────┐
         ▼                       ▼       │   │   ▼                      │
  ┌─────────────┐        ┌─────────────┐ │   │ ┌─────────────┐          │
- │  Autocoder  │        │  Autotester │ │   │ │ Autodebugger│  quick   │
- │ (autocoder/)│        │(autotester/)│ │   │ │             │          │
+ │  Coder  │        │  Tester │ │   │ │ QuickDebugger│  quick   │
+ │ (coder/)│        │(tester/)│ │   │ │             │          │
  └──────┬──────┘        └──────┬──────┘ │   │ └─────────────┘          │
         │                      │        │   │ ┌─────────────┐          │
         ▼                      ▼        │   │ │  Agentic    │  deep    │
@@ -52,10 +52,10 @@ All data flowing on the arrows is a Pydantic model; see [reference/schemas.md](.
 |-------|--------|----------------|
 | Provider clients | [`bizniz/clients/`](../modules/clients.md) | Talk to OpenAI / Claude / Gemini, return text + token usage |
 | Core abstractions | [`bizniz/core/`](../agents/base_ai_agent.md) | `BaseAIAgent`, `BaseAIClient`, shared `Message`/`ResponseFormat` types |
-| Architect | [`bizniz/architect/`](../agents/auto_architect.md) | Problem statement → list of services + Docker compose |
-| Engineer | [`bizniz/engineer/`](../agents/auto_engineer.md) | Per-service problem statement → architecture plan + issues |
+| Architect | [`bizniz/architect/`](../agents/architect.md) | Problem statement → list of services + Docker compose |
+| Engineer | [`bizniz/engineer/`](../agents/engineer.md) | Per-service problem statement → architecture plan + issues |
 | Orchestrator | [`bizniz/orchestrator/`](../agents/coding_orchestrator.md) | Per-issue: generate, test, repair until passing |
-| Code generators | [`bizniz/agents/autocoder/`](../agents/autocoder.md), [`bizniz/autotester/`](../agents/autotester.md) | Single-shot and multi-file code/test generation |
+| Code generators | [`bizniz/agents/coder/`](../agents/coder.md), [`bizniz/tester/`](../agents/tester.md) | Single-shot and multi-file code/test generation |
 | Debuggers | [`bizniz/agents/debugger/`](../agents/agentic_debugger.md) | Diagnose pytest/jest failures (quick or deep) |
 | Workspace | [`bizniz/workspace/`](../modules/workspace.md) | Filesystem abstraction + per-service SQLite DB |
 | Project | [`bizniz/project/`](../modules/project.md) | Multi-service project root, infra/development/* |
@@ -68,7 +68,7 @@ All data flowing on the arrows is a Pydantic model; see [reference/schemas.md](.
 
 ## Key invariants
 
-1. **One workspace per service.** The architect creates `project_root/<workspace_name>/` and hands it to one `AutoEngineer`. Engineers never share workspaces.
+1. **One workspace per service.** The architect creates `project_root/<workspace_name>/` and hands it to one `Engineer`. Engineers never share workspaces.
 2. **All file I/O goes through the workspace.** Agents must not call `open()` directly — use `workspace.read_file` / `workspace.write_file`. This keeps agents portable across local and remote workspaces.
 3. **Tests run inside Docker.** Application code never executes on the host. The `DockerPytestEnvironment` and `DockerJestEnvironment` bind-mount the workspace at `/workspace`.
 4. **Skeletons are the seeding mechanism.** Where a skeleton matches, the architect seeds a service from a real cloned repo (auth, Docker, tests already in place) rather than generating from scratch. See [skeleton_seeding.md](skeleton_seeding.md).

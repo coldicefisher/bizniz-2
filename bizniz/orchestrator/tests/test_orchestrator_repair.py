@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import MagicMock
 from bizniz.environment.types import ExecutionEnvironmentResult, ExecutionEnvironmentErrorDetails
-from bizniz.autocoder.types import AutocoderProcessResult, FileChange
+from bizniz.agents.coder.types import CoderProcessResult, FileChange
 from bizniz.orchestrator.types import OrchestratorResult, OrchestratorMaxIterationsError
 
 PROMPT = "Write an add function."
@@ -17,7 +17,7 @@ def test_repair_called_after_test_failure(orchestrator, mock_autocoder, mock_tes
     # Fail once, then pass
     mock_test_env.execute.side_effect = [FAILURE_RESULT, ExecutionEnvironmentResult(success=True)]
     # Return different code on repair to avoid stale detection
-    mock_autocoder.repair.return_value = AutocoderProcessResult(changes=[FileChange(filepath="add.py", code="def add(a,b): return a+b\n", action="modify")])
+    mock_autocoder.repair.return_value = CoderProcessResult(changes=[FileChange(filepath="add.py", code="def add(a,b): return a+b\n", action="modify")])
 
     result = orchestrator.run(prompt=PROMPT, code_filename="add.py", test_filename="test_add.py")
 
@@ -27,7 +27,7 @@ def test_repair_called_after_test_failure(orchestrator, mock_autocoder, mock_tes
 
 def test_repair_uses_failure_output(orchestrator, mock_autocoder, mock_test_env):
     mock_test_env.execute.side_effect = [FAILURE_RESULT, ExecutionEnvironmentResult(success=True)]
-    mock_autocoder.repair.return_value = AutocoderProcessResult(changes=[FileChange(filepath="add.py", code="def add(a,b): return a+b\n", action="modify")])
+    mock_autocoder.repair.return_value = CoderProcessResult(changes=[FileChange(filepath="add.py", code="def add(a,b): return a+b\n", action="modify")])
 
     orchestrator.run(prompt=PROMPT, code_filename="add.py", test_filename="test_add.py")
 
@@ -41,15 +41,15 @@ def test_max_iterations_raises(mock_autocoder, mock_autotester, mock_test_env, m
 
     # Always fail; always return different code to avoid stale detection
     codes = [f"def add(a,b): return {i}\n" for i in range(20)]
-    mock_autocoder.generate_only.return_value = AutocoderProcessResult(changes=[FileChange(filepath="add.py", code=codes[0], action="create")])
-    mock_autocoder.repair.side_effect = [AutocoderProcessResult(changes=[FileChange(filepath="add.py", code=c, action="modify")]) for c in codes[1:]]
+    mock_autocoder.generate_only.return_value = CoderProcessResult(changes=[FileChange(filepath="add.py", code=codes[0], action="create")])
+    mock_autocoder.repair.side_effect = [CoderProcessResult(changes=[FileChange(filepath="add.py", code=c, action="modify")]) for c in codes[1:]]
     mock_workspace.read_file.side_effect = codes
 
     mock_test_env.execute.return_value = FAILURE_RESULT
 
     orc = CodingOrchestrator(
-        autocoder=mock_autocoder,
-        autotester=mock_autotester,
+        coder=mock_autocoder,
+        tester=mock_autotester,
         test_environment=mock_test_env,
         workspace=mock_workspace,
         max_iterations=3,

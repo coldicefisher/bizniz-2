@@ -1,7 +1,7 @@
 """
 Shared discovery tools for workspace exploration.
 
-These tools are used by all agentic agents (autocoder, autotester, agentic debugger)
+These tools are used by all agentic agents (coder, tester, agentic debugger)
 to discover file contents, search code, and list directories on demand rather than
 receiving everything inline in the prompt.
 """

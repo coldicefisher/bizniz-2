@@ -4,7 +4,7 @@
 
 ## Purpose
 
-The orchestrator owns the iterative coding/testing/repair cycle for one engineering issue (or one batched layer of issues). It composes Autocoder + Autotester + (Quick or Agentic) Debugger inside a single loop with safeguards against stalls, regression, missing packages, and pytest collection errors.
+The orchestrator owns the iterative coding/testing/repair cycle for one engineering issue (or one batched layer of issues). It composes Coder + Tester + (Quick or Agentic) Debugger inside a single loop with safeguards against stalls, regression, missing packages, and pytest collection errors.
 
 It supports two strategies (`bizniz/orchestrator/strategy.py`):
 
@@ -17,16 +17,16 @@ It supports two strategies (`bizniz/orchestrator/strategy.py`):
 
 | Parameter | Type | Notes |
 |-----------|------|-------|
-| `autocoder` | `Autocoder` | required |
-| `autotester` | `Autotester` | required |
+| `coder` | `Coder` | required |
+| `tester` | `Tester` | required |
 | `test_environment` | `BaseExecutionEnvironment` | `DockerPytestEnvironment` or `DockerJestEnvironment` |
 | `workspace` | `BaseWorkspace` | required |
-| `autodebugger` | `Optional[Autodebugger]` | the QuickDebugger; `None` falls back to a heuristic repair path |
+| `quick_debugger` | `Optional[QuickDebugger]` | the QuickDebugger; `None` falls back to a heuristic repair path |
 | `client` | `Optional[BaseAIClient]` | shared client reference, needed for model escalation |
 | `client_factory` | `Optional[Callable[[str], BaseAIClient]]` | preferred way to swap models — creates a fresh client per model |
 | `debugger_factory` | `Optional[Callable[[], AgenticDebugger]]` | factory for deep diagnosis sessions |
 | `model_progression` | `Optional[ModelProgression]` | shared progression; per-agent overrides below take precedence |
-| `autocoder_progression` / `autotester_progression` / `repair_progression` | `Optional[ModelProgression]` | per-agent escalation lists |
+| `coder_progression` / `tester_progression` / `repair_progression` | `Optional[ModelProgression]` | per-agent escalation lists |
 | `stall_threshold` | `int = 2` | consecutive failures before stalling |
 | `agentic_debug_threshold` | `int = 2` | consecutive failures before invoking the deep debugger |
 | `max_iterations` | `int = 20` | hard cap on the inner loop |
@@ -44,13 +44,13 @@ Single-file legacy mode. Used for tiny one-file demos. Generates code + tests, r
 
 ### `run_multi(prompt, target_files, test_files, architecture_context="", initial_model=None, strategy=TDD, workspace_context=None, dependency_edges=None, prior_test_files=None) → OrchestratorResult`
 
-The main entry used by `AutoEngineer`. Notable parameters:
+The main entry used by `Engineer`. Notable parameters:
 
 | Parameter | Purpose |
 |-----------|---------|
 | `target_files: List[dict]` | `[{filepath, action: "create"|"modify"}]` |
-| `test_files: List[str]` | test filepaths the autotester will (re)write |
-| `architecture_context: str` | formatted plan text from `AutoEngineer.format_architecture_context` |
+| `test_files: List[str]` | test filepaths the tester will (re)write |
+| `architecture_context: str` | formatted plan text from `Engineer.format_architecture_context` |
 | `initial_model` | suggested starting model (set on every progression) |
 | `workspace_context: dict` | files from previously resolved issues; sent as READ-ONLY |
 | `dependency_edges: list[DependencyEdge]` | exact import edges from the plan |
@@ -64,7 +64,7 @@ Top-level steps inside `run_multi`:
 4. **Snapshot baseline.** Capture passing tests before we start, scoped to `prior_test_files` if provided.
 5. **Build extra prompt context.** Cross-issue code, workspace manifest, import map, installed packages, stub-file warnings — all appended to `extra_context`.
 6. **Generate.** Strategy-dispatched: TDD does tests-then-code, CODE_FIRST does code-then-tests.
-7. **Loop.** Run pytest; on failure detect missing packages, classify collection errors, then either invoke the autodebugger / agentic debugger or fall through to a heuristic repair.
+7. **Loop.** Run pytest; on failure detect missing packages, classify collection errors, then either invoke the quick_debugger / agentic debugger or fall through to a heuristic repair.
 8. **Stall detection.** `StallDetector` watches code-hash repeats, error signatures, and consecutive failures. On stall: escalate the model (via `ModelProgression`) and reset counters.
 9. **Wall-clock and max-iterations exits.** `OrchestratorMaxIterationsError` if the loop runs out.
 
@@ -74,7 +74,7 @@ Returns `OrchestratorResult(success, changes, test_files, iterations, strategy_u
 
 | Helper | What it does |
 |--------|--------------|
-| `_apply_language_system_prompts()` | Overrides autocoder/autotester system prompts via `LanguageStrategy` for non-Python projects |
+| `_apply_language_system_prompts()` | Overrides coder/tester system prompts via `LanguageStrategy` for non-Python projects |
 | `_scope_architecture_context(arch_context, target_files)` | Trims the plan summary to just files in this issue + transitive dependencies |
 | `_sync_environment_packages(log)` | Reads `environment_packages` from workspace DB and installs each one in the test environment |
 | `_proactive_package_install(code_dict, test_dict, log)` | Scans imports in newly-generated files and pip-installs any missing third-party package |
@@ -84,8 +84,8 @@ Returns `OrchestratorResult(success, changes, test_files, iterations, strategy_u
 | `_build_import_map()` | "from X import Y" lines the LLM is told to use verbatim |
 | `_get_installed_packages()` | Shells into the runner container and lists installed packages |
 | `_is_stub_file(path, content)` | Heuristic: file is a stub if it's only docstring + `pass` / `...` / `NotImplemented` |
-| `_handle_failure_with_debugger(...)` | Calls the `Autodebugger.diagnose(...)` once per iteration; merges its `relevant_files` into the repair payload, then calls `Autocoder.repair_multi_inline(...)`. Escalates to `AgenticDebugger` after `agentic_debug_threshold` consecutive failures. |
-| `_handle_failure_heuristic(...)` | Same shape as above but skips the debugger; used when `autodebugger` is None |
+| `_handle_failure_with_debugger(...)` | Calls the `QuickDebugger.diagnose(...)` once per iteration; merges its `relevant_files` into the repair payload, then calls `Coder.repair_multi_inline(...)`. Escalates to `AgenticDebugger` after `agentic_debug_threshold` consecutive failures. |
+| `_handle_failure_heuristic(...)` | Same shape as above but skips the debugger; used when `quick_debugger` is None |
 
 ## Strategy + escalation
 
@@ -105,16 +105,16 @@ Escalation is driven by `StallDetector` (see [modules/orchestrator_internals.md]
 
 ## Interactions
 
-- **Calls into:** `Autocoder.{generate_only, generate_multi, repair, repair_multi, repair_multi_inline}`, `Autotester.{process_from_prompt, generate_multi}`, `Autodebugger.diagnose`, `AgenticDebugger.diagnose`, `BaseExecutionEnvironment.execute`, `StallDetector`, `ModelProgression`, the language strategy (`LanguageStrategy`), `bizniz.preflight.registry.get_validator`.
-- **Called by:** `AutoEngineer._run_orchestrator` (one orchestrator per attempt — a fresh instance for each retry).
+- **Calls into:** `Coder.{generate_only, generate_multi, repair, repair_multi, repair_multi_inline}`, `Tester.{process_from_prompt, generate_multi}`, `QuickDebugger.diagnose`, `AgenticDebugger.diagnose`, `BaseExecutionEnvironment.execute`, `StallDetector`, `ModelProgression`, the language strategy (`LanguageStrategy`), `bizniz.preflight.registry.get_validator`.
+- **Called by:** `Engineer._run_orchestrator` (one orchestrator per attempt — a fresh instance for each retry).
 
 ## Gotchas
 
 - **`run_multi` is the real entry point.** `run` is single-file legacy. The engineer always uses `run_multi`.
 - **`initial_model` must be in the progression list.** `set_start(name)` silently does nothing if the name isn't present, so a stall would still escalate from the (cheaper) default starting position.
 - **`client_factory` is preferred over `client.set_model(...)`.** Some clients accumulate state per-model; the factory approach guarantees a clean client. If the factory is None, the orchestrator falls back to mutating the shared client.
-- **Drift detection runs in the orchestrator, governance runs in the engineer.** The orchestrator only sets `architecture_drift_detected` and `drift_files`; `AutoEngineer._finalize_dispatch` is what actually calls `review_drift(...)`.
-- **Layered batching shares one orchestrator call.** When multiple issues are in the same dependency layer, `AutoEngineer._dispatch_layer` merges them into one `run_multi` invocation. Failures roll up to the layer, not individual issues — diagnose accordingly.
+- **Drift detection runs in the orchestrator, governance runs in the engineer.** The orchestrator only sets `architecture_drift_detected` and `drift_files`; `Engineer._finalize_dispatch` is what actually calls `review_drift(...)`.
+- **Layered batching shares one orchestrator call.** When multiple issues are in the same dependency layer, `Engineer._dispatch_layer` merges them into one `run_multi` invocation. Failures roll up to the layer, not individual issues — diagnose accordingly.
 - **Test runs install packages on the fly.** `_proactive_package_install` and the missing-package detector each shell into the running container with `pip install`. The container persists across iterations (see [modules/environment.md](../modules/environment.md)), so the install survives.
 - **Stall counters reset after escalation, but `repair_history` does not.** This is on purpose — the deep diagnosis path uses the history as evidence.
 - **Wall-clock timeout is 30 minutes per `run_multi` call.** The cap is hardcoded as `WALL_CLOCK_TIMEOUT`. Long, slow models (Opus on a giant repo) can hit this.

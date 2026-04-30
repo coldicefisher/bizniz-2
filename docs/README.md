@@ -17,12 +17,12 @@ High-level cross-cutting design.
 Each AI agent (one page per agent), top-down from coarsest to finest.
 
 - [agents/base_ai_agent.md](agents/base_ai_agent.md) — common base class
-- [agents/auto_architect.md](agents/auto_architect.md) — system decomposer (the top of the pipeline)
-- [agents/auto_engineer.md](agents/auto_engineer.md) — per-service requirements + architecture planning
+- [agents/architect.md](agents/architect.md) — system decomposer (the top of the pipeline)
+- [agents/engineer.md](agents/engineer.md) — per-service requirements + architecture planning
 - [agents/coding_orchestrator.md](agents/coding_orchestrator.md) — per-issue iterative loop
-- [agents/autocoder.md](agents/autocoder.md) — code generation (single & multi-file)
-- [agents/autotester.md](agents/autotester.md) — test generation (three modes)
-- [agents/autodebugger.md](agents/autodebugger.md) — quick one-shot diagnosis
+- [agents/coder.md](agents/coder.md) — code generation (single & multi-file)
+- [agents/tester.md](agents/tester.md) — test generation (three modes)
+- [agents/quick_debugger.md](agents/quick_debugger.md) — quick one-shot diagnosis
 - [agents/agentic_debugger.md](agents/agentic_debugger.md) — iterative tool-use diagnosis
 
 ## Module reference
@@ -53,7 +53,7 @@ Lookup tables and full schemas.
 
 ## Conventions used in this docs tree
 
-- Absolute paths in cross-links use the relative form (`agents/autocoder.md`) since the docs site renders this directory tree.
+- Absolute paths in cross-links use the relative form (`agents/coder.md`) since the docs site renders this directory tree.
 - "Workspace" always means a `BaseWorkspace` subclass — a directory the agents read/write files to.
 - "Service" is one container in the system architecture (one workspace + one Docker image).
 - "Issue" is one engineering task tracked in `WorkspaceDB` and dispatched to the `CodingOrchestrator`.

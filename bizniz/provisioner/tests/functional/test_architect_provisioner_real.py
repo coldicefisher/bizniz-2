@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from bizniz.architect.auto_architect import AutoArchitect
+from bizniz.architect.architect import Architect
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.provisioner import Provisioner
@@ -64,7 +64,7 @@ def test_architect_plans_crm_with_fusionauth(tmp_path, monkeypatch):
         build_images=False,
     )
 
-    architect = AutoArchitect(
+    architect = Architect(
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
@@ -111,7 +111,7 @@ def test_full_architect_build_through_provisioner(tmp_path, monkeypatch):
 
     provisioner = Provisioner(project_parent=tmp_path, build_images=False)
 
-    architect = AutoArchitect(
+    architect = Architect(
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,

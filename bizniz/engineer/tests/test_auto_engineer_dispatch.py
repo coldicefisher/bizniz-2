@@ -3,11 +3,11 @@ import pytest
 from unittest.mock import MagicMock
 from bizniz.orchestrator.types import OrchestratorResult
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-from bizniz.autocoder.types import FileChange
-from bizniz.autotester.types import GeneratedTestFile
+from bizniz.agents.coder.types import FileChange
+from bizniz.tester.types import GeneratedTestFile
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.workspace.workspace_db import WorkspaceDB
-from bizniz.engineer.auto_engineer import AutoEngineer
+from bizniz.engineer.engineer import Engineer
 from bizniz.engineer.tests.conftest import (
     VALID_ANALYSIS_RESPONSE,
     VALID_PLAN_RESPONSE,
@@ -54,7 +54,7 @@ def test_dispatch_closes_issue_on_success(mock_client, mock_environment, tmp_pat
         iterations=1,
     )
 
-    eng = AutoEngineer(
+    eng = Engineer(
         client=mock_client,
         environment=mock_environment,
         workspace=ws,
@@ -86,7 +86,7 @@ def test_dispatch_resets_status_on_failure(mock_environment, tmp_path):
     from bizniz.engineer.tests.conftest import _make_multi_response_client
     client = _make_multi_response_client()
 
-    eng = AutoEngineer(
+    eng = Engineer(
         client=client,
         environment=mock_environment,
         workspace=ws,

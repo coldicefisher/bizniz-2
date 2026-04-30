@@ -12,7 +12,7 @@
 
 ## `code_metadata.py`
 
-Saved code files start with a metadata block so `Autotester` and others can re-discover the original problem statement when only the file is available (no DB context).
+Saved code files start with a metadata block so `Tester` and others can re-discover the original problem statement when only the file is available (no DB context).
 
 New format:
 
@@ -49,7 +49,7 @@ Internals:
 | `_parse_new_format(code)` | Locate sentinels, strip leading `# `, JSON-decode |
 | `_parse_legacy_format(code)` | Regex-match the old `Problem Statement:` triple-quoted block for backward compatibility |
 
-`BaseAIAgent._save_code_to_file` is the writer; `Autotester._lookup_problem_statement` is one of the readers.
+`BaseAIAgent._save_code_to_file` is the writer; `Tester._lookup_problem_statement` is one of the readers.
 
 ## `clean_llm_json` (`utils/json/llm.py`)
 
@@ -100,7 +100,7 @@ print(meta["problem_statement"])  # "Add two numbers"
 ## Interactions
 
 - **`code_metadata` calls into:** stdlib `json` and `re`.
-- **`code_metadata` is called by:** `BaseAIAgent._save_code_to_file`, `Autotester._lookup_problem_statement`.
+- **`code_metadata` is called by:** `BaseAIAgent._save_code_to_file`, `Tester._lookup_problem_statement`.
 - **`clean_llm_json` is called by:** every agent (`BaseAIAgent.clean_llm_json` delegates here), the tool loop, the agentic debugger.
 
 ## Gotchas

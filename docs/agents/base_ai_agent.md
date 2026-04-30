@@ -65,11 +65,11 @@ class MyAgent(BaseAIAgent):
 ## Interactions
 
 - **Calls into:** `BaseAIClient.get_text`, `BaseExecutionEnvironment.execute`, `BaseWorkspace.read_file/write_file`, `bizniz.utils.code_metadata.build_metadata_block`, `bizniz.utils.json.clean_llm_json`.
-- **Subclassed by:** `Autocoder`, `Autotester`, `QuickDebugger` (formerly `Autodebugger`), `AutoEngineer`, `AutoArchitect`. The `AgenticDebugger` deliberately does NOT subclass this — it uses its own message list (no history accumulation) since each tool-loop turn is a fresh self-contained call.
+- **Subclassed by:** `Coder`, `Tester`, `QuickDebugger` (formerly `QuickDebugger`), `Engineer`, `Architect`. The `AgenticDebugger` deliberately does NOT subclass this — it uses its own message list (no history accumulation) since each tool-loop turn is a fresh self-contained call.
 
 ## Gotchas
 
-- The system prompt is pulled in the constructor *before* a subclass has run any of its own `__init__` body. If your subclass's `_process_system_prompt` reads instance attributes, set them BEFORE `super().__init__(...)`. `AutoEngineer` does exactly this for `self._language`.
+- The system prompt is pulled in the constructor *before* a subclass has run any of its own `__init__` body. If your subclass's `_process_system_prompt` reads instance attributes, set them BEFORE `super().__init__(...)`. `Engineer` does exactly this for `self._language`.
 - `max_message_history_length` is a soft cap — `add_messages_to_history` always appends, but the `message_history` property returns the truncated view (system + last N-1). The on-disk history is unbounded.
 - `add_messages_to_history` rejects extra system messages once one is present. To swap the system prompt, call `set_system_prompt_override(new_prompt)`.
 - `_save_code_to_file` will append `.py` to the cached filename if the input lacks one — the workspace path itself is written verbatim. This matters if you save TypeScript: the workspace gets `App.tsx`, but the rotation copy under `cached/` is `App.tsx.py`. It's harmless but surprising.

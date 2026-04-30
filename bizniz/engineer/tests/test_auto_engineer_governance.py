@@ -1,5 +1,5 @@
 """
-Tests for the governance loop integration in AutoEngineer.dispatch().
+Tests for the governance loop integration in Engineer.dispatch().
 """
 import json
 import pytest
@@ -10,9 +10,9 @@ from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.orchestrator.types import OrchestratorResult
-from bizniz.autocoder.types import FileChange
-from bizniz.autotester.types import GeneratedTestFile
-from bizniz.engineer.auto_engineer import AutoEngineer
+from bizniz.agents.coder.types import FileChange
+from bizniz.tester.types import GeneratedTestFile
+from bizniz.engineer.engineer import Engineer
 from bizniz.engineer.types import ArchitecturePlan, GovernanceDecision
 from bizniz.engineer.tests.conftest import (
     VALID_ANALYSIS_RESPONSE,
@@ -23,7 +23,7 @@ from bizniz.engineer.tests.conftest import (
 
 def _setup_engineer_with_plan(tmp_path, mock_env, orchestrator_result, governance_response=None):
     """
-    Create an AutoEngineer with a persisted analysis + plan,
+    Create an Engineer with a persisted analysis + plan,
     and configure it to return the given orchestrator_result on dispatch.
     """
     ws = BaseWorkspace(root=tmp_path)
@@ -44,7 +44,7 @@ def _setup_engineer_with_plan(tmp_path, mock_env, orchestrator_result, governanc
     orc = MagicMock(spec=CodingOrchestrator)
     orc.run_multi.return_value = orchestrator_result
 
-    eng = AutoEngineer(
+    eng = Engineer(
         client=client,
         environment=mock_env,
         workspace=ws,

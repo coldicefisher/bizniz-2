@@ -12,8 +12,8 @@ class TempWorkspace(BaseWorkspace):
     """
     TempWorkspace creates a temporary workspace directory.
 
-    It is intended for short-lived execution runs (Autocoder,
-    AutoTester, AutoEngineer, etc.).
+    It is intended for short-lived execution runs (Coder,
+    AutoTester, Engineer, etc.).
 
     The directory is automatically removed when cleanup() is called
     or when used as a context manager.

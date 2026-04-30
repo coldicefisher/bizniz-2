@@ -13,7 +13,7 @@
 
 ## Discovery tools
 
-Three primitives shared by every agentic agent (autocoder, autotester, agentic debugger):
+Three primitives shared by every agentic agent (coder, tester, agentic debugger):
 
 ```python
 def tool_view_file(workspace, path) -> str
@@ -43,7 +43,7 @@ Constants in `discovery_tools.py`:
 - The terminal action's properties merged in.
 - All properties required, `additionalProperties: false` (OpenAI strict-mode requirements).
 
-This is how `AutocoderGenerateActionSchema`, `AutotesterGenerateActionSchema`, `AgenticDebuggerActionSchema` are all built.
+This is how `CoderGenerateActionSchema`, `TesterGenerateActionSchema`, `AgenticDebuggerActionSchema` are all built.
 
 ## `run_tool_loop`
 
@@ -120,7 +120,7 @@ print(action["answer"])
 
 ## Interactions
 
-- **Used by:** `Autocoder.generate_multi`, `Autocoder.repair_multi`, `Autotester.generate_multi`, and (for its own loop, but with the same discovery primitives) `AgenticDebugger.diagnose`.
+- **Used by:** `Coder.generate_multi`, `Coder.repair_multi`, `Tester.generate_multi`, and (for its own loop, but with the same discovery primitives) `AgenticDebugger.diagnose`.
 - **Calls into:** `BaseAIClient.get_text`, the workspace.
 
 ## Gotchas

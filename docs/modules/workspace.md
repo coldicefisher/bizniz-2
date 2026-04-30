@@ -121,8 +121,8 @@ ws.db.save_problem("...")  # creates .bizniz/bizniz.db on first access
 ## Gotchas
 
 - **`db` is lazy AND cached.** First access creates either the SQLite file or the scope. After that, the same instance is returned every time.
-- **`init_as_package` is Python-only.** It always writes a `pyproject.toml`. Don't call it for TypeScript services — `AutoEngineer.analyze` already skips it for `language == "typescript"`.
-- **`create_namespace` is for sub-namespaces.** The engineer deliberately avoids calling it pre-emptively because it would conflict with single-file modules the autocoder sometimes generates.
+- **`init_as_package` is Python-only.** It always writes a `pyproject.toml`. Don't call it for TypeScript services — `Engineer.analyze` already skips it for `language == "typescript"`.
+- **`create_namespace` is for sub-namespaces.** The engineer deliberately avoids calling it pre-emptively because it would conflict with single-file modules the coder sometimes generates.
 - **Permissions reset matters.** When the runner container creates files inside the workspace as root, `WorkspaceDB._ensure_writable` is the only thing keeping subsequent host-side reads working. If you see `permission denied` on `.bizniz/bizniz.db`, that's why.
 - **`TempWorkspace` doesn't take a `bizniz_db` parameter.** It's intentionally a single-purpose scratch area without a unified DB hookup.
 - **`from_name` slugifies but doesn't enforce uniqueness.** Two projects named "My App" both resolve to `my_app`.

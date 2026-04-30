@@ -1,5 +1,5 @@
 """
-Stability Test: Run AutoEngineer N times consecutively.
+Stability Test: Run Engineer N times consecutively.
 
 Tracks success/failure across runs and reports aggregate stats.
 Stops on first failure by default (use --continue-on-failure to keep going).
@@ -18,12 +18,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from bizniz.autocoder.autocoder import Autocoder
-from bizniz.autodebugger.autodebugger import Autodebugger
-from bizniz.agentic_debugger.agentic_debugger import AgenticDebugger
-from bizniz.autotester.autotester import Autotester
+from bizniz.agents.coder.coder import Coder
+from bizniz.agents.debugger.quick import QuickDebugger
+from bizniz.agents.debugger.agentic import AgenticDebugger
+from bizniz.tester.tester import Tester
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-from bizniz.engineer.auto_engineer import AutoEngineer
+from bizniz.engineer.engineer import Engineer
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
@@ -74,9 +74,9 @@ def _make_orchestrator(config, workspace, suggested_model=None, image_name=None)
     issue_client = config.make_client(model=suggested_model) if suggested_model else config.make_client()
 
     return CodingOrchestrator(
-        autocoder=Autocoder(client=issue_client, environment=sandbox, workspace=workspace),
-        autotester=Autotester(client=issue_client, environment=sandbox, workspace=workspace),
-        autodebugger=Autodebugger(client=issue_client, environment=sandbox, workspace=workspace),
+        coder=Coder(client=issue_client, environment=sandbox, workspace=workspace),
+        tester=Tester(client=issue_client, environment=sandbox, workspace=workspace),
+        quick_debugger=QuickDebugger(client=issue_client, environment=sandbox, workspace=workspace),
         test_environment=test_env,
         workspace=workspace,
         client=issue_client,
@@ -89,8 +89,8 @@ def _make_orchestrator(config, workspace, suggested_model=None, image_name=None)
 
 
 def run_once(run_number: int, config: BiznizConfig) -> dict:
-    """Execute one full auto_engineer run. Returns a result dict."""
-    workspace_path = os.path.expanduser("~/auto_engineer_workspace")
+    """Execute one full engineer run. Returns a result dict."""
+    workspace_path = os.path.expanduser("~/engineer_workspace")
     if os.path.exists(workspace_path):
         shutil.rmtree(workspace_path)
 
@@ -113,7 +113,7 @@ def run_once(run_number: int, config: BiznizConfig) -> dict:
     }
 
     try:
-        with AutoEngineer(
+        with Engineer(
             client=engineer_client,
             environment=PythonSandboxExecutionEnvironment(),
             workspace=workspace,
@@ -179,7 +179,7 @@ def run_once(run_number: int, config: BiznizConfig) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run AutoEngineer stability test")
+    parser = argparse.ArgumentParser(description="Run Engineer stability test")
     parser.add_argument("--runs", type=int, default=5, help="Number of consecutive runs (default: 5)")
     parser.add_argument("--continue-on-failure", action="store_true", help="Keep running after a failure")
     args = parser.parse_args()

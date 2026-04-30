@@ -7,7 +7,7 @@ problem statement
        │
        ▼
 ┌────────────────────┐
-│   AutoArchitect    │   pure planning — one AI call
+│   Architect    │   pure planning — one AI call
 │   .decompose()     │   returns: SystemArchitecture
 └──────────┬─────────┘
            │ (services, frameworks, ports, depends_on, skeleton)
@@ -31,14 +31,14 @@ problem statement
            └── docker build for each app service (when build_images=True)
            ▼
 ┌────────────────────┐
-│   AutoEngineer     │   per app service — analyze + frame + dispatch
+│   Engineer     │   per app service — analyze + frame + dispatch
 │   .run_three_phase │
 └────────────────────┘
 ```
 
 ## Why split
 
-Before the split, `AutoArchitect.build()` was three concerns rolled into
+Before the split, `Architect.build()` was three concerns rolled into
 one class: planning, infra provisioning, and engineer orchestration. The
 architect's prompt had to reason about service decomposition AND emit a
 working docker-compose YAML inline. Infrastructure services
@@ -65,7 +65,7 @@ Splitting the concerns lets:
 
 ```
 bizniz/architect/        — planning only
-  auto_architect.py      — decompose(), build() (thin orchestration)
+  architect.py      — decompose(), build() (thin orchestration)
   prompts/decompose_prompt.py
   prompts/schema.py      — no docker_compose field
   skeletons.py           — skeleton registry (seeding logic moved to provisioner)
@@ -177,7 +177,7 @@ with `build.context: ../../<workspace>` and
 If you were calling the old monolithic architect:
 
 ```python
-architect = AutoArchitect(client=..., environment=..., workspace=...,
+architect = Architect(client=..., environment=..., workspace=...,
                          engineer_factory=..., project_parent="/parent")
 architect.build(problem, project_name)
 ```
@@ -188,10 +188,10 @@ internally. To inject a custom one (e.g. `build_images=False` for tests):
 ```python
 from bizniz.provisioner import Provisioner
 prov = Provisioner(project_parent="/parent", build_images=False)
-architect = AutoArchitect(..., provisioner=prov)
+architect = Architect(..., provisioner=prov)
 ```
 
-The `AutoArchitectSchema` and `SystemArchitecture` no longer require
+The `ArchitectSchema` and `SystemArchitecture` no longer require
 `docker_compose` — keep this in mind if you were poking at architecture
 JSON snapshots from prior runs. The field still exists as optional and
 holds the AI's compose preview (used only in the human-readable

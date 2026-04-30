@@ -1,8 +1,8 @@
 from typing import Optional, List
 from pydantic import BaseModel
 
-from bizniz.autocoder.types import FileChange
-from bizniz.autotester.types import GeneratedTestFile
+from bizniz.agents.coder.types import FileChange
+from bizniz.tester.types import GeneratedTestFile
 
 
 class TestRunResult(BaseModel):
@@ -25,7 +25,7 @@ class OrchestratorResult(BaseModel):
     failure_context: Optional[str] = None  # last failure output for retry strategies
     strategy_used: Optional[str] = None  # "tdd" or "code_first"
     architecture_drift_detected: bool = False
-    drift_files: List[str] = []  # unplanned filepaths changed by the autocoder
+    drift_files: List[str] = []  # unplanned filepaths changed by the coder
 
 
 class OrchestratorStalledError(Exception):

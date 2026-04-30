@@ -58,8 +58,8 @@ Each client wraps its API call and forwards usage to the tracker:
 | `ClaudeClient` | `stream.get_final_message().usage.input_tokens` / `.output_tokens` | every `get_text()` |
 
 The agent name is taken from `client._caller_agent`, which `BaseAIAgent`
-sets to the agent class name in lowercase (`autocoder`, `autotester`,
-`auto_engineer`, `auto_architect`, `agentic_debugger`, …) at construction
+sets to the agent class name in lowercase (`coder`, `tester`,
+`engineer`, `architect`, `agentic_debugger`, …) at construction
 time.
 
 ## Pricing table
@@ -87,10 +87,10 @@ print(summary.format())
 #     gemini-3.1-flash-lite-preview          calls=  3  in=    19,440  out=    20,720  $0.0102
 #     gemini-3.1-pro-preview                 calls=  1  in=    11,000  out=    12,000  $0.1338
 #   by agent:
-#     autocoder                  calls= 22  $0.1402
-#     autotester                 calls= 12  $0.0238
-#     auto_architect             calls=  1  $0.0009
-#     auto_engineer              calls=  7  $0.0183
+#     coder                  calls= 22  $0.1402
+#     tester                 calls= 12  $0.0238
+#     architect             calls=  1  $0.0009
+#     engineer              calls=  7  $0.0183
 
 # Score an arbitrary call
 cost = price_call("gpt-4o", input_tokens=1000, output_tokens=500)
@@ -103,7 +103,7 @@ get_tracker().reset()
 
 ## Run-end summary
 
-`examples/auto_architect.py` prints the `CostSummary` after each end-to-end
+`examples/architect.py` prints the `CostSummary` after each end-to-end
 run. The per-run efficiency docs under `docs/runs/` should include the
 formatted summary so we can compare across runs.
 
@@ -138,7 +138,7 @@ api_calls
 
 ### Lifecycle
 
-`AutoArchitect.build()` opens the job and finishes it for you:
+`Architect.build()` opens the job and finishes it for you:
 
 ```python
 tracker = get_tracker()

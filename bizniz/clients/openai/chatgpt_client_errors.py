@@ -1,2 +1,2 @@
-class AutocoderClientError(Exception):
+class OpenAIClientError(Exception):
     pass

@@ -111,7 +111,7 @@ These names are skipped during copy (`bizniz/architect/skeletons.py:_EXCLUDE_NAM
 
 1. Clone or build the starter repo at `$BIZNIZ_SKELETONS_DIR/<dir-name>`.
 2. Add a `SkeletonInfo(...)` entry to `_SKELETONS` in `bizniz/architect/skeletons.py`.
-3. Add the new name to the `skeleton` enum in `bizniz/architect/prompts/schema.py:AutoArchitectSchema`.
+3. Add the new name to the `skeleton` enum in `bizniz/architect/prompts/schema.py:ArchitectSchema`.
 4. Use `{project_slug}` and `{service_name}` placeholders wherever the skeleton needs project-specific values.
 5. Bump no version, no migration — the architect picks it up immediately.
 

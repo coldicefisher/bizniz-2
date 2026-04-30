@@ -59,7 +59,7 @@ Standalone-mode SQLite database used when no unified `BiznizDB` is configured. T
 - `architecture_snapshots` — full `SystemArchitecture` JSON, versioned, with description.
 - `issue_log` — cross-service issue ledger (which service / which issue title / status / strategy / iterations).
 - `build_log` — `image_build` / `package_install` / `rebuild` events.
-- `drift_events` — files autocoder produced that weren't in the architecture plan.
+- `drift_events` — files coder produced that weren't in the architecture plan.
 
 API includes `save_service`, `update_service_status`, `update_service_image`, `save_architecture_snapshot`, `log_issue`, `update_issue`, `log_build_event`, `log_drift_event`, plus their `get_*` counterparts. Schema details mirror the unified `BiznizDB.services` / `architecture_snapshots` / `issue_log` / `build_log` / `drift_events` tables.
 
@@ -85,12 +85,12 @@ project.db.save_service(
 
 ## Interactions
 
-- **Used by:** `AutoArchitect.build` for the entire project lifecycle.
+- **Used by:** `Architect.build` for the entire project lifecycle.
 - **Calls into:** `LocalWorkspace`, `BiznizDB.for_project(...)` (when unified), `ProjectDB` (when standalone).
 
 ## Gotchas
 
 - **`db` returns different objects depending on `bizniz_db`.** `ProjectScope` and `ProjectDB` both expose the same business methods (`save_service`, `log_issue`, etc) so callers don't care, but type-narrowing IDEs may not see this.
 - **`get_service_workspace` always uses the same naming convention.** `root / service_name`. If you change `service.workspace_name` mid-pipeline, the existing workspace stays orphan.
-- **The architect handles `infra/development/` mirroring.** `Project` itself doesn't write per-service Dockerfiles — `AutoArchitect.build` does that (either by mirroring a skeleton's Dockerfile or by generating one).
+- **The architect handles `infra/development/` mirroring.** `Project` itself doesn't write per-service Dockerfiles — `Architect.build` does that (either by mirroring a skeleton's Dockerfile or by generating one).
 - **`from_name` is the easiest entrypoint.** Direct `Project(root, project_name)` is also fine, but you have to slugify the parent path yourself.

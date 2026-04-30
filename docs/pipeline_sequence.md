@@ -8,19 +8,19 @@ _Last updated: 2026-04-30 UTC_
 Problem Statement
        │
        ▼
-  AutoArchitect          Step 1: Decompose into services (one AI call)
+  Architect          Step 1: Decompose into services (one AI call)
        │
        ▼
   Provisioner            Step 2: Materialize plan on disk + Docker images
        │                  (no AI: skeletons, infra templates, compose, env)
        ▼
-  AutoEngineer           Step 3: Per-service analyze → architecture plan → issues
+  Engineer           Step 3: Per-service analyze → architecture plan → issues
        │                  (three structured AI passes)
        ▼
   Scaffold               Step 4: Deterministic stub files from architecture plan
        │
        ▼
-  Phase 1 framing        Step 5: Cheap-tier autocoder per issue, no tests
+  Phase 1 framing        Step 5: Cheap-tier coder per issue, no tests
        │
        ▼
   Phase 2 escalation     Step 6: One attempt per issue per model in chain,
@@ -37,9 +37,9 @@ Cost tracking and on-disk persistence happen alongside every step — see
 
 ---
 
-## Step 1: AutoArchitect.decompose()
+## Step 1: Architect.decompose()
 
-**File:** `bizniz/architect/auto_architect.py`
+**File:** `bizniz/architect/architect.py`
 
 **Input:** Problem statement (natural language), project name
 
@@ -112,9 +112,9 @@ See [architect_provisioner_split.md](architecture/architect_provisioner_split.md
 
 ---
 
-## Step 3: AutoEngineer.analyze() (per service)
+## Step 3: Engineer.analyze() (per service)
 
-**File:** `bizniz/engineer/auto_engineer.py`
+**File:** `bizniz/engineer/engineer.py`
 
 **Input:** Per-service problem prompt, service framework + language,
 existing architecture snapshot from `ProjectDB`.
@@ -167,10 +167,10 @@ failures.
 
 **File:** `bizniz/engineer/framing.py`
 
-**Input:** Issues in topological order, cheap autocoder
+**Input:** Issues in topological order, cheap coder
 
 For each issue:
-1. Run `Autocoder.generate_multi(test_files=None)` — codegen only, no
+1. Run `Coder.generate_multi(test_files=None)` — codegen only, no
    tests, no Docker.
 2. Write the generated `FileChange`s into the workspace.
 3. Run preflight (auto-stub missing locals, rewrite broken imports).
@@ -184,9 +184,9 @@ code from earlier ones.
 
 ## Step 6: Phase 2 escalation chain
 
-**File:** `bizniz/engineer/auto_engineer.py:run_three_phase`
+**File:** `bizniz/engineer/engineer.py:run_three_phase`
 
-For each model in `autocoder_models[1:]` (the escalation chain after
+For each model in `coder_models[1:]` (the escalation chain after
 the framing tier — typically `gemini-flash`, then `gemini-pro`):
 
 1. Iterate every still-failing issue in topological order.
@@ -238,10 +238,10 @@ Phase 1+2 resolved 8/8 tickets.
        gemini-3.1-flash-lite-preview       calls= 3  $0.0102
        gemini-3.1-pro-preview              calls= 1  $0.1338
      by agent:
-       autocoder         calls=22  $0.1402
-       autotester        calls=12  $0.0238
-       auto_engineer     calls= 7  $0.0183
-       auto_architect    calls= 1  $0.0009
+       coder         calls=22  $0.1402
+       tester        calls=12  $0.0238
+       engineer     calls= 7  $0.0183
+       architect    calls= 1  $0.0009
    ```
 
 4. Failed runs still record cost (so you can see what a failed run
@@ -274,10 +274,10 @@ for row in project.db.cost_by_issue(job_id=...):
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `default_model` | `gemini-flash-lite` | Phase 1 framing tier |
-| `engineer_model` | `gemini-flash` | AutoEngineer's analyze + plan calls |
-| `architect_model` | `gemini-flash` | AutoArchitect.decompose |
-| `autocoder_models` | `[gemini-flash-lite, gemini-flash, gemini-pro]` | Escalation chain (Phase 1 = first; Phase 2 = the rest) |
-| `autotester_models` | same | Test generation escalation |
+| `engineer_model` | `gemini-flash` | Engineer's analyze + plan calls |
+| `architect_model` | `gemini-flash` | Architect.decompose |
+| `coder_models` | `[gemini-flash-lite, gemini-flash, gemini-pro]` | Escalation chain (Phase 1 = first; Phase 2 = the rest) |
+| `tester_models` | same | Test generation escalation |
 | `repair_models` | `[gemini-flash, gemini-pro]` | Stall-escalation chain |
 | `debugger_model` | `gemini-pro` | Phase 3 agentic debugger |
 | `debugger_max_iterations` | 12 | Per-ticket cap in Phase 3 |

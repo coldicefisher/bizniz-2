@@ -7,7 +7,7 @@
 `BiznizConfig` is loaded once at the start of a run from `bizniz.yaml` (the project's), and passed wherever a client or model progression is needed. It centralizes:
 
 - Default + per-role model names (`default_model`, `engineer_model`, `architect_model`).
-- Per-agent escalation progressions (`autocoder_models`, `autotester_models`, `repair_models`).
+- Per-agent escalation progressions (`coder_models`, `tester_models`, `repair_models`).
 - Stall / debug thresholds.
 - Pipeline-mode flags (`layered_generation`, `parallel_services`, `max_service_workers`).
 - API keys and Azure config.
@@ -26,8 +26,8 @@ class BiznizConfig(BaseModel):
     models: List[str] = ["gpt-4o-mini", "gpt-4o", "gpt-5", "claude-sonnet", "claude-opus"]
 
     # Per-agent progression overrides (None means use `models`)
-    autocoder_models:  Optional[List[str]] = None
-    autotester_models: Optional[List[str]] = None
+    coder_models:  Optional[List[str]] = None
+    tester_models: Optional[List[str]] = None
     repair_models:     Optional[List[str]] = None
 
     # Thresholds
@@ -62,7 +62,7 @@ class BiznizConfig(BaseModel):
 | `make_client(model=None)` | `BaseAIClient` | Provider-routed client (Claude / Gemini / OpenAI based on prefix) |
 | `make_engineer_client()` | `BaseAIClient` | Shortcut: `make_client(self.engineer_model)` |
 | `make_model_progression()` | `ModelProgression` | Built from `self.models` |
-| `make_autocoder_progression()` | `ModelProgression` | `autocoder_models` if set, else `models` |
+| `make_autocoder_progression()` | `ModelProgression` | `coder_models` if set, else `models` |
 | `make_autotester_progression()` | `ModelProgression` | same pattern |
 | `make_repair_progression()` | `ModelProgression` | same pattern |
 | `make_db()` | `BiznizDB \| None` | Unified DB; None if neither `database_url` nor `BIZNIZ_DATABASE_URL` is set |
@@ -88,7 +88,7 @@ models:
   - gemini-flash-lite
   - gemini-flash
   - gemini-pro
-autocoder_models:
+coder_models:
   - gemini-flash-lite
   - gemini-flash
   - gemini-pro
@@ -121,7 +121,7 @@ db = cfg.make_db()  # None if no database_url
 ## Interactions
 
 - **Calls into:** `ChatGPTClient`, `ClaudeClient` (lazy import), `GeminiClient` (lazy import), `ModelProgression`, `BiznizDB` (lazy import).
-- **Called by:** application entrypoints + the `AutoArchitect`/`AutoEngineer` factory closures.
+- **Called by:** application entrypoints + the `Architect`/`Engineer` factory closures.
 
 ## Gotchas
 

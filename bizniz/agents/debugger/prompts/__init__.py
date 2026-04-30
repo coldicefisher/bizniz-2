@@ -1,5 +1,5 @@
-from bizniz.agents.debugger.prompts.quick_system_prompt import AUTODEBUGGER_SYSTEM_PROMPT
+from bizniz.agents.debugger.prompts.quick_system_prompt import QUICK_DEBUGGER_SYSTEM_PROMPT
 from bizniz.agents.debugger.prompts.quick_diagnose_prompt import DIAGNOSE_PROMPT_TEMPLATE
-from bizniz.agents.debugger.prompts.quick_schema import AutodebuggerSchema
+from bizniz.agents.debugger.prompts.quick_schema import QuickDebuggerSchema
 from bizniz.agents.debugger.prompts.agentic_system_prompt import AGENTIC_DEBUGGER_SYSTEM_PROMPT
 from bizniz.agents.debugger.prompts.agentic_schema import AgenticDebuggerActionSchema

@@ -58,9 +58,9 @@ class ArchitectResult(BaseModel):
     project_root: Optional[str] = None
 
 
-class AutoArchitectError(Exception):
+class ArchitectError(Exception):
     pass
 
 
-class AutoArchitectBadAIResponseError(AutoArchitectError):
+class ArchitectBadAIResponseError(ArchitectError):
     pass

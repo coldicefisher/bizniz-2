@@ -1,10 +1,10 @@
-"""Unit tests for AutoArchitect.evolve() (mocked AI client)."""
+"""Unit tests for Architect.evolve() (mocked AI client)."""
 import json
 from unittest.mock import MagicMock
 
 import pytest
 
-from bizniz.architect.auto_architect import AutoArchitect
+from bizniz.architect.architect import Architect
 from bizniz.architect.types import ServiceDefinition, SystemArchitecture
 from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.environment.base_environment import BaseExecutionEnvironment
@@ -34,11 +34,11 @@ def workspace(tmp_path):
 
 @pytest.fixture
 def architect(workspace):
-    """Build an AutoArchitect with a default-empty mock client. Tests
+    """Build an Architect with a default-empty mock client. Tests
     set client.get_text.return_value to whatever they need."""
     client = MagicMock(spec=BaseAIClient)
     env = MagicMock(spec=BaseExecutionEnvironment)
-    arch = AutoArchitect(
+    arch = Architect(
         client=client,
         environment=env,
         workspace=workspace,

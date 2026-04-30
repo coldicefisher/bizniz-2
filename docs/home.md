@@ -14,11 +14,11 @@ The pipeline has five levels of agents and one materializer:
 | Component | Role | Has AI? |
 |---|---|---|
 | `Planner` | Decompose project into ordered milestones (user value) | Yes (one call) |
-| `AutoArchitect` | Decompose problem (or milestone) into services + dependencies + ports | Yes (one call) |
+| `Architect` | Decompose problem (or milestone) into services + dependencies + ports | Yes (one call) |
 | `Provisioner` | Materialize the plan: directory tree, skeletons, infra templates, compose, .env, Docker images | No |
-| `AutoEngineer` | Per service: produce issues, architecture plan, dispatch | Yes (multi-pass analysis) |
+| `Engineer` | Per service: produce issues, architecture plan, dispatch | Yes (multi-pass analysis) |
 | `CodingOrchestrator` | Per issue: codegen + tests + repair loop | Yes (per-iteration) |
-| `Autocoder` / `Autotester` / `AgenticDebugger` | Specialized sub-agents the orchestrator dispatches | Yes |
+| `Coder` / `Tester` / `AgenticDebugger` | Specialized sub-agents the orchestrator dispatches | Yes |
 
 A `CostTracker` records every AI call to the project SQLite DB so cross-run
 analysis (per milestone, per issue, per service, per model, per phase) is
@@ -27,10 +27,10 @@ just a SQL query.
 > **Status**: As of 2026-04-30, both the Planner and evolve-mode are
 > wired. Two build paths coexist:
 >
-> - `AutoArchitect.build()` — the original single-shot path: fresh
+> - `Architect.build()` — the original single-shot path: fresh
 >   decompose → provision → engineer dispatch. Best for one-shot or
 >   small projects.
-> - `AutoArchitect.build_with_plan()` — milestone-driven evolve mode:
+> - `Architect.build_with_plan()` — milestone-driven evolve mode:
 >   Planner → for each milestone (Architect.evolve → Provisioner.evolve
 >   → engineer dispatch on changed services). Best for multi-week
 >   projects that ship in chunks.
@@ -53,7 +53,7 @@ just a SQL query.
                           │ (future: per milestone)
                           ▼
                 ┌────────────────────┐
-                │    AutoArchitect   │   plan services — one AI call
+                │    Architect   │   plan services — one AI call
                 │   .decompose()     │   → SystemArchitecture
                 └─────────┬──────────┘
                           │
@@ -68,7 +68,7 @@ just a SQL query.
                           │
                           ▼
                 ┌────────────────────┐
-                │    AutoEngineer    │   per service
+                │    Engineer    │   per service
                 │ .run_three_phase() │   Phase 1 frame → Phase 2 escalate
                 │                    │   → Phase 3 agentic debug
                 └─────────┬──────────┘
@@ -76,7 +76,7 @@ just a SQL query.
         ┌─────────────────┼─────────────────┐
         ▼                 ▼                 ▼
   ┌──────────┐  ┌────────────┐  ┌────────────────┐
-  │ Autocoder│  │ Autotester │  │ AgenticDebugger│
+  │ Coder│  │ Tester │  │ AgenticDebugger│
   │  + tools │  │            │  │ + run_command  │
   │          │  │            │  │ + run_tests    │
   └──────────┘  └────────────┘  └────────────────┘
@@ -119,7 +119,7 @@ Top-tier model (default `gemini-pro`) — one call per project, the
 quality bump is foundational. Persists to `project_plans` +
 `milestones` tables in `ProjectDB`. See [planner.md](architecture/planner.md).
 
-### `AutoArchitect` (`bizniz/architect/auto_architect.py`)
+### `Architect` (`bizniz/architect/architect.py`)
 
 **Pure planning.** One AI call (`decompose`) returns a `SystemArchitecture`
 listing services with name, type, framework, language, port, depends_on,
@@ -154,7 +154,7 @@ See [architect_provisioner_split.md](architecture/architect_provisioner_split.md
 
 Free-port allocation and stale-image cleanup are also handled here.
 
-### `AutoEngineer` (`bizniz/engineer/auto_engineer.py`)
+### `Engineer` (`bizniz/engineer/engineer.py`)
 
 **Per-service planner + dispatcher.** Calls AI for engineering analysis
 (requirements, use cases, issues, architecture plan), runs deterministic
@@ -162,7 +162,7 @@ scaffold to write stub files, then runs the **three-phase strategy**:
 
 - **Phase 1 (frame)** — cheapest model, every issue once with no tests,
   populates the workspace with real baseline code in topological order.
-- **Phase 2 (escalate)** — for each model in `autocoder_models[1:]`,
+- **Phase 2 (escalate)** — for each model in `coder_models[1:]`,
   one attempt per still-failing issue with `max_iterations=2`.
 - **Phase 3 (debug)** — for any remaining failures, the agentic
   debugger on `debugger_model` (default gemini-pro) with full tools
@@ -171,7 +171,7 @@ scaffold to write stub files, then runs the **three-phase strategy**:
 
 ### `CodingOrchestrator` (`bizniz/orchestrator/coding_orchestrator.py`)
 
-**Per-issue test/repair loop.** Coordinates Autocoder + Autotester +
+**Per-issue test/repair loop.** Coordinates Coder + Tester +
 optional AgenticDebugger inside a Docker test environment. Handles:
 - Model escalation on stalls
 - Stall recovery cycles (regenerate tests → flip strategy → full regen)
@@ -198,9 +198,9 @@ to `ProjectDB` as `jobs` + `api_calls` rows tagged with
 1. **Architect.decompose** → one AI call → `SystemArchitecture`
 2. **Provisioner.provision** → no AI → project on disk + Docker images
 3. **For each service** (in dependency order):
-   a. **AutoEngineer.analyze** → 3-pass AI: rough → plan → refined issues
+   a. **Engineer.analyze** → 3-pass AI: rough → plan → refined issues
    b. **Scaffold** → deterministic stub files
-   c. **Phase 1: frame_issues()** → cheap-tier autocoder per issue, no tests
+   c. **Phase 1: frame_issues()** → cheap-tier coder per issue, no tests
    d. **Phase 2: escalation chain** → one attempt per issue per model tier
    e. **Phase 3: agentic debug** → top tier with full tools (only if needed)
 4. **Per issue, per phase, per model** — every call landed in `api_calls`

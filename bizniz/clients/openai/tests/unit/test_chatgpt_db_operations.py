@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import MagicMock
 
 
-from bizniz.clients.openai.chatgpt_client import ChatGPTClient, ChatGPTClientConfig, AutocoderClientError
+from bizniz.clients.openai.chatgpt_client import ChatGPTClient, ChatGPTClientConfig, OpenAIClientError
 from bizniz.clients.openai.messages import Message, MessageList
 from bizniz.clients.openai.types.roles import Role
 from bizniz.clients.openai.errors import OpenAIAuthError

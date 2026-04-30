@@ -36,9 +36,9 @@ class LanguageStrategy(ABC):
     def strip_extension(self, filepath) -> str
     def scan_imports(self, files: dict) -> Set[str]
     def filter_third_party(self, imports, workspace_modules) -> Set[str]
-    def get_autocoder_system_prompt(self, evaluation_environment="") -> str
-    def get_autotester_system_prompt(self) -> str
-    def get_autotester_user_prompt(self) -> str
+    def get_coder_system_prompt(self, evaluation_environment="") -> str
+    def get_tester_system_prompt(self) -> str
+    def get_tester_user_prompt(self) -> str
     def is_stdlib(self, module_name) -> bool
     def detect_project_file(self, workspace) -> bool
     def get_installed_packages(self, workspace) -> str
@@ -58,9 +58,9 @@ class LanguageStrategy(ABC):
 | `detect_project_file(ws)` | `ws.exists("pyproject.toml")` or `setup.py` |
 | `get_installed_packages(ws)` | reads `requirements.txt` if present, else returns the dependencies block from `pyproject.toml` |
 
-`get_autocoder_system_prompt` returns the Python autocoder prompt template — emphasizing absolute imports, modifying stub files (not creating new ones), and exporting via `__init__.py`. The template has a `{evaluation_environment}` placeholder that the orchestrator fills with the env's `describe()` output.
+`get_coder_system_prompt` returns the Python coder prompt template — emphasizing absolute imports, modifying stub files (not creating new ones), and exporting via `__init__.py`. The template has a `{evaluation_environment}` placeholder that the orchestrator fills with the env's `describe()` output.
 
-`get_autotester_system_prompt` returns the pytest-flavored test-writing prompt.
+`get_tester_system_prompt` returns the pytest-flavored test-writing prompt.
 
 ## `TypeScriptStrategy`
 
@@ -108,7 +108,7 @@ strat.strip_extension("src/tests/foo.test.ts")  # "src/tests/foo"
 
 ## Interactions
 
-- **Used by:** `CodingOrchestrator` for everything language-conditional. `Autocoder.generate_multi` and `Autotester.generate_multi` also pull system prompts via the language strategy.
+- **Used by:** `CodingOrchestrator` for everything language-conditional. `Coder.generate_multi` and `Tester.generate_multi` also pull system prompts via the language strategy.
 - **Calls into:** `bizniz.tools.discovery_prompt.DISCOVERY_TOOLS_PROMPT` (appended to system prompts).
 
 ## Gotchas
@@ -117,4 +117,4 @@ strat.strip_extension("src/tests/foo.test.ts")  # "src/tests/foo"
 - **`language_prefix` is purely cosmetic.** It's prepended to some prompts so the model knows what language we're in. The actual behavior is determined by the system prompt and test command.
 - **`is_test_file` is conservative.** A test in `src/util.test.ts` is a test, but `src/test_util.ts` (singular, no underscore prefix) is treated as source. Adjust your service's conventions accordingly.
 - **`get_installed_packages` is a flat string.** It's injected into the orchestrator's prompt as installed-package context. It doesn't try to lock or reconcile versions.
-- **The orchestrator overrides system prompts via `set_system_prompt_override(...)`.** That overrides whatever the autocoder/autotester would default to. The strategy's `get_autocoder_system_prompt` is the source of truth for non-Python languages.
+- **The orchestrator overrides system prompts via `set_system_prompt_override(...)`.** That overrides whatever the coder/tester would default to. The strategy's `get_coder_system_prompt` is the source of truth for non-Python languages.

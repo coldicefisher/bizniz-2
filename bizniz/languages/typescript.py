@@ -17,7 +17,7 @@ _NODE_BUILTINS = {
 }
 
 
-_AUTOCODER_SYSTEM_PROMPT = """You are an expert TypeScript/React programmer. Your job is to IMPLEMENT stub files AND write Jest tests.
+_CODER_SYSTEM_PROMPT = """You are an expert TypeScript/React programmer. Your job is to IMPLEMENT stub files AND write Jest tests.
 
 WORKFLOW:
 1. Read the target stub files (they already exist with interface/class skeletons).
@@ -47,7 +47,7 @@ EVALUATION ENVIRONMENT
 """ + DISCOVERY_TOOLS_PROMPT
 
 
-_AUTOTESTER_SYSTEM_PROMPT = """You write Jest test suites for TypeScript/React projects.
+_TESTER_SYSTEM_PROMPT = """You write Jest test suites for TypeScript/React projects.
 
 RULES:
 - Test stub files already exist with correct imports and a placeholder test. REPLACE the
@@ -63,7 +63,7 @@ RULES:
 """ + DISCOVERY_TOOLS_PROMPT
 
 
-_AUTOTESTER_USER_PROMPT = """Write Jest tests for this TypeScript project.
+_TESTER_USER_PROMPT = """Write Jest tests for this TypeScript project.
 
 ISSUE:
 {problem_statement}
@@ -145,14 +145,14 @@ class TypeScriptStrategy(LanguageStrategy):
             and pkg not in workspace_modules
         }
 
-    def get_autocoder_system_prompt(self, evaluation_environment: str = "") -> str:
-        return _AUTOCODER_SYSTEM_PROMPT.format(evaluation_environment=evaluation_environment)
+    def get_coder_system_prompt(self, evaluation_environment: str = "") -> str:
+        return _CODER_SYSTEM_PROMPT.format(evaluation_environment=evaluation_environment)
 
-    def get_autotester_system_prompt(self) -> str:
-        return _AUTOTESTER_SYSTEM_PROMPT
+    def get_tester_system_prompt(self) -> str:
+        return _TESTER_SYSTEM_PROMPT
 
-    def get_autotester_user_prompt(self) -> str:
-        return _AUTOTESTER_USER_PROMPT
+    def get_tester_user_prompt(self) -> str:
+        return _TESTER_USER_PROMPT
 
     def is_stdlib(self, module_name: str) -> bool:
         return module_name in _NODE_BUILTINS

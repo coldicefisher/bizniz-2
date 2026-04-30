@@ -1,16 +1,16 @@
 # Engineer Internals
 
-`bizniz/engineer/`. Helpers below `AutoEngineer` (which is documented at [agents/auto_engineer.md](../agents/auto_engineer.md)).
+`bizniz/engineer/`. Helpers below `Engineer` (which is documented at [agents/engineer.md](../agents/engineer.md)).
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `auto_engineer.py` | The `AutoEngineer` class itself |
+| `engineer.py` | The `Engineer` class itself |
 | `dependency_graph.py` | Topo-sort issues into dependency layers |
 | `scaffold.py` | Deterministic stub generation from an `ArchitecturePlan` |
 | `types.py` | Pydantic types: `EngineeringIssue`, `ArchitecturePlan`, `DependencyLayer`, etc. |
-| `prompts/` | All AutoEngineer prompts and schemas |
+| `prompts/` | All Engineer prompts and schemas |
 
 ## `dependency_graph.py`
 
@@ -39,7 +39,7 @@ except CyclicDependencyError:
 
 ## `scaffold.py`
 
-Deterministic — no AI calls. Runs between `analyze()` and `run_layered()` to ensure every file in the dependency graph exists with valid imports BEFORE the autocoder/autotester touch anything. The autocoder then MODIFIES these stubs instead of creating from scratch, eliminating import-chain failures.
+Deterministic — no AI calls. Runs between `analyze()` and `run_layered()` to ensure every file in the dependency graph exists with valid imports BEFORE the coder/tester touch anything. The coder then MODIFIES these stubs instead of creating from scratch, eliminating import-chain failures.
 
 | Function | Purpose |
 |----------|---------|
@@ -166,8 +166,8 @@ class GovernanceDecision(BaseModel):
 ### Errors
 
 ```python
-class AutoEngineerError(Exception): ...
-class AutoEngineerBadAIResponseError(AutoEngineerError): ...
+class EngineerError(Exception): ...
+class EngineerBadAIResponseError(EngineerError): ...
 ```
 
 ## Prompts
@@ -176,16 +176,16 @@ class AutoEngineerBadAIResponseError(AutoEngineerError): ...
 
 | File | Purpose |
 |------|---------|
-| `system_prompt.py` | `AUTO_ENGINEER_SYSTEM_PROMPT` + `get_engineer_system_prompt(language)` |
+| `system_prompt.py` | `ENGINEER_SYSTEM_PROMPT` + `get_engineer_system_prompt(language)` |
 | `analyze_prompt.py` | `ANALYZE_PROMPT_TEMPLATE` + `get_analyze_prompt(language)` |
 | `plan_prompt.py` | `ARCHITECTURE_PLAN_PROMPT_TEMPLATE` + `get_architecture_plan_prompt(language)` |
 | `governance_prompt.py` | `GOVERNANCE_PROMPT_TEMPLATE` for drift review |
 | `retry_prompts.py` | `REPROMPT_TEMPLATE`, `SCOPE_REDUCTION_TEMPLATE` |
-| `schema.py` | `AutoEngineerSchema`, `ArchitecturePlanSchema`, `ArchitectureGovernanceSchema` (see [reference/schemas.md](../reference/schemas.md)) |
+| `schema.py` | `EngineerSchema`, `ArchitecturePlanSchema`, `ArchitectureGovernanceSchema` (see [reference/schemas.md](../reference/schemas.md)) |
 
 ## Interactions
 
-- **Used by:** `AutoEngineer` (everywhere).
+- **Used by:** `Engineer` (everywhere).
 - **Calls into:** `BaseWorkspace.write_file/read_file`, the workspace DB, the AI client.
 
 ## Gotchas
@@ -195,4 +195,4 @@ class AutoEngineerBadAIResponseError(AutoEngineerError): ...
 - **Pydantic detection in `_generate_domain_model_stub` is heuristic.** It looks for `BaseModel` in any `import_symbols` of an edge sourced from the model's filepath. If your model uses Pydantic but doesn't import it explicitly in the plan's dependencies, you'll get a plain class.
 - **`resolve_dependencies` uses titles, not slugs.** If two issues have similar (but not identical) titles, `depends_on_titles` may not resolve. The LLM is asked to use exact titles, but mistakes happen — the engineer's `_dispatch_layer` falls back to running all issues if topo sort can't proceed.
 - **`DependencyLayer.layer_index` is the topological depth.** Layer 0 = no inter-dependencies. Each subsequent layer depends on issues completed in earlier layers.
-- **`scaffold_from_plan` flips actions.** Files it writes get their `action: "create"` flipped to `"modify"` in the issue's `target_files`. The autocoder's prompt template then says "you are MODIFYING existing stub files."
+- **`scaffold_from_plan` flips actions.** Files it writes get their `action: "create"` flipped to `"modify"` in the issue's `target_files`. The coder's prompt template then says "you are MODIFYING existing stub files."

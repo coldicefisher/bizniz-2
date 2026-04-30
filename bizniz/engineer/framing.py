@@ -12,7 +12,7 @@ contain real working code instead of empty scaffold stubs, so:
     glue mismatched files together.
 
 This is the "quick pass" that ``examples/codegen_blast.py`` uses standalone;
-this module is the engineer-side port called by ``AutoEngineer.run_layered``.
+this module is the engineer-side port called by ``Engineer.run_layered``.
 """
 from __future__ import annotations
 
@@ -23,12 +23,12 @@ from bizniz.preflight.registry import get_validator
 from bizniz.workspace.base_workspace import BaseWorkspace
 
 if TYPE_CHECKING:
-    from bizniz.agents.autocoder.autocoder import Autocoder
+    from bizniz.agents.coder.coder import Coder
 
 
 def frame_issues(
     issues_topo: List[EngineeringIssue],
-    autocoder: "Autocoder",
+    coder: "Coder",
     workspace: BaseWorkspace,
     architecture_context: str,
     on_status_message: Optional[Callable[[str], None]] = None,
@@ -42,21 +42,21 @@ def frame_issues(
     is consistent with what the next issue will see.
 
     Returns a dict of ``issue.db_id -> success`` (True if framed without
-    raising; False if the autocoder failed for that issue).
+    raising; False if the coder failed for that issue).
     """
 
     def log(msg: str) -> None:
         if on_status_message:
             on_status_message(msg)
 
-    log(f"AutoEngineer: Phase 1 framing — {len(issues_topo)} issue(s)...")
+    log(f"Engineer: Phase 1 framing — {len(issues_topo)} issue(s)...")
 
     results: Dict[int, bool] = {}
     validator = get_validator(language, workspace)
 
     for idx, issue in enumerate(issues_topo, 1):
         title_label = issue.title or f"issue #{issue.db_id}"
-        log(f"AutoEngineer: framing [{idx}/{len(issues_topo)}] {title_label}")
+        log(f"Engineer: framing [{idx}/{len(issues_topo)}] {title_label}")
 
         problem = issue.description or ""
         if issue.test_setup_hint:
@@ -68,7 +68,7 @@ def frame_issues(
         ]
 
         try:
-            result = autocoder.generate_multi(
+            result = coder.generate_multi(
                 issue_description=problem,
                 target_files=target_files,
                 architecture_context=architecture_context,
@@ -76,7 +76,7 @@ def frame_issues(
                 on_status_message=on_status_message,
             )
         except Exception as e:
-            log(f"AutoEngineer: framing failed for {title_label}: {type(e).__name__}: {e}")
+            log(f"Engineer: framing failed for {title_label}: {type(e).__name__}: {e}")
             results[issue.db_id] = False
             continue
 
@@ -100,13 +100,13 @@ def frame_issues(
                             )
             except Exception as e:
                 # Preflight failure is non-fatal; the test loop will catch issues.
-                log(f"AutoEngineer: preflight after framing skipped ({type(e).__name__}: {e})")
+                log(f"Engineer: preflight after framing skipped ({type(e).__name__}: {e})")
 
         results[issue.db_id] = True
-        log(f"AutoEngineer: framed {title_label} — {len(generated)} file(s)")
+        log(f"Engineer: framed {title_label} — {len(generated)} file(s)")
 
     framed_ok = sum(1 for ok in results.values() if ok)
-    log(f"AutoEngineer: Phase 1 framing complete — {framed_ok}/{len(issues_topo)} OK")
+    log(f"Engineer: Phase 1 framing complete — {framed_ok}/{len(issues_topo)} OK")
     return results
 
 

@@ -34,10 +34,10 @@ class BiznizConfig(BaseModel):
         "claude-sonnet", "claude-opus",
     ]
     # Per-agent model progressions (override `models` when set)
-    autocoder_models: Optional[List[str]] = None
-    autotester_models: Optional[List[str]] = None
+    coder_models: Optional[List[str]] = None
+    tester_models: Optional[List[str]] = None
     repair_models: Optional[List[str]] = None
-    # Three-phase strategy (used when AutoEngineer.run_three_phase is dispatched):
+    # Three-phase strategy (used when Engineer.run_three_phase is dispatched):
     #   debugger_model           — top-tier model for Phase 3 agentic debugging
     #                              (full context + discovery tools + run_command + run_tests)
     #   debugger_max_iterations  — per-ticket cap for the agentic debugger
@@ -105,12 +105,12 @@ class BiznizConfig(BaseModel):
         return ModelProgression(models=self.models)
 
     def make_autocoder_progression(self) -> ModelProgression:
-        """Model progression for code generation (autocoder)."""
-        return ModelProgression(models=self.autocoder_models or self.models)
+        """Model progression for code generation (coder)."""
+        return ModelProgression(models=self.coder_models or self.models)
 
     def make_autotester_progression(self) -> ModelProgression:
-        """Model progression for test generation (autotester)."""
-        return ModelProgression(models=self.autotester_models or self.models)
+        """Model progression for test generation (tester)."""
+        return ModelProgression(models=self.tester_models or self.models)
 
     def make_repair_progression(self) -> ModelProgression:
         """Model progression for code repair."""
