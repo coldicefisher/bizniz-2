@@ -24,11 +24,19 @@ A `CostTracker` records every AI call to the project SQLite DB so cross-run
 analysis (per milestone, per issue, per service, per model, per phase) is
 just a SQL query.
 
-> **Status**: the Planner exists as of 2026-04-30 but is not yet wired
-> into `architect.build()`. The current build loop decomposes from the
-> full problem statement directly. Multi-week evolve-mode (Planner →
-> per-milestone Architect.evolve → Provisioner.evolve) is the next
-> branch. See [planner.md](architecture/planner.md).
+> **Status**: As of 2026-04-30, both the Planner and evolve-mode are
+> wired. Two build paths coexist:
+>
+> - `AutoArchitect.build()` — the original single-shot path: fresh
+>   decompose → provision → engineer dispatch. Best for one-shot or
+>   small projects.
+> - `AutoArchitect.build_with_plan()` — milestone-driven evolve mode:
+>   Planner → for each milestone (Architect.evolve → Provisioner.evolve
+>   → engineer dispatch on changed services). Best for multi-week
+>   projects that ship in chunks.
+>
+> See [planner.md](architecture/planner.md) and
+> [evolve_mode.md](architecture/evolve_mode.md).
 
 ---
 
@@ -220,6 +228,7 @@ multi-project deployments but is opt-in.
 
 - [Pipeline sequence](pipeline_sequence.md) — step-by-step flow
 - [Planner](architecture/planner.md) — milestone sequencing
+- [Evolve mode](architecture/evolve_mode.md) — milestone-driven incremental builds
 - [Architect/Provisioner split](architecture/architect_provisioner_split.md)
 - [Skeleton seeding](architecture/skeleton_seeding.md)
 - [Cost tracking](architecture/cost_tracking.md)

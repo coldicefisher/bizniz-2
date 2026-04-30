@@ -143,12 +143,512 @@ class AutoArchitect(BaseAIAgent):
             description=raw["description"],
         )
 
+        # Fresh decompose: every service is "new" by definition.
+        for svc in architecture.services:
+            svc.evolve_state = "new"
+
         log(
             f"AutoArchitect: architecture designed — "
             f"{len(architecture.services)} services: "
             f"{', '.join(s.name for s in architecture.services)}"
         )
         return architecture
+
+    def evolve(
+        self,
+        milestone,
+        existing_architecture: SystemArchitecture,
+        problem_statement: str,
+        project_name: str,
+    ) -> SystemArchitecture:
+        """
+        Re-decompose a project for one milestone, preserving services that
+        already exist.
+
+        Parameters
+        ----------
+        milestone:
+            The Milestone to deliver. Provides ``problem_slice``,
+            ``use_cases``, ``success_criteria``, ``estimated_effort``.
+        existing_architecture:
+            The architecture as of before this milestone (services from
+            prior milestones plus any infra). All of its services will
+            appear in the returned architecture, tagged ``unchanged`` or
+            ``extended``.
+        problem_statement:
+            The full project's problem statement (the milestone's slice
+            references it).
+        project_name:
+            Human-readable project name.
+
+        Returns
+        -------
+        ``SystemArchitecture`` whose ``services`` list is a superset of
+        ``existing_architecture.services``: every existing service kept,
+        plus any new services the milestone adds. Each service has
+        ``evolve_state`` set.
+        """
+        from bizniz.architect.prompts.evolve_prompt import build_evolve_prompt
+        from bizniz.architect.prompts.evolve_schema import EvolveArchitectSchema
+
+        def log(msg: str) -> None:
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        project_slug = slugify(project_name)
+
+        existing_services_block = self._format_existing_services(existing_architecture)
+        use_cases_block = "\n".join(
+            f"    - {uc}" for uc in (milestone.use_cases or [])
+        ) or "    (none specified)"
+        success_block = "\n".join(
+            f"    - {sc}" for sc in (milestone.success_criteria or [])
+        ) or "    (none specified)"
+
+        log(
+            f"AutoArchitect: evolving '{project_name}' for milestone "
+            f"'{milestone.name}'..."
+        )
+
+        user_prompt = build_evolve_prompt(
+            project_name=project_name,
+            project_slug=project_slug,
+            problem_statement=problem_statement,
+            existing_services=existing_services_block,
+            milestone_name=milestone.name,
+            milestone_effort=milestone.estimated_effort or "",
+            milestone_problem_slice=milestone.problem_slice,
+            use_cases_block=use_cases_block,
+            success_criteria_block=success_block,
+        )
+
+        raw = self._call_ai_for_evolve(user_prompt, EvolveArchitectSchema)
+
+        existing_by_name = {s.name: s for s in existing_architecture.services}
+        services: List[ServiceDefinition] = []
+        for svc_raw in raw.get("services", []):
+            state = svc_raw.get("evolve_state") or "unchanged"
+            name = svc_raw["name"]
+            # Preserve identity of existing services. The AI is told to
+            # echo them back unchanged or extended; trust ID-bearing
+            # fields from the existing architecture rather than
+            # whatever the AI returns.
+            if name in existing_by_name:
+                prior = existing_by_name[name]
+                # Keep the prior service's image_name (set after the
+                # original build); allow new requirements/depends_on
+                # to merge in via "extended".
+                merged = ServiceDefinition(
+                    name=name,
+                    service_type=prior.service_type,
+                    framework=prior.framework,
+                    language=prior.language,
+                    description=svc_raw.get("description") or prior.description,
+                    workspace_name=prior.workspace_name,
+                    port=prior.port,
+                    depends_on=list(svc_raw.get("depends_on") or prior.depends_on),
+                    requirements=list(
+                        dict.fromkeys(
+                            list(prior.requirements or [])
+                            + list(svc_raw.get("requirements") or [])
+                        )
+                    ),
+                    skeleton=prior.skeleton,
+                    image_name=prior.image_name,
+                    evolve_state=state if state in ("extended", "unchanged") else "unchanged",
+                )
+                services.append(merged)
+            else:
+                # Brand-new service.
+                fresh = ServiceDefinition(
+                    name=name,
+                    service_type=svc_raw["service_type"],
+                    framework=svc_raw["framework"],
+                    language=svc_raw["language"],
+                    description=svc_raw["description"],
+                    workspace_name=svc_raw["workspace_name"],
+                    port=svc_raw.get("port"),
+                    depends_on=list(svc_raw.get("depends_on") or []),
+                    requirements=list(svc_raw.get("requirements") or []),
+                    skeleton=svc_raw.get("skeleton") or "none",
+                    evolve_state="new",
+                )
+                services.append(fresh)
+
+        # If the AI dropped a previously-existing service (it shouldn't,
+        # but defend anyway), put it back as "unchanged".
+        returned_names = {s.name for s in services}
+        for prior in existing_architecture.services:
+            if prior.name not in returned_names:
+                clone = prior.copy(deep=True) if hasattr(prior, "copy") else prior
+                clone.evolve_state = "unchanged"
+                services.append(clone)
+                log(
+                    f"AutoArchitect: evolve dropped service '{prior.name}' — "
+                    f"restoring as unchanged"
+                )
+
+        evolved = SystemArchitecture(
+            project_name=raw.get("project_name") or project_name,
+            project_slug=raw.get("project_slug") or project_slug,
+            services=services,
+            docker_compose=None,
+            description=raw.get("description") or existing_architecture.description,
+        )
+
+        new_count = sum(1 for s in evolved.services if s.evolve_state == "new")
+        ext_count = sum(1 for s in evolved.services if s.evolve_state == "extended")
+        log(
+            f"AutoArchitect: milestone '{milestone.name}' → "
+            f"{new_count} new + {ext_count} extended service(s) "
+            f"(total {len(evolved.services)})"
+        )
+        return evolved
+
+    @staticmethod
+    def _format_existing_services(arch: SystemArchitecture) -> str:
+        if not arch.services:
+            return "  (none — fresh project)"
+        lines = []
+        for s in arch.services:
+            depends = ", ".join(s.depends_on) if s.depends_on else "(none)"
+            lines.append(
+                f"  - {s.name}: type={s.service_type}, framework={s.framework}, "
+                f"language={s.language}, port={s.port}, "
+                f"skeleton={s.skeleton}, depends_on=[{depends}]"
+            )
+        return "\n".join(lines)
+
+    def _call_ai_for_evolve(self, user_prompt: str, schema: dict) -> dict:
+        """Single AI call for evolve(). Mirrors _call_ai_for_decomposition."""
+        attempts = self.max_retries
+        last_error = None
+
+        def log(msg: str) -> None:
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        self.clear_message_history()
+        self.add_messages_to_history([Message(role="user", content=user_prompt)])
+
+        for attempt in range(1, attempts + 1):
+            try:
+                log(f"AutoArchitect: evolve AI call (attempt {attempt}/{attempts})...")
+                t0 = time.time()
+                text, _, output_messages = self._client.get_text(
+                    messages=self.message_history,
+                    response_format=ResponseFormat.JSON_SCHEMA,
+                    schema=schema,
+                )
+                elapsed = time.time() - t0
+                log(f"AutoArchitect: evolve AI responded in {elapsed:.1f}s ({len(text or '')} chars)")
+                self.add_messages_to_history(output_messages)
+                if not text or not text.strip():
+                    last_error = "Empty response from AI"
+                    continue
+                text = self.clean_llm_json(text)
+                return json.loads(text)
+            except AIInsufficientFunds:
+                raise
+            except Exception as e:
+                last_error = e
+                log(f"AutoArchitect: evolve attempt {attempt} failed — {type(e).__name__}: {e}")
+                continue
+
+        raise AutoArchitectBadAIResponseError(
+            f"AI failed to produce an evolved architecture after {attempts} attempts. "
+            f"Last error: {last_error}"
+        )
+
+    # ── Director loop: Planner → Architect.evolve → Provisioner.evolve ─────
+
+    def build_with_plan(
+        self,
+        problem_statement: str,
+        project_name: str,
+        planner=None,
+        plan=None,
+        parallel: bool = False,
+        max_workers: int = 4,
+        layered: bool = True,
+        continue_on_failure: bool = False,
+    ):
+        """
+        End-to-end milestone-driven build.
+
+        Flow per project:
+          1. Planner.plan(problem) → ProjectPlan with N milestones
+          2. For each milestone in sequence_index order:
+              a. Mark milestone in_progress
+              b. tracker.set_milestone(milestone.db_id)
+              c. Architect.evolve(milestone, current_architecture)
+              d. Provisioner.evolve(evolved_architecture)
+              e. Engineer dispatch on services flagged NEW or EXTENDED
+              f. Mark milestone completed (or failed → stop, unless
+                 continue_on_failure=True)
+          3. Finalize job with rolled-up cost
+
+        Parameters
+        ----------
+        planner:
+            Optional pre-built Planner. If None, one is constructed from
+            ``self._client`` (or a fresh client at the planner tier when
+            available via the provisioner's parent).
+        plan:
+            Optional pre-computed ``ProjectPlan``. Skips the planner call.
+        parallel / max_workers / layered:
+            Forwarded to the engineer dispatch call (only relevant for
+            services within a single milestone).
+        continue_on_failure:
+            If True, a failed milestone is marked failed but the next
+            milestone still runs. Default False (stop at first failure).
+
+        Returns
+        -------
+        A list of ``ArchitectResult``-like records, one per milestone.
+        """
+        from bizniz.architect.types import ArchitectResult
+        from bizniz.cost import get_tracker
+        from bizniz.planner import Planner
+        from bizniz.project.project import Project
+        from bizniz.provisioner import Provisioner
+        from bizniz.workspace.local_workspace import LocalWorkspace
+
+        def log(msg: str) -> None:
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        tracker = get_tracker()
+        provisional_slug = slugify(project_name)
+        job_id = tracker.start_job(
+            project_slug=provisional_slug,
+            problem_statement=problem_statement,
+        )
+        log(f"AutoArchitect: build_with_plan opened cost job {job_id[:8]}…")
+        job_status = "succeeded"
+
+        provisioner = self._provisioner or Provisioner(
+            project_parent=(
+                Path(self._project_parent) if self._project_parent
+                else self._workspace.root.parent
+            ),
+            on_status_message=self._on_status_message,
+        )
+
+        # Pre-flight: project root exists so we can attach the project DB
+        # before the Planner runs (so plan + milestones land durably).
+        parent = Path(self._project_parent) if self._project_parent else self._workspace.root.parent
+        project = Project(root=parent / provisional_slug, project_name=project_name)
+        project.create_structure()
+        try:
+            tracker.attach_project_db(project.db)
+            project.db.start_job(
+                job_id=job_id,
+                project_slug=provisional_slug,
+                problem_statement=problem_statement,
+            )
+        except Exception as e:
+            log(f"AutoArchitect: cost tracker DB attach failed ({e})")
+
+        results = []
+        try:
+            # Step 1: Plan (or use pre-supplied plan)
+            if plan is None:
+                tracker.set_phase("planner.plan")
+                planner = planner or self._build_default_planner()
+                plan = planner.plan(
+                    problem_statement=problem_statement,
+                    project_name=project_name,
+                    project_db=project.db,
+                )
+                tracker.set_phase(None)
+            log(f"AutoArchitect: walking {len(plan.milestones)} milestone(s)")
+
+            # Walk milestones in sequence order (Planner ensures this is
+            # a valid topological order over depends_on_names)
+            current_architecture = SystemArchitecture(
+                project_name=project_name,
+                project_slug=provisional_slug,
+                services=[],
+                description="",
+            )
+
+            for milestone in sorted(plan.milestones, key=lambda m: m.sequence_index):
+                m_label = f"#{milestone.sequence_index} '{milestone.name}'"
+                log(f"AutoArchitect: ── milestone {m_label} ──")
+
+                if milestone.db_id is not None:
+                    project.db.update_milestone_status(milestone.db_id, "in_progress")
+                    tracker.set_milestone(milestone.db_id)
+                tracker.set_phase("architect.evolve")
+
+                try:
+                    # Step 2a: evolve architecture for this milestone
+                    evolved_arch = self.evolve(
+                        milestone=milestone,
+                        existing_architecture=current_architecture,
+                        problem_statement=problem_statement,
+                        project_name=project_name,
+                    )
+                    new_count = sum(1 for s in evolved_arch.services if s.evolve_state == "new")
+                    ext_count = sum(1 for s in evolved_arch.services if s.evolve_state == "extended")
+
+                    # Step 2b: provision (idempotent)
+                    tracker.set_phase("provisioner.evolve")
+                    provision_result = provisioner.evolve(evolved_arch, project_name)
+
+                    # Stamp image_name from provision back onto the arch
+                    ps_by_name = {ps.name: ps for ps in provision_result.services}
+                    for s in evolved_arch.services:
+                        ps = ps_by_name.get(s.name)
+                        if ps and ps.image_name:
+                            s.image_name = ps.image_name
+
+                    # Step 2c: engineer dispatch on changed services only
+                    changed_services = [
+                        s for s in evolved_arch.services
+                        if s.evolve_state in ("new", "extended")
+                        and s.service_type in {"backend", "frontend", "worker"}
+                    ]
+                    if not changed_services:
+                        log(f"AutoArchitect: milestone {m_label} added no app services — skipping engineer dispatch")
+                        m_results = []
+                    else:
+                        log(
+                            f"AutoArchitect: dispatching engineers for "
+                            f"{len(changed_services)} changed service(s): "
+                            f"{', '.join(s.name for s in changed_services)}"
+                        )
+                        m_results = self._dispatch_engineers_for_milestone(
+                            milestone=milestone,
+                            changed_services=changed_services,
+                            architecture=evolved_arch,
+                            problem_statement=problem_statement,
+                            project=project,
+                            parallel=parallel,
+                            max_workers=max_workers,
+                            layered=layered,
+                        )
+
+                    milestone_succeeded = all(
+                        getattr(r, "success", False) for r in m_results
+                    ) if m_results else True
+
+                    if milestone_succeeded:
+                        if milestone.db_id is not None:
+                            project.db.update_milestone_status(milestone.db_id, "completed")
+                        log(f"AutoArchitect: milestone {m_label} ✓ completed (new={new_count}, extended={ext_count})")
+                    else:
+                        log(f"AutoArchitect: milestone {m_label} ✗ failed (some services didn't pass)")
+                        try:
+                            project.db.log_build_event(
+                                "_milestone_", "image_build", False,
+                                f"Milestone {milestone.name} failed",
+                            )
+                        except Exception:
+                            pass
+                        if not continue_on_failure:
+                            job_status = "failed"
+                            results.append(ArchitectResult(
+                                project_name=project_name,
+                                architecture=evolved_arch,
+                                service_results=list(m_results),
+                                project_root=str(project.root),
+                            ))
+                            break
+
+                    # Update current_architecture so the next milestone's
+                    # evolve sees what's there now.
+                    current_architecture = evolved_arch
+
+                    results.append(ArchitectResult(
+                        project_name=project_name,
+                        architecture=evolved_arch,
+                        service_results=list(m_results),
+                        project_root=str(project.root),
+                    ))
+
+                except AIInsufficientFunds:
+                    raise
+                except Exception as e:
+                    log(f"AutoArchitect: milestone {m_label} crashed: {type(e).__name__}: {e}")
+                    job_status = "failed"
+                    if not continue_on_failure:
+                        raise
+                finally:
+                    tracker.set_milestone(None)
+                    tracker.set_phase(None)
+
+            # Persist final-state architecture docs
+            _save_architecture_docs(project.root, current_architecture)
+            return results
+
+        finally:
+            try:
+                tracker.finish_job(status=job_status)
+                summary = tracker.summary()
+                log(
+                    f"AutoArchitect: build_with_plan {job_status} — "
+                    f"calls={summary.calls} cost=${summary.total_cost:.4f}"
+                )
+            except Exception as e:
+                log(f"AutoArchitect: cost job finish failed ({e})")
+
+    def _build_default_planner(self):
+        """Construct a Planner using the architect's own client. Used as
+        a fallback when build_with_plan() is called without one."""
+        from bizniz.planner import Planner
+        return Planner(
+            client=self._client,
+            environment=self._environment,
+            workspace=self._workspace,
+            on_status_message=self._on_status_message,
+        )
+
+    def _dispatch_engineers_for_milestone(
+        self,
+        milestone,
+        changed_services,
+        architecture: SystemArchitecture,
+        problem_statement: str,
+        project,
+        parallel: bool,
+        max_workers: int,
+        layered: bool,
+    ):
+        """Same as the layered/parallel dispatch in ``build()``, but
+        scoped to ``changed_services`` (only NEW or EXTENDED services
+        for the current milestone). Engineers analyze using the
+        milestone's ``problem_slice`` so issue lists stay milestone-scoped.
+        """
+        log = self._on_status_message or (lambda _msg: None)
+
+        from bizniz.workspace.local_workspace import LocalWorkspace
+        service_workspaces = {
+            s.name: LocalWorkspace(root=str(project.root / s.workspace_name))
+            for s in changed_services
+        }
+
+        # The milestone's problem_slice replaces the project-wide problem
+        # statement for this engineer dispatch — keeps the issue list
+        # scoped to what this milestone delivers.
+        milestone_problem = milestone.problem_slice or problem_statement
+
+        layers = _sort_services_by_dependency(changed_services)
+        results = []
+        for layer in layers:
+            if parallel and len(layer) > 1:
+                layer_results = self._dispatch_engineers_parallel(
+                    layer, service_workspaces, milestone_problem,
+                    architecture, project, max_workers, layered,
+                )
+            else:
+                layer_results = self._dispatch_engineers_sequential(
+                    layer, service_workspaces, milestone_problem,
+                    architecture, project, layered,
+                )
+            results.extend(layer_results)
+        return results
 
     def build(
         self, problem_statement: str, project_name: str,
