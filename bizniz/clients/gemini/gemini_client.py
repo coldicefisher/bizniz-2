@@ -144,13 +144,33 @@ class GeminiClient(BaseAIClient):
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
+                _t_start = time.time()
                 response = self._client.models.generate_content(
                     model=self._model_name,
                     contents=contents,
                     config=config,
                 )
+                _duration_ms = int((time.time() - _t_start) * 1000)
 
                 response_text = response.text or ""
+
+                # Record usage to the global cost tracker.
+                try:
+                    from bizniz.cost import get_tracker
+                    usage = getattr(response, "usage_metadata", None)
+                    in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
+                    out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
+                    if in_tok or out_tok:
+                        get_tracker().record(
+                            agent=getattr(self, "_caller_agent", "unknown"),
+                            model=self._model_name,
+                            input_tokens=in_tok,
+                            output_tokens=out_tok,
+                            duration_ms=_duration_ms,
+                        )
+                except Exception:
+                    # Cost tracking is best-effort; never break a real call.
+                    pass
 
                 # Sanitize JSON responses from Gemini quirks:
                 # 1. Raw control chars inside string values (newlines, tabs)

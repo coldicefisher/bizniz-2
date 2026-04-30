@@ -56,6 +56,15 @@ class BaseAIAgent(ABC):
         self._environment = environment
         self._workspace = workspace
 
+        # Tag the client with the agent class name so cost-tracker records
+        # show which agent each AI call belongs to (autocoder, autotester,
+        # auto_engineer, auto_architect, agentic_debugger, …). Best-effort —
+        # if the client doesn't accept the attribute we silently skip.
+        try:
+            self._client._caller_agent = type(self).__name__.lower()
+        except Exception:
+            pass
+
 
         self.max_retries = max_retries
         self._max_message_history_length = max_message_history_length

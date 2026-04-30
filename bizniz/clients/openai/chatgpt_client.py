@@ -357,6 +357,7 @@ class ChatGPTClient(BaseAIClient):
           try:
             _response_format = parse_response_format(response_format, schema)
             response_text = None
+            _t_start = time.time()
 
             if self._config.is_azure:
                 # Azure uses Chat Completions API
@@ -382,6 +383,20 @@ class ChatGPTClient(BaseAIClient):
                 response_text = completion.output_text
                 input_tokens = completion.usage.input_tokens
                 output_tokens = completion.usage.output_tokens
+
+            _duration_ms = int((time.time() - _t_start) * 1000)
+            try:
+                from bizniz.cost import get_tracker
+                if input_tokens or output_tokens:
+                    get_tracker().record(
+                        agent=getattr(self, "_caller_agent", "unknown"),
+                        model=self._model_name,
+                        input_tokens=int(input_tokens or 0),
+                        output_tokens=int(output_tokens or 0),
+                        duration_ms=_duration_ms,
+                    )
+            except Exception:
+                pass
 
 
             job_id = None

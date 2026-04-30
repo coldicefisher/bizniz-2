@@ -132,6 +132,8 @@ class ClaudeClient(BaseAIClient):
         for attempt in range(1, max_retries + 1):
             try:
                 response_text = ""
+                _t_start = time.time()
+                _final_message = None
                 with self._client.messages.stream(
                     model=self._model_name,
                     max_tokens=max_tokens or self.max_tokens,
@@ -141,6 +143,29 @@ class ClaudeClient(BaseAIClient):
                 ) as stream:
                     for text in stream.text_stream:
                         response_text += text
+                    try:
+                        _final_message = stream.get_final_message()
+                    except Exception:
+                        _final_message = None
+                _duration_ms = int((time.time() - _t_start) * 1000)
+
+                # Record cost. Anthropic exposes usage on the final message.
+                try:
+                    from bizniz.cost import get_tracker
+                    if _final_message is not None and getattr(_final_message, "usage", None):
+                        usage = _final_message.usage
+                        in_tok = int(getattr(usage, "input_tokens", 0) or 0)
+                        out_tok = int(getattr(usage, "output_tokens", 0) or 0)
+                        if in_tok or out_tok:
+                            get_tracker().record(
+                                agent=getattr(self, "_caller_agent", "unknown"),
+                                model=self._model_name,
+                                input_tokens=in_tok,
+                                output_tokens=out_tok,
+                                duration_ms=_duration_ms,
+                            )
+                except Exception:
+                    pass
 
                 job_id = str(uuid.uuid4())
 
