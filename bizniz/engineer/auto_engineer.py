@@ -646,12 +646,16 @@ class AutoEngineer(BaseAIAgent):
         never passed return their last failed attempt.
         """
         from bizniz.engineer.framing import flatten_layers_topo
+        from bizniz.cost import get_tracker
+
+        tracker = get_tracker()
 
         def log(msg: str):
             if self._on_status_message:
                 self._on_status_message(msg)
 
         if analysis is None:
+            tracker.set_phase("engineer.analyze")
             analysis = self.analyze(problem_statement)
 
         resolve_dependencies(analysis.issues)
@@ -674,6 +678,7 @@ class AutoEngineer(BaseAIAgent):
         issues_topo = flatten_layers_topo(layers)
 
         # ── Phase 1: framing ──────────────────────────────────────────────────
+        tracker.set_phase("phase1.frame")
         self._frame_all_issues(analysis, layers)
 
         results_by_id: dict = {}
@@ -691,9 +696,11 @@ class AutoEngineer(BaseAIAgent):
                 f"AutoEngineer: Phase 2 pass with model '{model}' — "
                 f"{len(failing_ids)} failing ticket(s)"
             )
+            tracker.set_phase(f"phase2.{model}")
             for issue in issues_topo:
                 if issue.db_id is None or issue.db_id not in failing_ids:
                     continue
+                tracker.set_issue(issue.db_id)
                 result = self._run_single_attempt(
                     issue=issue,
                     analysis=analysis,
@@ -706,6 +713,7 @@ class AutoEngineer(BaseAIAgent):
                 if result.success:
                     failing_ids.discard(issue.db_id)
                     self._workspace.db.update_issue_status(issue.db_id, "closed")
+            tracker.set_issue(None)
 
         # ── Phase 3: agentic debugger ─────────────────────────────────────────
         debugger_model = self._debugger_model or (chain[-1] if chain else None)
@@ -714,9 +722,11 @@ class AutoEngineer(BaseAIAgent):
                 f"AutoEngineer: Phase 3 (agentic debug, model '{debugger_model}', "
                 f"max_iter={self._debugger_max_iterations}) — {len(failing_ids)} ticket(s)"
             )
+            tracker.set_phase("phase3.agentic")
             for issue in issues_topo:
                 if issue.db_id is None or issue.db_id not in failing_ids:
                     continue
+                tracker.set_issue(issue.db_id)
                 result = self._run_single_attempt(
                     issue=issue,
                     analysis=analysis,
@@ -729,6 +739,8 @@ class AutoEngineer(BaseAIAgent):
                 if result.success:
                     failing_ids.discard(issue.db_id)
                     self._workspace.db.update_issue_status(issue.db_id, "closed")
+            tracker.set_issue(None)
+        tracker.set_phase(None)
 
         # Assemble results in topological order
         results: List[OrchestratorResult] = []

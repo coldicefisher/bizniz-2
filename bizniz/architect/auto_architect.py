@@ -168,77 +168,128 @@ class AutoArchitect(BaseAIAgent):
         """
         from bizniz.project.project import Project
         from bizniz.provisioner import Provisioner
+        from bizniz.cost import get_tracker
+        from bizniz.workspace.naming import slugify
 
         def log(msg: str):
             if self._on_status_message:
                 self._on_status_message(msg)
 
-        # Step 1: Decompose
-        architecture = self.decompose(problem_statement, project_name)
-
-        # Step 2: Provisioner — turn the plan into a real project on disk +
-        # built Docker images.
-        provisioner = self._provisioner or Provisioner(
-            project_parent=(
-                Path(self._project_parent) if self._project_parent
-                else self._workspace.root.parent
-            ),
-            on_status_message=self._on_status_message,
+        # Open a cost-tracker job up-front so the architect's own AI calls
+        # (decompose, plan-architecture during engineer.analyze, etc.) get
+        # tagged with a job_id even before the project DB exists. The DB is
+        # attached after the Provisioner creates the project; buffered
+        # records flush at that point.
+        tracker = get_tracker()
+        provisional_slug = slugify(project_name)
+        job_id = tracker.start_job(
+            project_slug=provisional_slug,
+            problem_statement=problem_statement,
         )
-        provision_result = provisioner.provision(architecture, project_name)
+        tracker.set_phase("architect.decompose")
+        log(f"AutoArchitect: cost job {job_id[:8]}… opened for '{project_name}'")
+        job_status = "succeeded"
 
-        project = Project(
-            root=Path(provision_result.project_root),
-            project_name=project_name,
-        )
+        try:
+            # Step 1: Decompose
+            architecture = self.decompose(problem_statement, project_name)
+            tracker.set_phase(None)
 
-        # Save human-readable architecture docs (provisioner already saved
-        # the architecture snapshot to project DB).
-        _save_architecture_docs(project.root, architecture)
+            # Step 2: Provisioner — turn the plan into a real project on disk +
+            # built Docker images.
+            provisioner = self._provisioner or Provisioner(
+                project_parent=(
+                    Path(self._project_parent) if self._project_parent
+                    else self._workspace.root.parent
+                ),
+                on_status_message=self._on_status_message,
+            )
+            provision_result = provisioner.provision(architecture, project_name)
 
-        # Build a workspace map for engineer dispatch from the provision result.
-        from bizniz.workspace.local_workspace import LocalWorkspace
-        service_workspaces = {}
-        for ps in provision_result.services:
-            if ps.is_infrastructure or ps.workspace_path is None:
-                continue
-            service_workspaces[ps.name] = LocalWorkspace(root=ps.workspace_path)
+            project = Project(
+                root=Path(provision_result.project_root),
+                project_name=project_name,
+            )
 
-        # Stamp image_name back onto ServiceDefinitions so engineer dispatch
-        # can pass the right image to the test environment.
-        ps_by_name = {ps.name: ps for ps in provision_result.services}
-        for service in architecture.services:
-            ps = ps_by_name.get(service.name)
-            if ps and ps.image_name:
-                service.image_name = ps.image_name
-
-        # Step 3: Dispatch engineers for application services (in dependency order)
-        app_services = [s for s in architecture.services if s.name in service_workspaces]
-        service_layers = _sort_services_by_dependency(app_services)
-        log(f"AutoArchitect: {len(app_services)} services in {len(service_layers)} dependency layer(s)")
-
-        service_results = []
-        for layer_idx, layer in enumerate(service_layers):
-            layer_names = [s.name for s in layer]
-            log(f"AutoArchitect: dispatching layer {layer_idx + 1} ({', '.join(layer_names)})...")
-            if parallel and len(layer) > 1:
-                layer_results = self._dispatch_engineers_parallel(
-                    layer, service_workspaces, problem_statement, architecture, project, max_workers, layered,
+            # Wire the project DB into the cost tracker. This flushes any
+            # records buffered before the project existed (architect's
+            # decompose call) and live-persists everything that follows.
+            try:
+                tracker.attach_project_db(project.db)
+                project.db.start_job(
+                    job_id=job_id,
+                    project_slug=architecture.project_slug,
+                    problem_statement=problem_statement,
                 )
-            else:
-                layer_results = self._dispatch_engineers_sequential(
-                    layer, service_workspaces, problem_statement, architecture, project, layered,
-                )
-            service_results.extend(layer_results)
+            except Exception as e:
+                log(f"AutoArchitect: cost tracker DB attach failed ({e}) — continuing in-memory only")
 
-        compose_path = str(project.dev_root / "docker-compose.yml")
-        return ArchitectResult(
-            project_name=project_name,
-            architecture=architecture,
-            service_results=service_results,
-            docker_compose_path=compose_path,
-            project_root=str(project.root),
-        )
+            # Save human-readable architecture docs (provisioner already saved
+            # the architecture snapshot to project DB).
+            _save_architecture_docs(project.root, architecture)
+
+            # Build a workspace map for engineer dispatch from the provision result.
+            from bizniz.workspace.local_workspace import LocalWorkspace
+            service_workspaces = {}
+            for ps in provision_result.services:
+                if ps.is_infrastructure or ps.workspace_path is None:
+                    continue
+                service_workspaces[ps.name] = LocalWorkspace(root=ps.workspace_path)
+
+            # Stamp image_name back onto ServiceDefinitions so engineer dispatch
+            # can pass the right image to the test environment.
+            ps_by_name = {ps.name: ps for ps in provision_result.services}
+            for service in architecture.services:
+                ps = ps_by_name.get(service.name)
+                if ps and ps.image_name:
+                    service.image_name = ps.image_name
+
+            # Step 3: Dispatch engineers for application services (in dependency order)
+            app_services = [s for s in architecture.services if s.name in service_workspaces]
+            service_layers = _sort_services_by_dependency(app_services)
+            log(f"AutoArchitect: {len(app_services)} services in {len(service_layers)} dependency layer(s)")
+
+            service_results = []
+            for layer_idx, layer in enumerate(service_layers):
+                layer_names = [s.name for s in layer]
+                log(f"AutoArchitect: dispatching layer {layer_idx + 1} ({', '.join(layer_names)})...")
+                if parallel and len(layer) > 1:
+                    layer_results = self._dispatch_engineers_parallel(
+                        layer, service_workspaces, problem_statement, architecture, project, max_workers, layered,
+                    )
+                else:
+                    layer_results = self._dispatch_engineers_sequential(
+                        layer, service_workspaces, problem_statement, architecture, project, layered,
+                    )
+                service_results.extend(layer_results)
+
+            compose_path = str(project.dev_root / "docker-compose.yml")
+            # Determine job status from service results
+            if service_results and not all(getattr(r, "success", False) for r in service_results):
+                job_status = "failed"
+            return ArchitectResult(
+                project_name=project_name,
+                architecture=architecture,
+                service_results=service_results,
+                docker_compose_path=compose_path,
+                project_root=str(project.root),
+            )
+        except Exception:
+            job_status = "failed"
+            raise
+        finally:
+            tracker.set_service(None)
+            tracker.set_issue(None)
+            tracker.set_phase(None)
+            try:
+                tracker.finish_job(status=job_status)
+                summary = tracker.summary()
+                log(
+                    f"AutoArchitect: cost job {job_id[:8]}… {job_status} — "
+                    f"calls={summary.calls} cost=${summary.total_cost:.4f}"
+                )
+            except Exception as e:
+                log(f"AutoArchitect: cost job finish failed ({e})")
 
     # ── Private helpers ────────────────────────────────────────────────────────
 
@@ -410,6 +461,13 @@ class AutoArchitect(BaseAIAgent):
         layered: bool = True,
     ) -> ServiceResult:
         """Dispatch an AutoEngineer for a single service."""
+        # Tag the cost tracker with the current service so every AI call
+        # made inside this dispatch attributes to the right service in the
+        # api_calls rollup.
+        from bizniz.cost import get_tracker
+        tracker = get_tracker()
+        tracker.set_service(service.name)
+        tracker.set_phase("engineer.analyze")
         with self._engineer_factory(
             workspace,
             on_status_message=self._on_status_message,

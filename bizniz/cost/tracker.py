@@ -4,12 +4,28 @@
 A module-level singleton (``get_tracker()``) is the default destination
 that AI clients write to after every call. Tests can use ``set_tracker``
 or instantiate fresh trackers. Optionally a tracker can persist each
-record to a workspace SQLite database for cross-run analysis.
+record to the project SQLite database (``ProjectDB``) for cross-run
+analysis.
+
+Job model
+---------
+
+A *job* is one ``architect.build()`` invocation (or any other top-level
+unit of work). Call ``tracker.start_job(project_slug, problem_statement)``
+at the beginning to allocate a job_id; every subsequent ``record()``
+attaches that id. Mid-job, push context with ``set_service()``,
+``set_issue()``, ``set_phase()`` so each call lands in the right bucket
+for rollups (``cost_by_issue``, ``cost_by_service``, ``cost_by_model``).
+
+Records buffered before ``attach_project_db()`` (e.g. the architect's
+decompose call before the project even exists) are flushed when the DB
+is attached, so no calls are dropped.
 """
 from __future__ import annotations
 
 import datetime
 import threading
+import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -28,6 +44,9 @@ class CallRecord:
     cost: CallCost
     problem_id: Optional[int] = None
     issue_id: Optional[int] = None
+    job_id: Optional[str] = None
+    service_name: Optional[str] = None
+    phase: Optional[str] = None
 
 
 @dataclass
@@ -74,36 +93,145 @@ class CostSummary:
 
 
 class CostTracker:
-    """Thread-safe in-memory cost log with optional DB persistence."""
+    """Thread-safe in-memory cost log with optional ProjectDB persistence.
+
+    Lifecycle::
+
+        tracker = get_tracker()
+        tracker.start_job(project_slug, problem_statement)   # allocates job_id
+        # ... some calls happen via clients ...
+        tracker.attach_project_db(project.db)                # flushes buffered + live persists
+        tracker.set_service("backend")
+        tracker.set_issue(issue.db_id)
+        tracker.set_phase("frame")
+        # ... more calls ...
+        tracker.finish_job(status="succeeded")                # rolls up totals
+    """
 
     def __init__(
         self,
-        workspace_db=None,
+        project_db=None,
         problem_id: Optional[int] = None,
         issue_id: Optional[int] = None,
     ):
         self._lock = threading.Lock()
         self._records: List[CallRecord] = []
-        self._workspace_db = workspace_db
+        self._project_db = project_db
+        # Per-call context (set by callers before invoking AI clients)
         self._problem_id = problem_id
         self._issue_id = issue_id
+        self._job_id: Optional[str] = None
+        self._service_name: Optional[str] = None
+        self._phase: Optional[str] = None
+        # Records that arrived before a DB was attached are flushed when one
+        # is. The set tracks rows already persisted so re-attach doesn't
+        # double-write.
+        self._persisted_record_ids: set = set()
 
-    def attach_workspace_db(self, workspace_db) -> None:
-        """Bind a workspace DB; subsequent records also persist there."""
+    # ── Compatibility shim for older callers ─────────────────────────────────
+
+    @property
+    def workspace_db(self):  # legacy alias kept for old tests
+        return self._project_db
+
+    def attach_workspace_db(self, db) -> None:
+        """Deprecated alias for ``attach_project_db``. Kept for backward
+        compatibility with any caller still using the older name."""
+        self.attach_project_db(db)
+
+    def attach_project_db(self, project_db) -> None:
+        """Bind a ProjectDB; flush any buffered records and live-persist
+        all subsequent records to it."""
         with self._lock:
-            self._workspace_db = workspace_db
+            self._project_db = project_db
+            for i, rec in enumerate(self._records):
+                if i in self._persisted_record_ids:
+                    continue
+                try:
+                    project_db.save_api_call(rec)
+                    self._persisted_record_ids.add(i)
+                except Exception:
+                    pass
+
+    # ── Job lifecycle ────────────────────────────────────────────────────────
+
+    def start_job(
+        self,
+        project_slug: str,
+        problem_statement: str = "",
+        metadata: Optional[dict] = None,
+    ) -> str:
+        """Allocate a UUID job_id for this run. Subsequent records carry
+        it. If a project_db is already attached, also write the job row.
+        """
+        with self._lock:
+            self._job_id = str(uuid.uuid4())
+            db = self._project_db
+        if db is not None:
+            try:
+                db.start_job(
+                    job_id=self._job_id,
+                    project_slug=project_slug,
+                    problem_statement=problem_statement,
+                    metadata=metadata,
+                )
+            except Exception:
+                pass
+        # Stash for later DB attach
+        self._pending_job_meta = (project_slug, problem_statement, metadata)
+        return self._job_id
+
+    def finish_job(self, status: str = "succeeded") -> None:
+        """Mark the current job done. Refreshes the rollup totals on the
+        jobs row from api_calls."""
+        with self._lock:
+            job_id = self._job_id
+            db = self._project_db
+        if not job_id or db is None:
+            return
+        try:
+            db.finish_job(job_id, status=status)
+        except Exception:
+            pass
+
+    # ── Context ──────────────────────────────────────────────────────────────
 
     def set_context(
         self,
         problem_id: Optional[int] = None,
         issue_id: Optional[int] = None,
+        service_name: Optional[str] = None,
+        phase: Optional[str] = None,
     ) -> None:
-        """Set the problem/issue identifiers attached to subsequent records."""
+        """Set any/all per-call context fields at once. Pass None to leave
+        a field unchanged."""
         with self._lock:
             if problem_id is not None:
                 self._problem_id = problem_id
             if issue_id is not None:
                 self._issue_id = issue_id
+            if service_name is not None:
+                self._service_name = service_name
+            if phase is not None:
+                self._phase = phase
+
+    def set_service(self, service_name: Optional[str]) -> None:
+        with self._lock:
+            self._service_name = service_name
+
+    def set_issue(self, issue_id: Optional[int]) -> None:
+        with self._lock:
+            self._issue_id = issue_id
+
+    def set_phase(self, phase: Optional[str]) -> None:
+        with self._lock:
+            self._phase = phase
+
+    @property
+    def current_job_id(self) -> Optional[str]:
+        return self._job_id
+
+    # ── Recording ────────────────────────────────────────────────────────────
 
     def record(
         self,
@@ -114,6 +242,8 @@ class CostTracker:
         duration_ms: int = 0,
         problem_id: Optional[int] = None,
         issue_id: Optional[int] = None,
+        service_name: Optional[str] = None,
+        phase: Optional[str] = None,
     ) -> CallRecord:
         """Record one AI call. Cost is computed from the pricing table."""
         cost = price_call(model, input_tokens, output_tokens)
@@ -127,21 +257,33 @@ class CostTracker:
             cost=cost,
             problem_id=problem_id if problem_id is not None else self._problem_id,
             issue_id=issue_id if issue_id is not None else self._issue_id,
+            job_id=self._job_id,
+            service_name=(
+                service_name if service_name is not None else self._service_name
+            ),
+            phase=phase if phase is not None else self._phase,
         )
         with self._lock:
+            idx = len(self._records)
             self._records.append(rec)
-            if self._workspace_db is not None:
-                try:
-                    self._workspace_db.save_api_call(rec)
-                except Exception:
-                    # Persistence is best-effort; never break a real call.
-                    pass
+            db = self._project_db
+        if db is not None:
+            try:
+                db.save_api_call(rec)
+                self._persisted_record_ids.add(idx)
+            except Exception:
+                # Persistence is best-effort; never break a real call.
+                pass
         return rec
 
     def reset(self) -> None:
         """Drop all records (useful between tests / runs)."""
         with self._lock:
             self._records = []
+            self._persisted_record_ids = set()
+            self._job_id = None
+            self._service_name = None
+            self._phase = None
 
     def records(self) -> List[CallRecord]:
         with self._lock:

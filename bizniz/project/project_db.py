@@ -106,6 +106,49 @@ class ProjectDB:
                 resolution        TEXT    NOT NULL DEFAULT '',
                 created_at        TEXT    NOT NULL
             );
+
+            -- One row per architect.build() invocation (or any other
+            -- top-level unit of work). Cost rollups aggregate api_calls
+            -- by job_id; this table is just the lightweight index.
+            CREATE TABLE IF NOT EXISTS jobs (
+                id                  TEXT    PRIMARY KEY,
+                project_slug        TEXT    NOT NULL,
+                problem_statement   TEXT    NOT NULL DEFAULT '',
+                status              TEXT    NOT NULL DEFAULT 'running'
+                                    CHECK(status IN ('running','succeeded','failed','cancelled')),
+                started_at          TEXT    NOT NULL,
+                finished_at         TEXT,
+                total_calls         INTEGER NOT NULL DEFAULT 0,
+                total_input_tokens  INTEGER NOT NULL DEFAULT 0,
+                total_output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_cost          REAL    NOT NULL DEFAULT 0.0,
+                metadata_json       TEXT
+            );
+
+            -- One row per AI call. Tagged with job/service/issue/phase so
+            -- any rollup is just a GROUP BY away.
+            CREATE TABLE IF NOT EXISTS api_calls (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id          TEXT,
+                timestamp       TEXT    NOT NULL,
+                agent           TEXT,
+                model           TEXT    NOT NULL,
+                service_name    TEXT,
+                issue_id        INTEGER,
+                phase           TEXT,
+                input_tokens    INTEGER NOT NULL DEFAULT 0,
+                output_tokens   INTEGER NOT NULL DEFAULT 0,
+                duration_ms     INTEGER NOT NULL DEFAULT 0,
+                input_cost      REAL    NOT NULL DEFAULT 0.0,
+                output_cost     REAL    NOT NULL DEFAULT 0.0,
+                total_cost      REAL    NOT NULL DEFAULT 0.0,
+                priced          INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_api_calls_job ON api_calls(job_id);
+            CREATE INDEX IF NOT EXISTS idx_api_calls_issue ON api_calls(issue_id);
+            CREATE INDEX IF NOT EXISTS idx_api_calls_service ON api_calls(service_name);
+            CREATE INDEX IF NOT EXISTS idx_api_calls_model ON api_calls(model);
         """)
         self._conn.commit()
 
@@ -323,6 +366,192 @@ class ProjectDB:
         else:
             cur = self._conn.execute(
                 "SELECT * FROM drift_events ORDER BY created_at"
+            )
+        return cur.fetchall()
+
+    # ── Jobs + AI cost ──────────────────────────────────────────────────────────
+
+    def start_job(
+        self,
+        job_id: str,
+        project_slug: str,
+        problem_statement: str = "",
+        metadata: Optional[dict] = None,
+    ) -> str:
+        """Open a new job row. Idempotent — re-calling with the same id is a no-op."""
+        existing = self._conn.execute(
+            "SELECT id FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if existing:
+            return job_id
+        self._conn.execute(
+            """INSERT INTO jobs
+               (id, project_slug, problem_statement, status, started_at, metadata_json)
+               VALUES (?, ?, ?, 'running', ?, ?)""",
+            (
+                job_id, project_slug,
+                (problem_statement or "")[:1000],
+                _now(),
+                json.dumps(metadata) if metadata else None,
+            ),
+        )
+        self._conn.commit()
+        return job_id
+
+    def finish_job(
+        self,
+        job_id: str,
+        status: str = "succeeded",
+    ) -> None:
+        """Mark a job done and refresh its rollup totals from api_calls."""
+        if status not in ("succeeded", "failed", "cancelled", "running"):
+            status = "succeeded"
+        totals = self._conn.execute(
+            """SELECT
+                 COUNT(*)               AS calls,
+                 COALESCE(SUM(input_tokens), 0)  AS in_tok,
+                 COALESCE(SUM(output_tokens), 0) AS out_tok,
+                 COALESCE(SUM(total_cost), 0.0)  AS cost
+               FROM api_calls WHERE job_id = ?""",
+            (job_id,),
+        ).fetchone()
+        self._conn.execute(
+            """UPDATE jobs SET
+                 status              = ?,
+                 finished_at         = ?,
+                 total_calls         = ?,
+                 total_input_tokens  = ?,
+                 total_output_tokens = ?,
+                 total_cost          = ?
+               WHERE id = ?""",
+            (status, _now(),
+             int(totals["calls"]), int(totals["in_tok"]),
+             int(totals["out_tok"]), float(totals["cost"]),
+             job_id),
+        )
+        self._conn.commit()
+
+    def save_api_call(self, record) -> int:
+        """Persist one CallRecord. Accepts either a CallRecord dataclass
+        from bizniz.cost.tracker or any object with the same attribute
+        surface (timestamp, agent, model, input_tokens, output_tokens,
+        duration_ms, problem_id, issue_id, cost, plus optional job_id /
+        service_name / phase tags).
+        """
+        cost = getattr(record, "cost", None)
+        cur = self._conn.execute(
+            """INSERT INTO api_calls
+               (job_id, timestamp, agent, model, service_name, issue_id, phase,
+                input_tokens, output_tokens, duration_ms,
+                input_cost, output_cost, total_cost, priced)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                getattr(record, "job_id", None),
+                getattr(record, "timestamp", _now()),
+                getattr(record, "agent", None),
+                getattr(record, "model", "unknown"),
+                getattr(record, "service_name", None),
+                getattr(record, "issue_id", None),
+                getattr(record, "phase", None),
+                int(getattr(record, "input_tokens", 0) or 0),
+                int(getattr(record, "output_tokens", 0) or 0),
+                int(getattr(record, "duration_ms", 0) or 0),
+                float(getattr(cost, "input_cost", 0.0) or 0.0),
+                float(getattr(cost, "output_cost", 0.0) or 0.0),
+                float(getattr(cost, "total_cost", 0.0) or 0.0),
+                1 if (cost is None or getattr(cost, "priced", True)) else 0,
+            ),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def get_jobs(self, limit: int = 50) -> List[sqlite3.Row]:
+        cur = self._conn.execute(
+            "SELECT * FROM jobs ORDER BY started_at DESC LIMIT ?", (limit,),
+        )
+        return cur.fetchall()
+
+    def get_job(self, job_id: str) -> Optional[sqlite3.Row]:
+        cur = self._conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
+        return cur.fetchone()
+
+    def cost_by_issue(self, job_id: Optional[str] = None) -> List[sqlite3.Row]:
+        """Rollup: per-issue cost + tokens (optionally scoped to a job)."""
+        if job_id is None:
+            cur = self._conn.execute(
+                """SELECT issue_id,
+                          COUNT(*)                AS calls,
+                          SUM(input_tokens)       AS input_tokens,
+                          SUM(output_tokens)      AS output_tokens,
+                          SUM(total_cost)         AS total_cost
+                   FROM api_calls
+                   WHERE issue_id IS NOT NULL
+                   GROUP BY issue_id
+                   ORDER BY total_cost DESC"""
+            )
+        else:
+            cur = self._conn.execute(
+                """SELECT issue_id,
+                          COUNT(*)                AS calls,
+                          SUM(input_tokens)       AS input_tokens,
+                          SUM(output_tokens)      AS output_tokens,
+                          SUM(total_cost)         AS total_cost
+                   FROM api_calls
+                   WHERE issue_id IS NOT NULL AND job_id = ?
+                   GROUP BY issue_id
+                   ORDER BY total_cost DESC""",
+                (job_id,),
+            )
+        return cur.fetchall()
+
+    def cost_by_service(self, job_id: Optional[str] = None) -> List[sqlite3.Row]:
+        if job_id is None:
+            cur = self._conn.execute(
+                """SELECT service_name,
+                          COUNT(*)             AS calls,
+                          SUM(total_cost)      AS total_cost
+                   FROM api_calls
+                   WHERE service_name IS NOT NULL
+                   GROUP BY service_name
+                   ORDER BY total_cost DESC"""
+            )
+        else:
+            cur = self._conn.execute(
+                """SELECT service_name,
+                          COUNT(*)             AS calls,
+                          SUM(total_cost)      AS total_cost
+                   FROM api_calls
+                   WHERE service_name IS NOT NULL AND job_id = ?
+                   GROUP BY service_name
+                   ORDER BY total_cost DESC""",
+                (job_id,),
+            )
+        return cur.fetchall()
+
+    def cost_by_model(self, job_id: Optional[str] = None) -> List[sqlite3.Row]:
+        if job_id is None:
+            cur = self._conn.execute(
+                """SELECT model,
+                          COUNT(*)             AS calls,
+                          SUM(input_tokens)    AS input_tokens,
+                          SUM(output_tokens)   AS output_tokens,
+                          SUM(total_cost)      AS total_cost
+                   FROM api_calls
+                   GROUP BY model
+                   ORDER BY total_cost DESC"""
+            )
+        else:
+            cur = self._conn.execute(
+                """SELECT model,
+                          COUNT(*)             AS calls,
+                          SUM(input_tokens)    AS input_tokens,
+                          SUM(output_tokens)   AS output_tokens,
+                          SUM(total_cost)      AS total_cost
+                   FROM api_calls
+                   WHERE job_id = ?
+                   GROUP BY model
+                   ORDER BY total_cost DESC""",
+                (job_id,),
             )
         return cur.fetchall()
 

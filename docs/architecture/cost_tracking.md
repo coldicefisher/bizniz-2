@@ -107,16 +107,95 @@ get_tracker().reset()
 run. The per-run efficiency docs under `docs/runs/` should include the
 formatted summary so we can compare across runs.
 
+## Persistence — jobs and api_calls
+
+A *job* is one `architect.build()` invocation (or any other top-level
+unit of work). Each AI call is tagged with a `job_id`, plus
+`service_name`, `issue_id`, and `phase` for fine-grained rollups.
+
+Two tables in `ProjectDB` (at `<project_root>/.bizniz/project.db`):
+
+```sql
+jobs
+  id                  TEXT PRIMARY KEY    -- UUID
+  project_slug        TEXT NOT NULL
+  problem_statement   TEXT
+  status              TEXT (running | succeeded | failed | cancelled)
+  started_at          TEXT NOT NULL
+  finished_at         TEXT
+  total_calls         INTEGER
+  total_input_tokens  INTEGER
+  total_output_tokens INTEGER
+  total_cost          REAL
+  metadata_json       TEXT
+
+api_calls
+  id, timestamp, job_id, agent, model, service_name, issue_id, phase,
+  input_tokens, output_tokens, duration_ms,
+  input_cost, output_cost, total_cost, priced
+  -- Indexes on job_id, issue_id, service_name, model
+```
+
+### Lifecycle
+
+`AutoArchitect.build()` opens the job and finishes it for you:
+
+```python
+tracker = get_tracker()
+job_id = tracker.start_job(project_slug, problem_statement)
+# (architect's decompose call records here, buffered in memory because
+#  the project DB doesn't exist yet)
+
+provisioner.provision(...)        # creates project_root/.bizniz/project.db
+tracker.attach_project_db(project.db)
+project.db.start_job(job_id, project_slug, problem_statement)
+# (buffered records flush; subsequent calls live-persist)
+
+# Inside engineer dispatch:
+tracker.set_service("backend")
+tracker.set_phase("phase1.frame")
+# ... AI calls ...
+tracker.set_phase("phase2.gemini-flash")
+tracker.set_issue(7)
+# ... AI calls ...
+
+tracker.finish_job(status="succeeded")  # rolls up totals onto the jobs row
+```
+
+If `start_job` runs before any DB exists (the architect's first
+`decompose()` call), records buffer in memory and flush on
+`attach_project_db()`. After attach, every `record()` writes a row
+immediately. Errors during persistence are swallowed so a tracking
+glitch never breaks a real call.
+
+### Built-in rollup queries
+
+`ProjectDB` exposes:
+
+| Method | Returns |
+|---|---|
+| `get_jobs(limit)` | recent jobs ordered by `started_at` |
+| `get_job(job_id)` | one job row |
+| `cost_by_issue(job_id=None)` | per-issue calls + tokens + cost |
+| `cost_by_service(job_id=None)` | per-service calls + cost |
+| `cost_by_model(job_id=None)` | per-model calls + tokens + cost |
+
+Pass `job_id=None` for an all-time rollup across every run of the
+project; pass a UUID to scope to one run. Sample rollup query for
+"which issues cost the most across all time":
+
+```python
+for row in project.db.cost_by_issue():
+    print(row["issue_id"], row["calls"], row["total_cost"])
+```
+
 ## Limitations / future work
 
-- **No DB persistence yet.** `CostTracker.attach_workspace_db()` is wired
-  but the `WorkspaceDB.save_api_call()` method has not been added. Once it
-  ships, every `record()` call lands a row in `api_calls` (per workspace)
-  for cross-run analysis.
 - **Pricing is provider list price, not actual billed.** Volume discounts,
   cache discounts, and prompt-caching reductions aren't modeled.
-- **No retroactive scoring.** If you change `MODEL_PRICING`, prior records
-  retain the cost computed at record time. Re-running `summary()` re-prices
-  using the current table only because cost is computed inside `record()`
-  and cached on the `CallRecord`. To re-score, write a small helper that
-  walks `tracker.records()` and calls `price_call()` again.
+- **No retroactive re-scoring.** If you change `MODEL_PRICING`, prior
+  rows retain the cost computed at record time. Walk `api_calls` and
+  re-`price_call()` if you need to re-score historical data.
+- **Cross-project rollup not built in.** Each project DB sees only its
+  own jobs. The unified `BiznizDB` (single MySQL/SQLite store) is the
+  path to a cross-project view; not wired into the cost path yet.
