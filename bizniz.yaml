@@ -1,6 +1,10 @@
 default_model: gemini-flash-lite
 engineer_model: gemini-flash
-architect_model: gemini-flash
+architect_model: gemini-pro
+# Top-tier model for the Planner. The Planner runs once per project (or
+# rarely on re-plans) and its output drives the entire build sequence,
+# so the cost is rounding-error and the quality bump is foundational.
+planner_model: gemini-pro
 models:
   - gemini-flash-lite
   - gemini-flash

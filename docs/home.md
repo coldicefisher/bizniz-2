@@ -9,18 +9,26 @@ statement and produces a working multi-service application: planning,
 infrastructure provisioning, code generation, automated testing, and
 iterative repair — all driven by AI agents.
 
-The pipeline has four levels of agents and one materializer:
+The pipeline has five levels of agents and one materializer:
 
 | Component | Role | Has AI? |
 |---|---|---|
-| `AutoArchitect` | Decompose problem into services + dependencies + ports | Yes (one call) |
+| `Planner` | Decompose project into ordered milestones (user value) | Yes (one call) |
+| `AutoArchitect` | Decompose problem (or milestone) into services + dependencies + ports | Yes (one call) |
 | `Provisioner` | Materialize the plan: directory tree, skeletons, infra templates, compose, .env, Docker images | No |
 | `AutoEngineer` | Per service: produce issues, architecture plan, dispatch | Yes (multi-pass analysis) |
 | `CodingOrchestrator` | Per issue: codegen + tests + repair loop | Yes (per-iteration) |
 | `Autocoder` / `Autotester` / `AgenticDebugger` | Specialized sub-agents the orchestrator dispatches | Yes |
 
 A `CostTracker` records every AI call to the project SQLite DB so cross-run
-analysis (per issue, per service, per model, per phase) is just a SQL query.
+analysis (per milestone, per issue, per service, per model, per phase) is
+just a SQL query.
+
+> **Status**: the Planner exists as of 2026-04-30 but is not yet wired
+> into `architect.build()`. The current build loop decomposes from the
+> full problem statement directly. Multi-week evolve-mode (Planner →
+> per-milestone Architect.evolve → Provisioner.evolve) is the next
+> branch. See [planner.md](architecture/planner.md).
 
 ---
 
@@ -31,7 +39,13 @@ analysis (per issue, per service, per model, per phase) is just a SQL query.
                           │
                           ▼
                 ┌────────────────────┐
-                │    AutoArchitect   │   plan only — one AI call
+                │      Planner       │   sequence user value — one AI call
+                │      .plan()       │   → ProjectPlan with N milestones
+                └─────────┬──────────┘   (not yet wired into build loop)
+                          │ (future: per milestone)
+                          ▼
+                ┌────────────────────┐
+                │    AutoArchitect   │   plan services — one AI call
                 │   .decompose()     │   → SystemArchitecture
                 └─────────┬──────────┘
                           │
@@ -80,6 +94,22 @@ Foundation class for AI-driven agents. Standardizes:
 - Message-history management with system-prompt override
 - Tagging the client with `_caller_agent` so cost tracking knows which
   agent made each AI call
+
+### `Planner` (`bizniz/planner/`)
+
+**Sequencing user value.** One AI call (`plan`) returns a
+`ProjectPlan` — an ordered list of `Milestone`s, each with use cases,
+success criteria, depends_on_names, and a self-contained
+`problem_slice` the Architect can later decompose standalone.
+
+The Planner does NOT decide services, frameworks, ports, or file
+structure — those are the Architect's concerns. The Planner reasons
+in product terms: "what does the user get first? what depends on
+what? how do I cut this into 1-2 week deliverables?"
+
+Top-tier model (default `gemini-pro`) — one call per project, the
+quality bump is foundational. Persists to `project_plans` +
+`milestones` tables in `ProjectDB`. See [planner.md](architecture/planner.md).
 
 ### `AutoArchitect` (`bizniz/architect/auto_architect.py`)
 
@@ -189,6 +219,7 @@ multi-project deployments but is opt-in.
 ## Key references
 
 - [Pipeline sequence](pipeline_sequence.md) — step-by-step flow
+- [Planner](architecture/planner.md) — milestone sequencing
 - [Architect/Provisioner split](architecture/architect_provisioner_split.md)
 - [Skeleton seeding](architecture/skeleton_seeding.md)
 - [Cost tracking](architecture/cost_tracking.md)

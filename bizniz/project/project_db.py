@@ -125,8 +125,8 @@ class ProjectDB:
                 metadata_json       TEXT
             );
 
-            -- One row per AI call. Tagged with job/service/issue/phase so
-            -- any rollup is just a GROUP BY away.
+            -- One row per AI call. Tagged with job/service/issue/phase/
+            -- milestone so any rollup is just a GROUP BY away.
             CREATE TABLE IF NOT EXISTS api_calls (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id          TEXT,
@@ -135,6 +135,7 @@ class ProjectDB:
                 model           TEXT    NOT NULL,
                 service_name    TEXT,
                 issue_id        INTEGER,
+                milestone_id    INTEGER,
                 phase           TEXT,
                 input_tokens    INTEGER NOT NULL DEFAULT 0,
                 output_tokens   INTEGER NOT NULL DEFAULT 0,
@@ -149,7 +150,62 @@ class ProjectDB:
             CREATE INDEX IF NOT EXISTS idx_api_calls_issue ON api_calls(issue_id);
             CREATE INDEX IF NOT EXISTS idx_api_calls_service ON api_calls(service_name);
             CREATE INDEX IF NOT EXISTS idx_api_calls_model ON api_calls(model);
+            CREATE INDEX IF NOT EXISTS idx_api_calls_milestone ON api_calls(milestone_id);
+
+            -- The Planner's output: a sequence of milestones that the
+            -- Architect later evolves the project through. One active plan
+            -- per project at a time; old plans are archived (archived_at
+            -- set) when a re-plan supersedes them.
+            CREATE TABLE IF NOT EXISTS project_plans (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_slug        TEXT    NOT NULL,
+                problem_statement   TEXT    NOT NULL DEFAULT '',
+                description         TEXT    NOT NULL DEFAULT '',
+                created_at          TEXT    NOT NULL,
+                archived_at         TEXT
+            );
+
+            -- Each milestone is a self-contained problem-slice the
+            -- Architect can decompose later. Use cases describe user value;
+            -- success criteria are testable outcomes; depends_on_json holds
+            -- milestone NAMES (resolved to ids on read).
+            CREATE TABLE IF NOT EXISTS milestones (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                plan_id               INTEGER NOT NULL,
+                sequence_index        INTEGER NOT NULL,
+                name                  TEXT    NOT NULL,
+                problem_slice         TEXT    NOT NULL,
+                use_cases_json        TEXT    NOT NULL DEFAULT '[]',
+                success_criteria_json TEXT    NOT NULL DEFAULT '[]',
+                depends_on_json       TEXT    NOT NULL DEFAULT '[]',
+                estimated_effort      TEXT,
+                status                TEXT    NOT NULL DEFAULT 'planned'
+                                      CHECK(status IN ('planned','in_progress','completed','skipped')),
+                started_at            TEXT,
+                completed_at          TEXT,
+                created_at            TEXT    NOT NULL,
+                FOREIGN KEY (plan_id) REFERENCES project_plans(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_milestones_plan ON milestones(plan_id);
+            CREATE INDEX IF NOT EXISTS idx_milestones_status ON milestones(status);
         """)
+        self._conn.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self):
+        """Forward-only schema fixes for project DBs created by older
+        versions of this code. Idempotent — each ALTER is wrapped to
+        swallow the 'duplicate column' error."""
+        for ddl in (
+            "ALTER TABLE api_calls ADD COLUMN milestone_id INTEGER",
+        ):
+            try:
+                self._conn.execute(ddl)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e).lower():
+                    continue
+                raise
         self._conn.commit()
 
     # ── Services ────────────────────────────────────────────────────────────────
@@ -436,15 +492,16 @@ class ProjectDB:
         from bizniz.cost.tracker or any object with the same attribute
         surface (timestamp, agent, model, input_tokens, output_tokens,
         duration_ms, problem_id, issue_id, cost, plus optional job_id /
-        service_name / phase tags).
+        service_name / phase / milestone_id tags).
         """
         cost = getattr(record, "cost", None)
         cur = self._conn.execute(
             """INSERT INTO api_calls
-               (job_id, timestamp, agent, model, service_name, issue_id, phase,
+               (job_id, timestamp, agent, model, service_name, issue_id,
+                milestone_id, phase,
                 input_tokens, output_tokens, duration_ms,
                 input_cost, output_cost, total_cost, priced)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 getattr(record, "job_id", None),
                 getattr(record, "timestamp", _now()),
@@ -452,6 +509,7 @@ class ProjectDB:
                 getattr(record, "model", "unknown"),
                 getattr(record, "service_name", None),
                 getattr(record, "issue_id", None),
+                getattr(record, "milestone_id", None),
                 getattr(record, "phase", None),
                 int(getattr(record, "input_tokens", 0) or 0),
                 int(getattr(record, "output_tokens", 0) or 0),
@@ -552,6 +610,161 @@ class ProjectDB:
                    GROUP BY model
                    ORDER BY total_cost DESC""",
                 (job_id,),
+            )
+        return cur.fetchall()
+
+    # ── Project plans + milestones ──────────────────────────────────────────────
+
+    def save_project_plan(
+        self,
+        project_slug: str,
+        problem_statement: str,
+        description: str = "",
+    ) -> int:
+        """Insert a new project plan and return its id. Doesn't archive
+        prior plans — call ``archive_plan`` first if a re-plan should
+        supersede the active one."""
+        cur = self._conn.execute(
+            """INSERT INTO project_plans
+               (project_slug, problem_statement, description, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (project_slug, problem_statement or "", description or "", _now()),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def archive_plan(self, plan_id: int) -> None:
+        self._conn.execute(
+            "UPDATE project_plans SET archived_at = ? WHERE id = ? AND archived_at IS NULL",
+            (_now(), plan_id),
+        )
+        self._conn.commit()
+
+    def get_active_plan(self, project_slug: str) -> Optional[sqlite3.Row]:
+        """Return the most recent non-archived plan for the project."""
+        cur = self._conn.execute(
+            """SELECT * FROM project_plans
+               WHERE project_slug = ? AND archived_at IS NULL
+               ORDER BY created_at DESC LIMIT 1""",
+            (project_slug,),
+        )
+        return cur.fetchone()
+
+    def save_milestone(
+        self,
+        plan_id: int,
+        sequence_index: int,
+        name: str,
+        problem_slice: str,
+        use_cases: Optional[List[str]] = None,
+        success_criteria: Optional[List[str]] = None,
+        depends_on_names: Optional[List[str]] = None,
+        estimated_effort: Optional[str] = None,
+        status: str = "planned",
+    ) -> int:
+        if status not in ("planned", "in_progress", "completed", "skipped"):
+            status = "planned"
+        cur = self._conn.execute(
+            """INSERT INTO milestones
+               (plan_id, sequence_index, name, problem_slice,
+                use_cases_json, success_criteria_json, depends_on_json,
+                estimated_effort, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                plan_id, int(sequence_index), name, problem_slice,
+                json.dumps(use_cases or []),
+                json.dumps(success_criteria or []),
+                json.dumps(depends_on_names or []),
+                estimated_effort,
+                status,
+                _now(),
+            ),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def get_milestones(
+        self,
+        plan_id: int,
+        status: Optional[str] = None,
+    ) -> List[sqlite3.Row]:
+        if status is None:
+            cur = self._conn.execute(
+                "SELECT * FROM milestones WHERE plan_id = ? ORDER BY sequence_index",
+                (plan_id,),
+            )
+        else:
+            cur = self._conn.execute(
+                """SELECT * FROM milestones
+                   WHERE plan_id = ? AND status = ?
+                   ORDER BY sequence_index""",
+                (plan_id, status),
+            )
+        return cur.fetchall()
+
+    def get_milestone(self, milestone_id: int) -> Optional[sqlite3.Row]:
+        cur = self._conn.execute(
+            "SELECT * FROM milestones WHERE id = ?", (milestone_id,),
+        )
+        return cur.fetchone()
+
+    def update_milestone_status(self, milestone_id: int, status: str) -> None:
+        if status not in ("planned", "in_progress", "completed", "skipped"):
+            return
+        if status == "in_progress":
+            self._conn.execute(
+                """UPDATE milestones
+                   SET status = ?, started_at = COALESCE(started_at, ?)
+                   WHERE id = ?""",
+                (status, _now(), milestone_id),
+            )
+        elif status == "completed":
+            self._conn.execute(
+                """UPDATE milestones
+                   SET status = ?, completed_at = ?
+                   WHERE id = ?""",
+                (status, _now(), milestone_id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE milestones SET status = ? WHERE id = ?",
+                (status, milestone_id),
+            )
+        self._conn.commit()
+
+    def cost_by_milestone(self, plan_id: Optional[int] = None) -> List[sqlite3.Row]:
+        """Aggregate api_calls by milestone_id. Pass ``plan_id`` to scope
+        to one plan; otherwise rolls up across every milestone the
+        project has ever recorded against."""
+        if plan_id is None:
+            cur = self._conn.execute(
+                """SELECT m.id           AS milestone_id,
+                          m.name         AS name,
+                          m.sequence_index AS sequence_index,
+                          COUNT(c.id)    AS calls,
+                          COALESCE(SUM(c.input_tokens), 0)  AS input_tokens,
+                          COALESCE(SUM(c.output_tokens), 0) AS output_tokens,
+                          COALESCE(SUM(c.total_cost), 0.0)  AS total_cost
+                   FROM milestones m
+                   LEFT JOIN api_calls c ON c.milestone_id = m.id
+                   GROUP BY m.id
+                   ORDER BY m.sequence_index"""
+            )
+        else:
+            cur = self._conn.execute(
+                """SELECT m.id           AS milestone_id,
+                          m.name         AS name,
+                          m.sequence_index AS sequence_index,
+                          COUNT(c.id)    AS calls,
+                          COALESCE(SUM(c.input_tokens), 0)  AS input_tokens,
+                          COALESCE(SUM(c.output_tokens), 0) AS output_tokens,
+                          COALESCE(SUM(c.total_cost), 0.0)  AS total_cost
+                   FROM milestones m
+                   LEFT JOIN api_calls c ON c.milestone_id = m.id
+                   WHERE m.plan_id = ?
+                   GROUP BY m.id
+                   ORDER BY m.sequence_index""",
+                (plan_id,),
             )
         return cur.fetchall()
 
