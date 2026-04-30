@@ -47,6 +47,7 @@ class CallRecord:
     job_id: Optional[str] = None
     service_name: Optional[str] = None
     phase: Optional[str] = None
+    milestone_id: Optional[int] = None
 
 
 @dataclass
@@ -123,6 +124,7 @@ class CostTracker:
         self._job_id: Optional[str] = None
         self._service_name: Optional[str] = None
         self._phase: Optional[str] = None
+        self._milestone_id: Optional[int] = None
         # Records that arrived before a DB was attached are flushed when one
         # is. The set tracks rows already persisted so re-attach doesn't
         # double-write.
@@ -202,6 +204,7 @@ class CostTracker:
         issue_id: Optional[int] = None,
         service_name: Optional[str] = None,
         phase: Optional[str] = None,
+        milestone_id: Optional[int] = None,
     ) -> None:
         """Set any/all per-call context fields at once. Pass None to leave
         a field unchanged."""
@@ -214,6 +217,8 @@ class CostTracker:
                 self._service_name = service_name
             if phase is not None:
                 self._phase = phase
+            if milestone_id is not None:
+                self._milestone_id = milestone_id
 
     def set_service(self, service_name: Optional[str]) -> None:
         with self._lock:
@@ -226,6 +231,14 @@ class CostTracker:
     def set_phase(self, phase: Optional[str]) -> None:
         with self._lock:
             self._phase = phase
+
+    def set_milestone(self, milestone_id: Optional[int]) -> None:
+        """Tag subsequent records with this milestone_id. Used by future
+        evolve-mode runs that step the project through a Planner-produced
+        sequence of milestones; current architect.build() runs leave
+        this unset (NULL milestone_id rows)."""
+        with self._lock:
+            self._milestone_id = milestone_id
 
     @property
     def current_job_id(self) -> Optional[str]:
@@ -244,6 +257,7 @@ class CostTracker:
         issue_id: Optional[int] = None,
         service_name: Optional[str] = None,
         phase: Optional[str] = None,
+        milestone_id: Optional[int] = None,
     ) -> CallRecord:
         """Record one AI call. Cost is computed from the pricing table."""
         cost = price_call(model, input_tokens, output_tokens)
@@ -262,6 +276,9 @@ class CostTracker:
                 service_name if service_name is not None else self._service_name
             ),
             phase=phase if phase is not None else self._phase,
+            milestone_id=(
+                milestone_id if milestone_id is not None else self._milestone_id
+            ),
         )
         with self._lock:
             idx = len(self._records)
@@ -284,6 +301,7 @@ class CostTracker:
             self._job_id = None
             self._service_name = None
             self._phase = None
+            self._milestone_id = None
 
     def records(self) -> List[CallRecord]:
         with self._lock:

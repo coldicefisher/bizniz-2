@@ -26,6 +26,9 @@ class BiznizConfig(BaseModel):
     default_model: str = "gpt-4o-mini"
     engineer_model: str = "gpt-4o"
     architect_model: str = "gpt-4o"
+    # Top-tier model for the Planner agent (multi-week project sequencing).
+    # See bizniz/planner/. One call per project — top tier is justified.
+    planner_model: str = "gemini-pro"
     models: List[str] = [
         "gpt-4o-mini", "gpt-4o", "gpt-5",
         "claude-sonnet", "claude-opus",
@@ -93,6 +96,10 @@ class BiznizConfig(BaseModel):
     def make_engineer_client(self) -> BaseAIClient:
         """Create a client configured with the engineer model (best available)."""
         return self.make_client(model=self.engineer_model)
+
+    def make_planner_client(self) -> BaseAIClient:
+        """Create a client configured with the planner model (top tier)."""
+        return self.make_client(model=self.planner_model)
 
     def make_model_progression(self) -> ModelProgression:
         return ModelProgression(models=self.models)
