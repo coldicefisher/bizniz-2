@@ -45,6 +45,14 @@ def test_redis_url_env_var():
     assert out.env_vars["REDIS_URL"] == "redis://redis:6379/0"
 
 
+def test_redis_emits_host_and_port_env_vars():
+    """Skeletons differ in which env vars they read — some use REDIS_URL,
+    others REDIS_HOST + REDIS_PORT. We emit both."""
+    out = RedisTemplate().render(_ctx(_service()))
+    assert out.env_vars["REDIS_HOST"] == "redis"
+    assert out.env_vars["REDIS_PORT"] == "6379"
+
+
 def test_redis_url_uses_actual_service_name():
     """If the architect names the service "cache" or "queue", REDIS_URL
     must use that hostname — hardcoding "redis" causes DNS failures
@@ -58,6 +66,7 @@ def test_redis_url_uses_actual_service_name():
     )
     out = RedisTemplate().render(_ctx(cache))
     assert out.env_vars["REDIS_URL"] == "redis://cache:6379/0"
+    assert out.env_vars["REDIS_HOST"] == "cache"
 
 
 def test_no_workspace_or_infra_files():

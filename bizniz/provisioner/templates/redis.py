@@ -34,7 +34,13 @@ class RedisTemplate(InfraTemplate):
             compose_networks=["app-network"],
             # Hostname is the actual service name — architect may pick
             # "redis", "cache", "queue", etc. Hardcoding "redis" causes
-            # DNS failures inside containers when the architect picks
-            # a different name.
-            env_vars={"REDIS_URL": f"redis://{ctx.service.name}:6379/0"},
+            # DNS failures inside containers when the architect picks a
+            # different name. We emit BOTH the URL and the
+            # host/port pair because skeletons differ in which env vars
+            # they read.
+            env_vars={
+                "REDIS_URL": f"redis://{ctx.service.name}:6379/0",
+                "REDIS_HOST": ctx.service.name,
+                "REDIS_PORT": "6379",
+            },
         )
