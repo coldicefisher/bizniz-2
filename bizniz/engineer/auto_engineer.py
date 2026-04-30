@@ -90,8 +90,12 @@ class AutoEngineer(BaseAIAgent):
         on_status_message: Optional[Callable[[str], None]] = None,
         language: str = "python",
         available_models: Optional[List[str]] = None,
+        debugger_model: Optional[str] = None,
+        debugger_max_iterations: int = 12,
     ):
         self._language = language  # Must be set before super().__init__ reads _process_system_prompt
+        self._debugger_model = debugger_model
+        self._debugger_max_iterations = debugger_max_iterations
         super().__init__(
             client=client,
             environment=environment,
@@ -609,6 +613,220 @@ class AutoEngineer(BaseAIAgent):
                     workspace_context[change.filepath] = change.code
 
         return results
+
+    def run_three_phase(
+        self,
+        problem_statement: str,
+        analysis: Optional[EngineeringAnalysis] = None,
+    ) -> List[OrchestratorResult]:
+        """
+        Three-phase orchestration strategy:
+
+          Phase 1 (frame):    Walk every ticket once on the cheapest configured
+                              model with no tests, no Docker, no retry. Populates
+                              the workspace with real baseline code in topological
+                              order so later phases start from coherent code.
+
+          Phase 2 (escalate): For each model in the escalation chain
+                              (``self._available_models[1:]``), iterate over all
+                              still-failing tickets in topological order. One
+                              attempt per ticket per model: a single orchestrator
+                              run with ``max_iterations=2`` (initial generate +
+                              one repair). No deep test loops here — just a
+                              single shot at fixing what's broken.
+
+          Phase 3 (debug):    Anything still failing goes through the agentic
+                              debugger on ``self._debugger_model`` (top tier)
+                              with full discovery + run_command + run_tests
+                              tools. Up to ``self._debugger_max_iterations``
+                              per ticket.
+
+        Returns the orchestrator results in topological order. Tickets that
+        passed in an earlier phase keep their successful result; tickets that
+        never passed return their last failed attempt.
+        """
+        from bizniz.engineer.framing import flatten_layers_topo
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        if analysis is None:
+            analysis = self.analyze(problem_statement)
+
+        resolve_dependencies(analysis.issues)
+        for issue in analysis.issues:
+            if issue.depends_on_issues and issue.db_id is not None:
+                self._workspace.db.update_issue_depends_on(
+                    issue.db_id, issue.depends_on_issues
+                )
+        try:
+            layers = sort_into_layers(analysis.issues)
+        except CyclicDependencyError as e:
+            log(f"AutoEngineer: {e} — falling back to sequential dispatch")
+            return self.run(problem_statement)
+
+        log(
+            f"AutoEngineer: three-phase strategy — "
+            f"{len(analysis.issues)} ticket(s) across {len(layers)} layer(s)"
+        )
+
+        issues_topo = flatten_layers_topo(layers)
+
+        # ── Phase 1: framing ──────────────────────────────────────────────────
+        self._frame_all_issues(analysis, layers)
+
+        results_by_id: dict = {}
+        failing_ids = {i.db_id for i in issues_topo if i.db_id is not None}
+
+        # ── Phase 2: escalation chain ─────────────────────────────────────────
+        chain = list(self._available_models or [])
+        # First model is the framing tier; escalate through the rest
+        escalation_models = chain[1:] if len(chain) > 1 else chain
+
+        for model in escalation_models:
+            if not failing_ids:
+                break
+            log(
+                f"AutoEngineer: Phase 2 pass with model '{model}' — "
+                f"{len(failing_ids)} failing ticket(s)"
+            )
+            for issue in issues_topo:
+                if issue.db_id is None or issue.db_id not in failing_ids:
+                    continue
+                result = self._run_single_attempt(
+                    issue=issue,
+                    analysis=analysis,
+                    model=model,
+                    max_iterations=2,
+                    enable_agentic_debug=False,
+                    log=log,
+                )
+                results_by_id[issue.db_id] = result
+                if result.success:
+                    failing_ids.discard(issue.db_id)
+                    self._workspace.db.update_issue_status(issue.db_id, "closed")
+
+        # ── Phase 3: agentic debugger ─────────────────────────────────────────
+        debugger_model = self._debugger_model or (chain[-1] if chain else None)
+        if failing_ids and debugger_model:
+            log(
+                f"AutoEngineer: Phase 3 (agentic debug, model '{debugger_model}', "
+                f"max_iter={self._debugger_max_iterations}) — {len(failing_ids)} ticket(s)"
+            )
+            for issue in issues_topo:
+                if issue.db_id is None or issue.db_id not in failing_ids:
+                    continue
+                result = self._run_single_attempt(
+                    issue=issue,
+                    analysis=analysis,
+                    model=debugger_model,
+                    max_iterations=self._debugger_max_iterations,
+                    enable_agentic_debug=True,
+                    log=log,
+                )
+                results_by_id[issue.db_id] = result
+                if result.success:
+                    failing_ids.discard(issue.db_id)
+                    self._workspace.db.update_issue_status(issue.db_id, "closed")
+
+        # Assemble results in topological order
+        results: List[OrchestratorResult] = []
+        for issue in issues_topo:
+            if issue.db_id is None:
+                continue
+            r = results_by_id.get(issue.db_id)
+            if r is None:
+                r = OrchestratorResult(
+                    success=False, changes=[], test_files=[], iterations=0,
+                    strategy_used="three_phase",
+                )
+            results.append(r)
+
+        passed = sum(1 for r in results if r.success)
+        log(
+            f"AutoEngineer: three-phase complete — "
+            f"{passed}/{len(results)} ticket(s) passed"
+        )
+        return results
+
+    def _run_single_attempt(
+        self,
+        issue,
+        analysis: EngineeringAnalysis,
+        model: str,
+        max_iterations: int,
+        enable_agentic_debug: bool,
+        log: Callable[[str], None],
+    ) -> OrchestratorResult:
+        """
+        Run one orchestrator attempt for an issue with the given model and
+        knobs. Used by run_three_phase for both the escalation passes
+        (max_iter=2, agentic=False) and the debug round (max_iter=N,
+        agentic=True).
+        """
+        prompt = issue.description or ""
+        if issue.test_setup_hint:
+            prompt += f"\n\nTEST SETUP HINT:\n{issue.test_setup_hint}"
+
+        target_files = [
+            {"filepath": tf.filepath, "action": tf.action}
+            for tf in issue.target_files
+        ]
+        test_files = list(issue.test_files or [])
+
+        arch_context = ""
+        dependency_edges: list = []
+        if analysis.architecture is not None:
+            arch_context = self.format_architecture_context(analysis.architecture)
+            dependency_edges = list(analysis.architecture.dependencies or [])
+
+        try:
+            orchestrator = self._orchestrator_factory(suggested_model=model)
+        except Exception as e:
+            log(
+                f"AutoEngineer: orchestrator factory failed for issue "
+                f"#{issue.db_id} ({type(e).__name__}: {e})"
+            )
+            return OrchestratorResult(
+                success=False, changes=[], test_files=[], iterations=0,
+                strategy_used="three_phase",
+            )
+
+        # Override knobs for this phase. The factory builds a fresh orchestrator
+        # per call so this mutation is scoped to one ticket attempt.
+        orchestrator._max_iterations = max_iterations
+        orchestrator._enable_agentic_debug = enable_agentic_debug
+
+        try:
+            return orchestrator.run_multi(
+                prompt=prompt,
+                target_files=target_files,
+                test_files=test_files,
+                architecture_context=arch_context,
+                initial_model=model,
+                strategy=CodingStrategy.CODE_FIRST,
+                workspace_context=None,
+                dependency_edges=dependency_edges,
+            )
+        except OrchestratorMaxIterationsError:
+            return OrchestratorResult(
+                success=False, changes=[], test_files=[],
+                iterations=max_iterations,
+                strategy_used="three_phase",
+            )
+        except AIInsufficientFunds:
+            raise
+        except Exception as e:
+            log(
+                f"AutoEngineer: issue #{issue.db_id} crashed during "
+                f"phase attempt with '{model}' ({type(e).__name__}: {e})"
+            )
+            return OrchestratorResult(
+                success=False, changes=[], test_files=[], iterations=0,
+                strategy_used="three_phase",
+                failure_context=str(e),
+            )
 
     def _frame_all_issues(self, analysis: EngineeringAnalysis, layers) -> None:
         """

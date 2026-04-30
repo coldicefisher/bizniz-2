@@ -34,6 +34,12 @@ class BiznizConfig(BaseModel):
     autocoder_models: Optional[List[str]] = None
     autotester_models: Optional[List[str]] = None
     repair_models: Optional[List[str]] = None
+    # Three-phase strategy (used when AutoEngineer.run_three_phase is dispatched):
+    #   debugger_model           — top-tier model for Phase 3 agentic debugging
+    #                              (full context + discovery tools + run_command + run_tests)
+    #   debugger_max_iterations  — per-ticket cap for the agentic debugger
+    debugger_model: str = "gemini-pro"
+    debugger_max_iterations: int = 12
     # Escalation thresholds (consecutive failures before escalating model)
     stall_threshold: int = 3
     agentic_debug_threshold: int = 5

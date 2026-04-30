@@ -170,6 +170,8 @@ def _make_engineer(config, workspace, on_status_message=None, image_name=None, l
         on_status_message=on_status_message,
         language=language,
         available_models=config.autocoder_models or config.models,
+        debugger_model=config.debugger_model,
+        debugger_max_iterations=config.debugger_max_iterations,
     )
 
 

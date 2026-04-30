@@ -16,6 +16,10 @@ autotester_models:
 repair_models:
   - gemini-flash
   - gemini-pro
+# Three-phase strategy (run_three_phase): top-tier model for the agentic
+# debugging round and the per-ticket iteration cap there.
+debugger_model: gemini-pro
+debugger_max_iterations: 12
 stall_threshold: 3
 agentic_debug_threshold: 2
 enable_agentic_debug: false

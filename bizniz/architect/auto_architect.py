@@ -517,7 +517,9 @@ class AutoArchitect(BaseAIAgent):
                                 description=issue.description,
                             )
 
-                results = engineer.run_layered(service_prompt, analysis=analysis)
+                # Three-phase strategy: cheap framing pass → escalation chain
+                # over all still-failing tickets → agentic debug on what's left.
+                results = engineer.run_three_phase(service_prompt, analysis=analysis)
             else:
                 # Sequential per-issue dispatch (legacy behavior)
                 analysis = engineer.analyze(service_prompt)
