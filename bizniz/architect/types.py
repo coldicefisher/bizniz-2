@@ -26,8 +26,11 @@ class SystemArchitecture(BaseModel):
     project_name: str
     project_slug: str  # e.g. "pet_groomer"
     services: List[ServiceDefinition]
-    docker_compose: str  # generated docker-compose.yml content
     description: str
+    # Optional AI-suggested compose preview retained for the human-readable
+    # architecture doc only. The Provisioner builds the actual
+    # docker-compose.yml deterministically from `services`.
+    docker_compose: Optional[str] = None
 
 
 class ServiceResult(BaseModel):

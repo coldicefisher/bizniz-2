@@ -8,7 +8,6 @@ AutoArchitectSchema = {
             "project_slug",
             "description",
             "services",
-            "docker_compose",
         ],
         "properties": {
             "project_name": {
@@ -79,10 +78,6 @@ AutoArchitectSchema = {
                     },
                     "additionalProperties": False,
                 },
-            },
-            "docker_compose": {
-                "type": "string",
-                "description": "Complete docker-compose.yml content",
             },
         },
         "additionalProperties": False,
