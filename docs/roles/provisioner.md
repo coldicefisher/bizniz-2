@@ -20,6 +20,13 @@ The pipeline is **probe → reconcile → materialize**: read what's already on 
 | `project_parent` | `str \| Path` | Parent dir under which `<project_slug>/` is created |
 | `on_status_message` | `Optional[Callable[[str], None]]` | Log callback. Receives every status line the Provisioner emits (probe results, reconcile decisions, image build progress, skeleton clone status). |
 | `build_images` | `bool = True` | When `False`, skip `docker build` (used by tests) |
+| `ai_client_factory` | `Optional[Callable[[model_name], BaseAIClient]]` | Required only when an AI escape hatch is enabled. Factory pattern keeps the Provisioner from importing `BiznizConfig` directly. |
+| `ai_fallback_enabled` | `bool = False` | Opt-in: AI fills in templates for unknown infrastructure frameworks. See [AI escape hatches](#ai-escape-hatches). |
+| `ai_fallback_model` | `str = "gemini-flash"` | Model name passed to `ai_client_factory` for fallback calls. |
+| `ai_recovery_enabled` | `bool = False` | Opt-in: AI patches a failed Dockerfile and re-attempts the build. |
+| `ai_recovery_model` | `str = "gemini-pro"` | Model for recovery calls — uses a top-tier model since the failure may be subtle. |
+| `ai_recovery_max_retries` | `int = 2` | Hard cap on per-service AI rebuild attempts. |
+| `ai_template_cache_dir` | `Optional[Path]` | Override the AI fallback cache location. Defaults to `BIZNIZ_TEMPLATE_CACHE_DIR` env var or `~/.bizniz/template_cache`. |
 
 ## Public API
 
@@ -103,6 +110,51 @@ Infrastructure services are materialized via the template registry in `bizniz/pr
 App services (`backend`, `frontend`, `worker`) are materialized either by **skeleton seeding** (when `service.skeleton ∈ {fastapi, react, angular, teams-*}`) or by the generic `__python_app__` / `__typescript_app__` templates.
 
 When a skeleton's repo isn't present locally, `seed_workspace()` auto-clones it from `github.com/coldicefisher/<repo>.git` into `BIZNIZ_SKELETONS_DIR` (default `~/`). Failures (missing git, network error, malformed repo) raise `FileNotFoundError` and the Provisioner falls back to the generic app template.
+
+## AI escape hatches
+
+Two opt-in AI calls let the Provisioner handle cases the static templates and skeletons can't: unknown infrastructure frameworks, and Docker builds that fail on a real machine. Both default to **off**. Both have **structural guarantees** — the AI's response schema explicitly excludes anything that would invalidate the architect's plan (ports, depends_on, networks, compose-level wiring).
+
+### Hatch 1: Template-gap fallback
+
+**When it fires.** The architect requested an infrastructure service whose `framework` has no template registered (e.g. `clickhouse`, `kafka`, `dgraph`). The static path returns `template_name=None` and the compose entry is dropped. With `ai_fallback_enabled=True` and an `ai_client_factory`, the Provisioner asks an AI (default `gemini-flash`) to produce a starter setup.
+
+**What the AI emits** (`AIFallbackResponse`):
+
+- `dockerfile`: full Dockerfile content, OR
+- `upstream_image`: a published image like `clickhouse/clickhouse-server:24.3` (preferred for well-known infra)
+- `env_vars`: dict of env vars
+- `infra_files`: dict of additional config files (paths relative to the workspace dir)
+- `notes`: brief explanation
+
+**What the AI does NOT emit.** The schema has no fields for ports, depends_on, networks, healthcheck, or volumes. The Provisioner layers those on from the architect's plan when wrapping the response in an `AIFallbackTemplate`.
+
+**Caching.** Responses are cached at `~/.bizniz/template_cache/<framework>__<service_type>.json` (override with `BIZNIZ_TEMPLATE_CACHE_DIR` or constructor arg). Subsequent runs against the same `(framework, service_type)` pair are zero-AI. There's no TTL — invalidate by deleting the cache file.
+
+**Failure mode.** If the AI call raises (rate limit, schema-validation error, empty response), the Provisioner logs a warning and falls through to the original behavior: no compose entry for that service. Static templates with the same framework name always win — fallback only triggers on a registry miss.
+
+### Hatch 2: Build-failure recovery
+
+**When it fires.** A `docker build` raises during `_build_images_per_action`. With `ai_recovery_enabled=True`, the Provisioner reads the current Dockerfile, sends it plus the build error tail (last 4KB of stderr) to an AI (default `gemini-pro`), writes the patched Dockerfile back, and retries the build. Up to `ai_recovery_max_retries` (default 2) attempts.
+
+**What the AI emits** (`AIRecoveryResponse`):
+
+- `dockerfile`: full patched Dockerfile (not a diff)
+- `explanation`: brief reason for the patch
+
+**What the AI does NOT emit.** The schema rejects any compose-level changes. The AI cannot edit ports, depends_on, requirements.txt, or anything outside the Dockerfile.
+
+**Backups.** Before each rewrite, the prior Dockerfile is saved to `Dockerfile.pre-ai-recovery-<attempt>` next to the original so the user can audit what changed.
+
+**Failure mode.** If retries exhaust, the AI call raises, or the AI returns an empty Dockerfile, the service is marked `failed` in the project DB exactly as it would be without the hatch. The recovery never widens its blast radius.
+
+### Why opt-in
+
+The escape hatches exist for the long tail of frameworks the registry doesn't cover and for the genuinely surprising build failures. They're off by default because:
+
+- **Predictability.** Most users want `provision()` to be a pure function of the architecture. AI introduces non-determinism even with caching.
+- **Cost.** Recovery in particular calls a top-tier model on a hot path (build failure mid-pipeline).
+- **Audit trail.** When the AI rewrites a Dockerfile, that change isn't in git. Users opting in should be aware that `Dockerfile.pre-ai-recovery-*` files appear next to their Dockerfiles.
 
 ## Idempotency rules
 
