@@ -105,7 +105,7 @@ if diagnosis.code_fixes:
 
 ## Gotchas
 
-- **Use a dedicated client.** The docstring is explicit: do not share with autocoder/autotester. The agent uses `use_message_history=False` on every call so the client's history doesn't contaminate, but the converse can also bite — long debugger conversations can poison a shared history if accidentally reused.
+- **Use a dedicated client.** The docstring is explicit: do not share with coder/tester. The agent uses `use_message_history=False` on every call so the client's history doesn't contaminate, but the converse can also bite — long debugger conversations can poison a shared history if accidentally reused.
 - **`run_command` is unrestricted shell access.** It runs with `shell=True` in the workspace root with a 60-second timeout. There's no allowlist. Don't expose this debugger to untrusted prompts.
 - **Final submission is a forced single call.** When `max_turns` is exhausted, the loop appends "you must submit now" and makes one more LLM call. If THAT response isn't a `submit_fix`, the absolute fallback returns a low-confidence stub diagnosis.
 - **Initial context excludes file contents.** The initial user message tells the LLM what files exist (paths only) and the error output. The LLM is expected to use `view_file` to read what it needs. This keeps the prompt small.

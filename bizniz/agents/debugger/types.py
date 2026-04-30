@@ -15,17 +15,17 @@ class DebuggerError(Exception):
     pass
 
 
-# --- Quick debugger types (was autodebugger) ---
+# --- Quick debugger types (was quick_debugger) ---
 
-class AutodebuggerError(DebuggerError):
+class QuickDebuggerError(DebuggerError):
     pass
 
 
-class AutodebuggerBadAIResponseError(AutodebuggerError):
+class QuickDebuggerBadAIResponseError(QuickDebuggerError):
     pass
 
 
-class AutodebuggerDiagnosis(BaseModel):
+class QuickDebuggerDiagnosis(BaseModel):
     """Structured diagnosis produced by the QuickDebugger agent."""
     diagnosis: str
     fix_target: Literal["code", "tests"]
@@ -34,7 +34,7 @@ class AutodebuggerDiagnosis(BaseModel):
     affected_files: List[str] = []
 
 
-class AutodebuggerOnEventCallback(BaseModel):
+class QuickDebuggerOnEventCallback(BaseModel):
     stage: Literal["scan", "diagnose"]
     status: Literal["start", "success", "failure"]
     attempt: Optional[int] = None
@@ -78,7 +78,7 @@ class AgenticDiagnosis(BaseModel):
     """
     Unified diagnosis result from the AgenticDebugger.
 
-    Combines fields from both the old AutodebuggerDiagnosis and DeepDiagnosis,
+    Combines fields from both the old QuickDebuggerDiagnosis and DeepDiagnosis,
     plus optional direct code fixes.
     """
     diagnosis: str = ""

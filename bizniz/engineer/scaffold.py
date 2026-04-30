@@ -3,9 +3,9 @@ Scaffold generator — creates stub files from an ArchitecturePlan.
 
 Deterministic, no AI calls. Runs between analyze() and run_layered() to
 ensure every file in the dependency graph exists with valid imports before
-the autocoder/autotester touch anything.
+the coder/tester touch anything.
 
-The autocoder then MODIFIES these stubs instead of creating from scratch,
+The coder then MODIFIES these stubs instead of creating from scratch,
 eliminating the entire class of import-chain and missing-file failures.
 """
 
@@ -32,7 +32,7 @@ def scaffold_from_plan(
     Create stub source files and test files from the architecture plan.
 
     Returns a dict of filepath -> content for all scaffolded files (the import map).
-    Every file is written to the workspace so the autocoder sees them as existing.
+    Every file is written to the workspace so the coder sees them as existing.
     """
 
     def log(msg: str):
@@ -264,7 +264,7 @@ def _generate_test_stub(
     lines.append("")
     lines.append("")
     lines.append(f"def test_{_slugify(issue.title)}_placeholder():")
-    lines.append(f'    """Placeholder — autocoder will replace with real tests."""')
+    lines.append(f'    """Placeholder — coder will replace with real tests."""')
     lines.append("    pass")
     lines.append("")
 

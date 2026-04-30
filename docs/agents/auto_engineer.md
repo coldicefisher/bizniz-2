@@ -1,6 +1,6 @@
-# AutoEngineer
+# Engineer
 
-`bizniz/engineer/auto_engineer.py`. The per-service software-engineering layer between the architect and the orchestrator.
+`bizniz/engineer/engineer.py`. The per-service software-engineering layer between the architect and the orchestrator.
 
 ## Purpose
 
@@ -33,10 +33,10 @@ It persists everything to the **workspace DB** (`WorkspaceDB` / `WorkspaceScope`
 
 ### `analyze(problem_statement) → EngineeringAnalysis`
 
-The full analysis sequence (see `engineer/auto_engineer.py:114-220`):
+The full analysis sequence (see `engineer/engineer.py:114-220`):
 
 1. Save problem statement → `problem_id`.
-2. AI call with `AutoEngineerSchema` → requirements, use cases, draft issues.
+2. AI call with `EngineerSchema` → requirements, use cases, draft issues.
 3. AI call with `ArchitecturePlanSchema` → `ArchitecturePlan`.
 4. Re-analyze with the plan as context. Delete draft issues and persist the refined ones.
 5. Backfill `test_setup_hint` for any issue that touches an endpoint/route/middleware but had an empty hint (`_backfill_test_setup_hints`).
@@ -76,7 +76,7 @@ Standalone access to step 2 of `analyze`. Calls AI with `ArchitecturePlanSchema`
 
 ### `create_package_structure(plan)`
 
-Calls `workspace.init_as_package(plan.package_name, ...)`. **Only the root package directory and `pyproject.toml` are created** — sub-namespaces are NOT pre-created because the autocoder may produce single-file modules (`models.py`) instead of packages (`models/__init__.py`), and having both causes import collisions.
+Calls `workspace.init_as_package(plan.package_name, ...)`. **Only the root package directory and `pyproject.toml` are created** — sub-namespaces are NOT pre-created because the coder may produce single-file modules (`models.py`) instead of packages (`models/__init__.py`), and having both causes import collisions.
 
 ### `review_drift(plan, drift_items) → GovernanceDecision`
 
@@ -89,7 +89,7 @@ Static-style formatter that produces a compact summary string of the plan, used 
 ### Lifecycle
 
 - `close()` closes the workspace DB.
-- Implements `__enter__` / `__exit__` so it can be used as a context manager (which is what `AutoArchitect`'s `engineer_factory` produces).
+- Implements `__enter__` / `__exit__` so it can be used as a context manager (which is what `Architect`'s `engineer_factory` produces).
 
 ## Retry strategies
 
@@ -107,21 +107,21 @@ The retry chain in `dispatch(...)` uses these private helpers:
 ## Example
 
 ```python
-from bizniz.engineer.auto_engineer import AutoEngineer
+from bizniz.engineer.engineer import Engineer
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 
 def make_orchestrator(suggested_model=None) -> CodingOrchestrator:
     return CodingOrchestrator(
-        autocoder=...,
-        autotester=...,
-        autodebugger=...,
+        coder=...,
+        tester=...,
+        quick_debugger=...,
         test_environment=...,
         workspace=workspace,
         client=client,
         ...
     )
 
-with AutoEngineer(
+with Engineer(
     client=client,
     environment=env,
     workspace=workspace,
@@ -138,13 +138,13 @@ with AutoEngineer(
 ## Interactions
 
 - **Calls into:** `BaseAIClient.get_text` (analysis, plan, governance, re-prompt, scope reduction), `WorkspaceDB.save_problem / save_issue / save_architecture_plan / ...`, `scaffold_from_plan`, `resolve_dependencies` + `sort_into_layers`, `orchestrator_factory` then `orchestrator.run_multi`, `workspace.init_as_package`.
-- **Called by:** `AutoArchitect._dispatch_engineer` (one engineer per service).
+- **Called by:** `Architect._dispatch_engineer` (one engineer per service).
 
 ## Gotchas
 
 - **`_process_system_prompt` reads `self._language`.** That's why `self._language` is set BEFORE `super().__init__(...)`.
 - **The first analyze call's draft issues are deleted.** `analyze` runs analysis twice (with and without architecture context). The first call's issues are wiped from the DB before the second call's are saved (`workspace.db.delete_issues(problem_id)`). Don't rely on the draft IDs.
-- **Sub-namespaces are NOT auto-created.** Only the root package dir + tests dir + pyproject.toml. Subdirs are created lazily by the autocoder and the scaffold step.
+- **Sub-namespaces are NOT auto-created.** Only the root package dir + tests dir + pyproject.toml. Subdirs are created lazily by the coder and the scaffold step.
 - **`run_layered` falls back to `run` on cycles.** `CyclicDependencyError` is caught and silently downgrades to sequential dispatch.
 - **Governance only runs on dispatch finalization.** If `result.architecture_drift_detected` is True and `result.drift_files` is non-empty, `review_drift` runs and may modify the plan in the DB.
 - **`run_multi` is the orchestrator entry point used here**, not `run`. The single-file `run` is reserved for older single-file cases.

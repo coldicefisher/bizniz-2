@@ -19,8 +19,8 @@ Every key supported by `BiznizConfig` (defined in `bizniz/config/bizniz_config.p
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `models` | list[str] | `["gpt-4o-mini", "gpt-4o", "gpt-5", "claude-sonnet", "claude-opus"]` | Default progression for stall escalation |
-| `autocoder_models` | list[str] \| null | null | Override for autocoder; falls back to `models` |
-| `autotester_models` | list[str] \| null | null | Override for autotester; falls back to `models` |
+| `coder_models` | list[str] \| null | null | Override for coder; falls back to `models` |
+| `tester_models` | list[str] \| null | null | Override for tester; falls back to `models` |
 | `repair_models` | list[str] \| null | null | Override for repair; falls back to `models` |
 
 Provider routing happens automatically by name prefix:
@@ -42,7 +42,7 @@ Provider routing happens automatically by name prefix:
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `layered_generation` | bool | `true` | Use `AutoEngineer.run_layered`. False uses `run` (sequential) |
+| `layered_generation` | bool | `true` | Use `Engineer.run_layered`. False uses `run` (sequential) |
 | `parallel_services` | bool | `true` | Architect dispatches services within a layer in parallel |
 | `max_service_workers` | int | `4` | Thread pool size for parallel service dispatch |
 | `max_iterations` | int | `20` | Per-issue inner loop cap in the orchestrator |
@@ -86,11 +86,11 @@ models:
   - gemini-flash-lite
   - gemini-flash
   - gemini-pro
-autocoder_models:
+coder_models:
   - gemini-flash-lite
   - gemini-flash
   - gemini-pro
-autotester_models:
+tester_models:
   - gemini-flash-lite
   - gemini-flash
   - gemini-pro
@@ -117,7 +117,7 @@ models:
   - gpt-4o
   - claude-sonnet
   - claude-opus
-autocoder_models:
+coder_models:
   - gpt-4o-mini
   - gpt-4o
   - gpt-5

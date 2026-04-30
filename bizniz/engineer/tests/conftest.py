@@ -6,10 +6,10 @@ from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-from bizniz.autocoder.types import FileChange
-from bizniz.autotester.types import GeneratedTestFile
+from bizniz.agents.coder.types import FileChange
+from bizniz.tester.types import GeneratedTestFile
 from bizniz.orchestrator.types import OrchestratorResult
-from bizniz.engineer.auto_engineer import AutoEngineer
+from bizniz.engineer.engineer import Engineer
 
 
 VALID_ANALYSIS_RESPONSE = {
@@ -95,7 +95,7 @@ def mock_orchestrator():
 
 @pytest.fixture
 def engineer(mock_client, mock_environment, mock_workspace, mock_orchestrator):
-    return AutoEngineer(
+    return Engineer(
         client=mock_client,
         environment=mock_environment,
         workspace=mock_workspace,

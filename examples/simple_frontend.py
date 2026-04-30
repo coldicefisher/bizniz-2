@@ -1,7 +1,7 @@
 """
 Example: Simple Frontend App
 
-Creates a single-service TypeScript/React frontend app using the AutoArchitect
+Creates a single-service TypeScript/React frontend app using the Architect
 pipeline. Used for testing and debugging TypeScript support end-to-end.
 
 Requirements:
@@ -20,18 +20,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from bizniz.autocoder.autocoder import Autocoder
-from bizniz.autodebugger.autodebugger import Autodebugger
-from bizniz.agentic_debugger.agentic_debugger import AgenticDebugger
-from bizniz.autotester.autotester import Autotester
+from bizniz.agents.coder.coder import Coder
+from bizniz.agents.debugger.quick import QuickDebugger
+from bizniz.agents.debugger.agentic import AgenticDebugger
+from bizniz.tester.tester import Tester
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
 from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
 from bizniz.environment.docker_jest_environment import DockerJestEnvironment
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-from bizniz.engineer.auto_engineer import AutoEngineer
-from bizniz.architect.auto_architect import AutoArchitect
+from bizniz.engineer.engineer import Engineer
+from bizniz.architect.architect import Architect
 from bizniz.workspace.local_workspace import LocalWorkspace
 
 
@@ -109,9 +109,9 @@ def _make_orchestrator(config, workspace, on_status_message=None, suggested_mode
     issue_client = config.make_client(model=suggested_model) if suggested_model else config.make_client()
 
     return CodingOrchestrator(
-        autocoder=Autocoder(client=issue_client, environment=sandbox, workspace=workspace),
-        autotester=Autotester(client=issue_client, environment=sandbox, workspace=workspace),
-        autodebugger=Autodebugger(client=issue_client, environment=sandbox, workspace=workspace),
+        coder=Coder(client=issue_client, environment=sandbox, workspace=workspace),
+        tester=Tester(client=issue_client, environment=sandbox, workspace=workspace),
+        quick_debugger=QuickDebugger(client=issue_client, environment=sandbox, workspace=workspace),
         test_environment=test_env,
         workspace=workspace,
         client=issue_client,
@@ -136,7 +136,7 @@ def _make_engineer(config, workspace, on_status_message=None, image_name=None, l
 
     engineer_client = config.make_engineer_client()
 
-    return AutoEngineer(
+    return Engineer(
         client=engineer_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
@@ -167,7 +167,7 @@ if __name__ == "__main__":
 
     root_workspace = LocalWorkspace.from_name(project_name, parent=project_parent)
 
-    architect = AutoArchitect(
+    architect = Architect(
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=root_workspace,

@@ -125,9 +125,9 @@ class EngineeringAnalysis(BaseModel):
 
 # ── Errors ─────────────────────────────────────────────────────────────────────
 
-class AutoEngineerError(Exception):
+class EngineerError(Exception):
     pass
 
 
-class AutoEngineerBadAIResponseError(AutoEngineerError):
+class EngineerBadAIResponseError(EngineerError):
     pass

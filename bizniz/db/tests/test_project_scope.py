@@ -132,10 +132,10 @@ def test_log_issue_custom_status(ps):
 
 def test_update_issue(ps):
     issue_id = ps.log_issue("api", "Task", "Desc")
-    ps.update_issue(issue_id, "in_progress", strategy_used="autocoder", iterations=3)
+    ps.update_issue(issue_id, "in_progress", strategy_used="coder", iterations=3)
     issues = ps.get_all_issues()
     assert issues[0]["status"] == "in_progress"
-    assert issues[0]["strategy_used"] == "autocoder"
+    assert issues[0]["strategy_used"] == "coder"
     assert issues[0]["iterations"] == 3
 
 

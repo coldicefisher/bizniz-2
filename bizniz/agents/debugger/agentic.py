@@ -47,7 +47,7 @@ class AgenticDebugger(BaseDebugger):
     ----------
     client:
         AI client instance. Should be a dedicated instance (not shared with
-        autocoder/autotester) to avoid message history contamination.
+        coder/tester) to avoid message history contamination.
     workspace:
         The workspace to explore files in.
     environment:

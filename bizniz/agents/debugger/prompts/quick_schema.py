@@ -1,4 +1,4 @@
-AutodebuggerSchema = {
+QuickDebuggerSchema = {
     "name": "autodebugger_diagnosis",
     "strict": True,
     "schema": {

@@ -59,18 +59,18 @@ class LanguageStrategy(ABC):
         ...
 
     @abstractmethod
-    def get_autocoder_system_prompt(self, evaluation_environment: str = "") -> str:
-        """Return the autocoder system prompt for this language."""
+    def get_coder_system_prompt(self, evaluation_environment: str = "") -> str:
+        """Return the coder system prompt for this language."""
         ...
 
     @abstractmethod
-    def get_autotester_system_prompt(self) -> str:
-        """Return the autotester system prompt for this language."""
+    def get_tester_system_prompt(self) -> str:
+        """Return the tester system prompt for this language."""
         ...
 
     @abstractmethod
-    def get_autotester_user_prompt(self) -> str:
-        """Return the autotester user prompt template for this language."""
+    def get_tester_user_prompt(self) -> str:
+        """Return the tester user prompt template for this language."""
         ...
 
     @abstractmethod

@@ -1,5 +1,5 @@
 """
-Tests for AutoEngineer architecture planning and governance methods.
+Tests for Engineer architecture planning and governance methods.
 """
 import json
 import pytest
@@ -9,7 +9,7 @@ from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-from bizniz.engineer.auto_engineer import AutoEngineer
+from bizniz.engineer.engineer import Engineer
 from bizniz.engineer.types import (
     ArchitecturePlan,
     ArchitectureNamespace,
@@ -94,7 +94,7 @@ class TestPlanArchitecture:
         client = MagicMock(spec=BaseAIClient)
         client.get_text.return_value = make_ai_response(RICH_PLAN_RESPONSE)
 
-        eng = AutoEngineer(
+        eng = Engineer(
             client=client,
             environment=mock_env,
             workspace=ws,
@@ -125,7 +125,7 @@ class TestPlanArchitecture:
         client = MagicMock(spec=BaseAIClient)
         client.get_text.return_value = make_ai_response(RICH_PLAN_RESPONSE)
 
-        eng = AutoEngineer(
+        eng = Engineer(
             client=client, environment=mock_env, workspace=ws,
             orchestrator_factory=lambda: MagicMock(spec=CodingOrchestrator),
             max_retries=3,
@@ -148,7 +148,7 @@ class TestPlanArchitecture:
         client = MagicMock(spec=BaseAIClient)
         client.get_text.return_value = make_ai_response(RICH_PLAN_RESPONSE)
 
-        eng = AutoEngineer(
+        eng = Engineer(
             client=client, environment=mock_env, workspace=ws,
             orchestrator_factory=lambda: MagicMock(spec=CodingOrchestrator),
             max_retries=3,
@@ -172,7 +172,7 @@ class TestPlanArchitecture:
         client = MagicMock(spec=BaseAIClient)
         client.get_text.return_value = make_ai_response(RICH_PLAN_RESPONSE)
 
-        eng = AutoEngineer(
+        eng = Engineer(
             client=client, environment=mock_env, workspace=ws,
             orchestrator_factory=lambda: MagicMock(spec=CodingOrchestrator),
             max_retries=3,
@@ -189,7 +189,7 @@ class TestPlanArchitecture:
         client = MagicMock(spec=BaseAIClient)
         client.get_text.return_value = make_ai_response(RICH_PLAN_RESPONSE)
 
-        eng = AutoEngineer(
+        eng = Engineer(
             client=client, environment=mock_env, workspace=ws,
             orchestrator_factory=lambda: MagicMock(spec=CodingOrchestrator),
             max_retries=3,
@@ -209,7 +209,7 @@ class TestPlanArchitecture:
 class TestCreatePackageStructure:
 
     def test_creates_package_directory(self, ws, mock_env):
-        eng = AutoEngineer(
+        eng = Engineer(
             client=MagicMock(spec=BaseAIClient),
             environment=mock_env,
             workspace=ws,
@@ -245,7 +245,7 @@ class TestFormatArchitectureContext:
             package_name="myapp",
             root_namespace="myapp",
         )
-        ctx = AutoEngineer.format_architecture_context(plan)
+        ctx = Engineer.format_architecture_context(plan)
         assert "myapp" in ctx
 
     def test_includes_namespaces(self):
@@ -257,7 +257,7 @@ class TestFormatArchitectureContext:
                 ArchitectureNamespace(namespace_path="myapp/models", purpose="Domain models"),
             ],
         )
-        ctx = AutoEngineer.format_architecture_context(plan)
+        ctx = Engineer.format_architecture_context(plan)
         assert "myapp/models" in ctx
         assert "Domain models" in ctx
 
@@ -274,7 +274,7 @@ class TestFormatArchitectureContext:
                 ),
             ],
         )
-        ctx = AutoEngineer.format_architecture_context(plan)
+        ctx = Engineer.format_architecture_context(plan)
         assert "User" in ctx
         assert "name: str" in ctx
 
@@ -291,7 +291,7 @@ class TestFormatArchitectureContext:
                 ),
             ],
         )
-        ctx = AutoEngineer.format_architecture_context(plan)
+        ctx = Engineer.format_architecture_context(plan)
         assert "myapp/services/auth.py" in ctx
         assert "myapp/models/user.py" in ctx
         assert "User" in ctx
@@ -307,7 +307,7 @@ class TestReviewDrift:
             "plan_updates": "",
         })
 
-        eng = AutoEngineer(
+        eng = Engineer(
             client=client, environment=mock_env, workspace=ws,
             orchestrator_factory=lambda: MagicMock(spec=CodingOrchestrator),
             max_retries=3,
@@ -320,7 +320,7 @@ class TestReviewDrift:
         )
 
         drift_items = [
-            DriftItem(filepath="myapp/utils.py", drift_type="unplanned_file", reason="Created by autocoder"),
+            DriftItem(filepath="myapp/utils.py", drift_type="unplanned_file", reason="Created by coder"),
         ]
 
         decision = eng.review_drift(plan, drift_items)
@@ -337,7 +337,7 @@ class TestReviewDrift:
             "plan_updates": "",
         })
 
-        eng = AutoEngineer(
+        eng = Engineer(
             client=client, environment=mock_env, workspace=ws,
             orchestrator_factory=lambda: MagicMock(spec=CodingOrchestrator),
             max_retries=3,
@@ -360,7 +360,7 @@ class TestReviewDrift:
             "plan_updates": plan_updates,
         })
 
-        eng = AutoEngineer(
+        eng = Engineer(
             client=client, environment=mock_env, workspace=ws,
             orchestrator_factory=lambda: MagicMock(spec=CodingOrchestrator),
             max_retries=3,

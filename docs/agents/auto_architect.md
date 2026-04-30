@@ -1,10 +1,10 @@
-# AutoArchitect
+# Architect
 
-The system decomposer. `bizniz/architect/auto_architect.py` defines the agent at the very top of the pipeline: it takes a free-form problem statement plus a project name and returns a fully provisioned, Docker-built, multi-service workspace.
+The system decomposer. `bizniz/architect/architect.py` defines the agent at the very top of the pipeline: it takes a free-form problem statement plus a project name and returns a fully provisioned, Docker-built, multi-service workspace.
 
 ## Purpose
 
-A single `AutoArchitect.build(...)` call performs every step needed to go from "I want a pet groomer scheduling app" to a directory tree containing one Dockerfile per service, a working `docker-compose.yml`, freshly built Docker images, and N `AutoEngineer` subprocesses fanning out to write actual code. It also owns the new skeleton-seeding flow described in [architecture/skeleton_seeding.md](../architecture/skeleton_seeding.md).
+A single `Architect.build(...)` call performs every step needed to go from "I want a pet groomer scheduling app" to a directory tree containing one Dockerfile per service, a working `docker-compose.yml`, freshly built Docker images, and N `Engineer` subprocesses fanning out to write actual code. It also owns the new skeleton-seeding flow described in [architecture/skeleton_seeding.md](../architecture/skeleton_seeding.md).
 
 ## Constructor
 
@@ -13,7 +13,7 @@ A single `AutoArchitect.build(...)` call performs every step needed to go from "
 | `client` | `BaseAIClient` | AI provider for the decomposition call |
 | `environment` | `BaseExecutionEnvironment` | Required by `BaseAIAgent`; not actually invoked here |
 | `workspace` | `BaseWorkspace` | The architect's own scratch workspace (used as a fallback parent dir) |
-| `engineer_factory` | `Callable(workspace, on_status_message, image_name, language) → ContextManager[AutoEngineer]` | Used to spin up a fresh engineer per service |
+| `engineer_factory` | `Callable(workspace, on_status_message, image_name, language) → ContextManager[Engineer]` | Used to spin up a fresh engineer per service |
 | `project_parent` | `Optional[str]` | Where the project root is created. Defaults to `workspace.root.parent` |
 | `max_retries` | `int = 3` | Number of attempts for the AI decomposition call |
 | `on_event`, `on_status_message` | callbacks | Standard agent callbacks |
@@ -22,7 +22,7 @@ A single `AutoArchitect.build(...)` call performs every step needed to go from "
 
 ### `decompose(problem_statement, project_name) → SystemArchitecture`
 
-Calls the AI once with `AutoArchitectSchema` and returns the parsed `SystemArchitecture`. Used standalone if you only want the design (no Docker).
+Calls the AI once with `ArchitectSchema` and returns the parsed `SystemArchitecture`. Used standalone if you only want the design (no Docker).
 
 ### `build(problem_statement, project_name, parallel=True, max_workers=4, layered=True) → ArchitectResult`
 
@@ -78,18 +78,18 @@ These are static methods used when no skeleton is selected:
 
 ```python
 from bizniz.config.bizniz_config import BiznizConfig
-from bizniz.architect.auto_architect import AutoArchitect
+from bizniz.architect.architect import Architect
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.workspace.temp_workspace import TempWorkspace
 
 cfg = BiznizConfig.find_and_load()
 
 def make_engineer(workspace, on_status_message, image_name, language):
-    # build_engineer returns a ContextManager[AutoEngineer]
+    # build_engineer returns a ContextManager[Engineer]
     return build_engineer(cfg, workspace, image_name=image_name, language=language)
 
 with TempWorkspace() as scratch:
-    architect = AutoArchitect(
+    architect = Architect(
         client=cfg.make_client(cfg.architect_model),
         environment=PythonSandboxExecutionEnvironment(),
         workspace=scratch,
@@ -112,7 +112,7 @@ with TempWorkspace() as scratch:
 
 ## Gotchas
 
-- **The architect doesn't write engineering issues.** It only writes services + the architecture snapshot. The `AutoEngineer` it dispatches handles per-service issues (and stores them in the workspace DB, not the project DB).
+- **The architect doesn't write engineering issues.** It only writes services + the architecture snapshot. The `Engineer` it dispatches handles per-service issues (and stores them in the workspace DB, not the project DB).
 - **Port reallocation mutates `architecture.docker_compose`.** If the AI's compose YAML was malformed, `_allocate_free_ports` updates `service.port` objects but logs the mismatch — the compose text isn't rewritten.
 - **`_cleanup_existing_project` is destructive on rerun.** Anything tagged `<slug>-*:*` gets nuked. If you have a manually-tagged image colliding with the slug pattern, it's gone.
 - **Skeleton failures fall back silently.** If the skeleton dir doesn't exist, the architect logs and falls through to boilerplate generation. Watch the status messages to confirm seeding actually happened.

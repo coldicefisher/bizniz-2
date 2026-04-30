@@ -136,10 +136,10 @@ def test_log_issue_custom_status(db):
 
 def test_update_issue(db):
     issue_id = db.log_issue("api", "Task", "Desc")
-    db.update_issue(issue_id, "in_progress", strategy_used="autocoder", iterations=3)
+    db.update_issue(issue_id, "in_progress", strategy_used="coder", iterations=3)
     issues = db.get_all_issues()
     assert issues[0]["status"] == "in_progress"
-    assert issues[0]["strategy_used"] == "autocoder"
+    assert issues[0]["strategy_used"] == "coder"
     assert issues[0]["iterations"] == 3
 
 

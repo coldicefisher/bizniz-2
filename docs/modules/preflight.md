@@ -8,7 +8,7 @@ Generated code commonly has structural problems that a human can spot before run
 
 The preflight validators walk newly generated files BEFORE pytest runs and either:
 
-- Auto-stub missing modules (writing a placeholder file the autocoder can fill in later).
+- Auto-stub missing modules (writing a placeholder file the coder can fill in later).
 - Rewrite known-bad imports (e.g. `from .foo import bar` → `from package.foo import bar`).
 - Remove "shadow" files that conflict with package directories.
 - Surface `ImportIssue` records for problems they can't auto-fix.
@@ -119,14 +119,14 @@ print(result.summary())
 
 ## Interactions
 
-- **Used by:** `CodingOrchestrator` immediately after the autocoder writes files and before pytest runs.
+- **Used by:** `CodingOrchestrator` immediately after the coder writes files and before pytest runs.
 - **Calls into:** the workspace (read existing files, write stubs), `urllib` (PyPI lookups), `ast` / regex parsers.
 
 ## Gotchas
 
 - **PyPI HEAD lookups are slow.** 3-second timeout per request, cached via `lru_cache(256)`. Big plans hit dozens of imports; the validator runs them in a `ThreadPoolExecutor` to parallelize.
 - **Ambiguous names are NEVER pip-installed.** A workspace file named `utils.py` that's missing → stub. The validator only emits `packages_to_install` for things that look like real package names.
-- **Stubbed files are valid Python.** They contain `pass` or a placeholder docstring; the autocoder fills them in on subsequent iterations or on the next issue.
+- **Stubbed files are valid Python.** They contain `pass` or a placeholder docstring; the coder fills them in on subsequent iterations or on the next issue.
 - **Rewriting relative imports is non-reversible.** Once the validator turns `from .foo import bar` into `from pkg.foo import bar`, the original is gone. The `ImportRewrite` record is the only audit trail.
 - **`get_validator` returns `None` for unvalidated languages.** The orchestrator uses this — `if validator: validator.validate(...)` — so adding a new language doesn't immediately require a validator.
 - **Shadow file removal.** If both `foo.py` and `foo/__init__.py` exist, Python prefers the package, but pytest's import behavior can flip-flop. The validator removes the file in favor of the package.

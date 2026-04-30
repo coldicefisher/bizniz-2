@@ -29,7 +29,7 @@ from .errors import (
 )
 
 from bizniz.clients.openai.chatgpt_client_config import ChatGPTClientConfig
-from bizniz.clients.openai.chatgpt_client_errors import AutocoderClientError
+from bizniz.clients.openai.chatgpt_client_errors import OpenAIClientError
 
 
 class BaseChatGPTClient(BaseAIClient):
@@ -85,7 +85,7 @@ class BaseChatGPTClient(BaseAIClient):
                 self._config = config
             
         elif config is None and self._api_key is None:
-            raise AutocoderClientError("Configuration must be provided for ChatGPT client if no API Key is provided.")
+            raise OpenAIClientError("Configuration must be provided for ChatGPT client if no API Key is provided.")
         
         elif config is None and self._api_key is not None:
             self._config = ChatGPTClientConfig()
@@ -105,18 +105,18 @@ class BaseChatGPTClient(BaseAIClient):
                     self._config = ChatGPTClientConfig(**file_config)
                     
             except Exception as e:
-                raise AutocoderClientError(f"Failed to load configuration from file: {e}")
+                raise OpenAIClientError(f"Failed to load configuration from file: {e}")
             
         
         # Fail if finally we do not have a configuration object or if required fields are missing.
         if self._config.is_azure is None and (self._config.api_base is None or self._config.available_models is None or self._config.default_model is None):
-            raise AutocoderClientError("Configuration must include api_base, available_models, and default_model.")
+            raise OpenAIClientError("Configuration must include api_base, available_models, and default_model.")
         
         
         # Azure specific settings
         if self._config.is_azure:
             if self._config.api_base is None or self._config.available_models is None or self._config.default_model is None:
-                raise AutocoderClientError("For Azure OpenAI, api_base and available_models must be set in the configuration.")            
+                raise OpenAIClientError("For Azure OpenAI, api_base and available_models must be set in the configuration.")            
     
         else:
             if self._config.api_base is None:
@@ -294,7 +294,7 @@ class BaseChatGPTClient(BaseAIClient):
         try:
             messages = self._normalize_messages(messages)
         except Exception as e:
-            raise AutocoderClientError(f"Failed to process messages: {e}")
+            raise OpenAIClientError(f"Failed to process messages: {e}")
 
         # Build message list with optional history
         if use_message_history and self._message_history:

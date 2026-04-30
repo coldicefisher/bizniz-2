@@ -5,16 +5,16 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
-from bizniz.autocoder.autocoder import Autocoder
-from bizniz.autotester.autotester import Autotester
+from bizniz.agents.coder.coder import Coder
+from bizniz.tester.tester import Tester
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.environment.types import (
     ExecutionEnvironmentResult,
     ExecutionEnvironmentErrorDetails,
 )
 from bizniz.workspace.base_workspace import BaseWorkspace
-from bizniz.autocoder.types import AutocoderProcessResult, FileChange
-from bizniz.autotester.types import AutotesterResult, GeneratedTestFile
+from bizniz.agents.coder.types import CoderProcessResult, FileChange
+from bizniz.tester.types import TesterResult, GeneratedTestFile
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.orchestrator.strategy import CodingStrategy
 from bizniz.orchestrator.types import OrchestratorMaxIterationsError
@@ -40,7 +40,7 @@ def _autocoder_generate_side_effect(**kwargs):
             changes.append(FileChange(filepath=fp, code=CODE_CLI, action="create"))
         else:
             changes.append(FileChange(filepath=fp, code="# generated\n", action="create"))
-    return AutocoderProcessResult(changes=changes)
+    return CoderProcessResult(changes=changes)
 
 
 def _autotester_generate_side_effect(**kwargs):
@@ -54,19 +54,19 @@ def _autotester_generate_side_effect(**kwargs):
             result_files.append(GeneratedTestFile(filepath=tf, tests=TESTS_CLI))
         else:
             result_files.append(GeneratedTestFile(filepath=tf, tests="def test_placeholder(): pass\n"))
-    return AutotesterResult(test_files=result_files, mode="from_prompt", success=True)
+    return TesterResult(test_files=result_files, mode="from_prompt", success=True)
 
 
 @pytest.fixture
 def mock_autocoder():
-    ac = MagicMock(spec=Autocoder)
+    ac = MagicMock(spec=Coder)
     ac.generate_multi.side_effect = _autocoder_generate_side_effect
-    ac.repair_multi.return_value = AutocoderProcessResult(
+    ac.repair_multi.return_value = CoderProcessResult(
         changes=[
             FileChange(filepath="pkg/models.py", code=CODE_MODELS + "# fixed\n", action="modify"),
         ]
     )
-    ac.repair_multi_inline.return_value = AutocoderProcessResult(
+    ac.repair_multi_inline.return_value = CoderProcessResult(
         changes=[
             FileChange(filepath="pkg/models.py", code=CODE_MODELS + "# fixed\n", action="modify"),
         ],
@@ -77,7 +77,7 @@ def mock_autocoder():
 
 @pytest.fixture
 def mock_autotester():
-    at = MagicMock(spec=Autotester)
+    at = MagicMock(spec=Tester)
     at.generate_multi.side_effect = _autotester_generate_side_effect
     return at
 
@@ -102,8 +102,8 @@ def mock_workspace(tmp_path):
 @pytest.fixture
 def orchestrator(mock_autocoder, mock_autotester, mock_test_env, mock_workspace):
     return CodingOrchestrator(
-        autocoder=mock_autocoder,
-        autotester=mock_autotester,
+        coder=mock_autocoder,
+        tester=mock_autotester,
         test_environment=mock_test_env,
         workspace=mock_workspace,
         max_iterations=5,
@@ -313,9 +313,9 @@ class TestDriftDetection:
         assert drift == []
 
     def test_drift_flag_set_in_result(self, orchestrator, mock_autocoder):
-        # Autocoder creates an unplanned file alongside the planned one
+        # Coder creates an unplanned file alongside the planned one
         def drift_side_effect(**kwargs):
-            return AutocoderProcessResult(
+            return CoderProcessResult(
                 changes=[
                     FileChange(filepath="pkg/models.py", code=CODE_MODELS, action="create"),
                     FileChange(filepath="pkg/utils.py", code="# unplanned", action="create"),
@@ -372,8 +372,8 @@ class TestRegressionDetection:
         mock_test_env.execute.side_effect = execute_side_effect
 
         orch = CodingOrchestrator(
-            autocoder=mock_autocoder,
-            autotester=mock_autotester,
+            coder=mock_autocoder,
+            tester=mock_autotester,
             test_environment=mock_test_env,
             workspace=mock_workspace,
             max_iterations=5,

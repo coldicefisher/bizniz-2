@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Re-run AutoEngineer analysis only (no code gen).
+Re-run Engineer analysis only (no code gen).
 
 Clears existing issues for a given problem_id and re-analyzes
 with updated prompts. Used to test prompt changes without full blast.
@@ -32,9 +32,9 @@ def main():
     from bizniz.clients.chatgpt.chatgpt_client_config import ChatGPTClientConfig
     from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
     from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-    from bizniz.autocoder.autocoder import Autocoder
-    from bizniz.autotester.autotester import Autotester
-    from bizniz.engineer.auto_engineer import AutoEngineer
+    from bizniz.agents.coder.coder import Coder
+    from bizniz.tester.tester import Tester
+    from bizniz.engineer.engineer import Engineer
 
     print("=" * 60)
     print("  Re-Engineer: Fresh issue decomposition")
@@ -55,11 +55,11 @@ def main():
     )
 
     def make_orchestrator():
-        autocoder = Autocoder(client=client, environment=env, workspace=workspace)
-        autotester = Autotester(client=client, environment=env, workspace=workspace)
+        coder = Coder(client=client, environment=env, workspace=workspace)
+        tester = Tester(client=client, environment=env, workspace=workspace)
         return CodingOrchestrator(
-            autocoder=autocoder,
-            autotester=autotester,
+            coder=coder,
+            tester=tester,
             test_environment=env,
             workspace=workspace,
         )
@@ -67,7 +67,7 @@ def main():
     def status(msg):
         print(f"  {msg}")
 
-    engineer = AutoEngineer(
+    engineer = Engineer(
         client=client,
         environment=env,
         workspace=workspace,

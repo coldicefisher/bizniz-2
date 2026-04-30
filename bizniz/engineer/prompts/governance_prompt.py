@@ -1,7 +1,7 @@
 GOVERNANCE_PROMPT_TEMPLATE = """
 You are the software architect reviewing proposed changes to the project.
 
-The autocoder introduced changes that were NOT in the architectural plan.
+The coder introduced changes that were NOT in the architectural plan.
 Review these unplanned changes and decide whether to approve, reject, or modify
 the architecture plan to accommodate them.
 

@@ -1,8 +1,8 @@
 import json
 import pytest
 from unittest.mock import MagicMock
-from bizniz.autocoder.types import FileChange
-from bizniz.autotester.types import GeneratedTestFile
+from bizniz.agents.coder.types import FileChange
+from bizniz.tester.types import GeneratedTestFile
 from bizniz.orchestrator.types import OrchestratorResult
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.engineer.tests.conftest import (
@@ -41,7 +41,7 @@ MULTI_ISSUE_RESPONSE = {
 
 def test_run_returns_list_of_results(mock_environment, tmp_path):
     from bizniz.clients.base_ai_client import BaseAIClient
-    from bizniz.engineer.auto_engineer import AutoEngineer
+    from bizniz.engineer.engineer import Engineer
     from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 
     ws = BaseWorkspace(root=tmp_path)
@@ -56,7 +56,7 @@ def test_run_returns_list_of_results(mock_environment, tmp_path):
     orc = MagicMock(spec=CodingOrchestrator)
     orc.run_multi.return_value = OrchestratorResult(success=True, changes=[FileChange(filepath="out.py", code="x", action="create")], test_files=[GeneratedTestFile(filepath="test_out.py", tests="y")], iterations=1)
 
-    eng = AutoEngineer(
+    eng = Engineer(
         client=client,
         environment=mock_environment,
         workspace=ws,
@@ -72,7 +72,7 @@ def test_run_returns_list_of_results(mock_environment, tmp_path):
 
 def test_run_dispatches_each_issue(mock_environment, tmp_path):
     from bizniz.clients.base_ai_client import BaseAIClient
-    from bizniz.engineer.auto_engineer import AutoEngineer
+    from bizniz.engineer.engineer import Engineer
     from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 
     ws = BaseWorkspace(root=tmp_path)
@@ -92,7 +92,7 @@ def test_run_dispatches_each_issue(mock_environment, tmp_path):
         orchestrators.append(orc)
         return orc
 
-    eng = AutoEngineer(
+    eng = Engineer(
         client=client,
         environment=mock_environment,
         workspace=ws,

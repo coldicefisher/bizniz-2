@@ -3,7 +3,7 @@ Example: Auto Architect
 
 Decomposes a problem into a service-based architecture,
 creates project structure with Dockerfiles and docker-compose.yml,
-builds Docker images, and dispatches AutoEngineer instances.
+builds Docker images, and dispatches Engineer instances.
 
 Output structure:
     project_root/
@@ -33,18 +33,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from bizniz.autocoder.autocoder import Autocoder
-from bizniz.autodebugger.autodebugger import Autodebugger
-from bizniz.agentic_debugger.agentic_debugger import AgenticDebugger
-from bizniz.autotester.autotester import Autotester
+from bizniz.agents.coder.coder import Coder
+from bizniz.agents.debugger.quick import QuickDebugger
+from bizniz.agents.debugger.agentic import AgenticDebugger
+from bizniz.tester.tester import Tester
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
 from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
 from bizniz.environment.docker_jest_environment import DockerJestEnvironment
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-from bizniz.engineer.auto_engineer import AutoEngineer
-from bizniz.architect.auto_architect import AutoArchitect
+from bizniz.engineer.engineer import Engineer
+from bizniz.architect.architect import Architect
 from bizniz.workspace.local_workspace import LocalWorkspace
 
 
@@ -128,17 +128,17 @@ def _make_orchestrator(config, workspace, on_status_message=None, suggested_mode
     issue_client = config.make_client(model=suggested_model) if suggested_model else config.make_client()
 
     return CodingOrchestrator(
-        autocoder=Autocoder(client=issue_client, environment=sandbox, workspace=workspace),
-        autotester=Autotester(client=issue_client, environment=sandbox, workspace=workspace),
-        autodebugger=Autodebugger(client=issue_client, environment=sandbox, workspace=workspace),
+        coder=Coder(client=issue_client, environment=sandbox, workspace=workspace),
+        tester=Tester(client=issue_client, environment=sandbox, workspace=workspace),
+        quick_debugger=QuickDebugger(client=issue_client, environment=sandbox, workspace=workspace),
         test_environment=test_env,
         workspace=workspace,
         client=issue_client,
         client_factory=client_factory,
         debugger_factory=debugger_factory,
         model_progression=config.make_model_progression(),
-        autocoder_progression=config.make_autocoder_progression(),
-        autotester_progression=config.make_autotester_progression(),
+        coder_progression=config.make_autocoder_progression(),
+        tester_progression=config.make_autotester_progression(),
         repair_progression=config.make_repair_progression(),
         stall_threshold=config.stall_threshold,
         agentic_debug_threshold=config.agentic_debug_threshold,
@@ -162,14 +162,14 @@ def _make_engineer(config, workspace, on_status_message=None, image_name=None, l
 
     engineer_client = config.make_engineer_client()
 
-    return AutoEngineer(
+    return Engineer(
         client=engineer_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
         orchestrator_factory=orchestrator_factory,
         on_status_message=on_status_message,
         language=language,
-        available_models=config.autocoder_models or config.models,
+        available_models=config.coder_models or config.models,
         debugger_model=config.debugger_model,
         debugger_max_iterations=config.debugger_max_iterations,
     )
@@ -187,7 +187,7 @@ if __name__ == "__main__":
     config = BiznizConfig.find_and_load()
     log(f"Config: default_model={config.default_model}, engineer_model={config.engineer_model}, architect_model={config.architect_model}")
     log(f"Model progression: {config.models}")
-    log(f"Autocoder models: {config.autocoder_models or config.models}")
+    log(f"Coder models: {config.coder_models or config.models}")
     log(f"Repair models: {config.repair_models or config.models}")
     log(f"Stall threshold: {config.stall_threshold}, Agentic debug threshold: {config.agentic_debug_threshold}")
     log(f"Layered generation: {config.layered_generation}, Parallel services: {config.parallel_services}")
@@ -202,7 +202,7 @@ if __name__ == "__main__":
 
     root_workspace = LocalWorkspace.from_name(project_name, parent=project_parent)
 
-    architect = AutoArchitect(
+    architect = Architect(
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=root_workspace,

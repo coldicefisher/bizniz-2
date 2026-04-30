@@ -47,7 +47,7 @@ _STDLIB_MODULES = set(sys.stdlib_module_names) if hasattr(sys, 'stdlib_module_na
 _TEST_BUILTINS = {'pytest', 'unittest', 'doctest', 'mock'}
 
 
-_AUTOCODER_SYSTEM_PROMPT = """You are an expert Python programmer. Your job is to IMPLEMENT stub files AND write pytest tests.
+_CODER_SYSTEM_PROMPT = """You are an expert Python programmer. Your job is to IMPLEMENT stub files AND write pytest tests.
 
 WORKFLOW:
 1. Read the target stub files (they already exist with class/function skeletons).
@@ -77,7 +77,7 @@ EVALUATION ENVIRONMENT
 """ + DISCOVERY_TOOLS_PROMPT
 
 
-_AUTOTESTER_SYSTEM_PROMPT = """You write pytest test suites for multi-file Python projects.
+_TESTER_SYSTEM_PROMPT = """You write pytest test suites for multi-file Python projects.
 
 RULES:
 - Test stub files already exist with correct imports and a placeholder test. REPLACE the
@@ -93,7 +93,7 @@ RULES:
 """ + DISCOVERY_TOOLS_PROMPT
 
 
-_AUTOTESTER_USER_PROMPT = """Write pytest tests for this project.
+_TESTER_USER_PROMPT = """Write pytest tests for this project.
 
 ISSUE:
 {problem_statement}
@@ -156,14 +156,14 @@ class PythonStrategy(LanguageStrategy):
             and not pkg.startswith("_")
         }
 
-    def get_autocoder_system_prompt(self, evaluation_environment: str = "") -> str:
-        return _AUTOCODER_SYSTEM_PROMPT.format(evaluation_environment=evaluation_environment)
+    def get_coder_system_prompt(self, evaluation_environment: str = "") -> str:
+        return _CODER_SYSTEM_PROMPT.format(evaluation_environment=evaluation_environment)
 
-    def get_autotester_system_prompt(self) -> str:
-        return _AUTOTESTER_SYSTEM_PROMPT
+    def get_tester_system_prompt(self) -> str:
+        return _TESTER_SYSTEM_PROMPT
 
-    def get_autotester_user_prompt(self) -> str:
-        return _AUTOTESTER_USER_PROMPT
+    def get_tester_user_prompt(self) -> str:
+        return _TESTER_USER_PROMPT
 
     def is_stdlib(self, module_name: str) -> bool:
         return module_name in _STDLIB_MODULES

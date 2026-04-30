@@ -2,7 +2,7 @@
 Example: Code metadata utilities
 
 Shows how to embed and read structured metadata in Python source files.
-Used by the Autocoder and Autotester to track problem statements.
+Used by the Coder and Tester to track problem statements.
 """
 import os
 import shutil
@@ -22,7 +22,7 @@ if __name__ == "__main__":
     metadata = {
         "problem_statement": "Write a function that checks if a number is prime.",
         "saved_at": "2026-03-07T12:00:00+00:00",
-        "agent": "Autocoder",
+        "agent": "Coder",
     }
     block = build_metadata_block(metadata)
 

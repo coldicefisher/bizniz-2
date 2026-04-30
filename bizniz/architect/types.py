@@ -19,6 +19,12 @@ class ServiceDefinition(BaseModel):
     requirements: List[str] = []  # pip/npm packages
     skeleton: Optional[str] = None  # fastapi | react | angular | teams-backend | teams-consumer | teams-frontend | none
     image_name: Optional[str] = None  # Docker image tag, set after build
+    # Evolve-mode tag set by Architect.evolve():
+    #   "new"       — service didn't exist before this milestone
+    #   "extended"  — service existed but this milestone adds work to it
+    #   "unchanged" — service exists and this milestone doesn't touch it
+    # On a fresh decompose() (no prior architecture), every service is "new".
+    evolve_state: Optional[str] = None
 
 
 class SystemArchitecture(BaseModel):
@@ -52,9 +58,9 @@ class ArchitectResult(BaseModel):
     project_root: Optional[str] = None
 
 
-class AutoArchitectError(Exception):
+class ArchitectError(Exception):
     pass
 
 
-class AutoArchitectBadAIResponseError(AutoArchitectError):
+class ArchitectBadAIResponseError(ArchitectError):
     pass

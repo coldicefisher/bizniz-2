@@ -4,7 +4,7 @@ The skeleton system is the way bizniz seeds new services from real, working repo
 
 ## Why skeletons exist
 
-The pre-skeleton version of `AutoArchitect` had the LLM generate every Dockerfile, every dependency manifest, and every entry-point file from scratch. This produced a lot of broken auth flows, missing test infrastructure, inconsistent project layouts, and a slow startup for any service that needed batteries (database, sessions, JWT, etc).
+The pre-skeleton version of `Architect` had the LLM generate every Dockerfile, every dependency manifest, and every entry-point file from scratch. This produced a lot of broken auth flows, missing test infrastructure, inconsistent project layouts, and a slow startup for any service that needed batteries (database, sessions, JWT, etc).
 
 A skeleton is a starter repo cloned to local disk that already has those batteries in place. The architect can pick a skeleton per service in its decomposition step; the seeding code copies the repo into the workspace and substitutes a couple of placeholders.
 
@@ -38,7 +38,7 @@ Full details are in [reference/skeleton_reference.md](../reference/skeleton_refe
 
 ## The end-to-end flow
 
-The architect uses skeletons during the `build()` pipeline. Step numbers below match the comments in `auto_architect.py`.
+The architect uses skeletons during the `build()` pipeline. Step numbers below match the comments in `architect.py`.
 
 ```
 build(problem_statement, project_name)
@@ -79,7 +79,7 @@ build(problem_statement, project_name)
 │        docker build -t <slug>-<svc>:dev -f <dockerfile> <workspace.root>
 │
 └─ 6.  topo-sort services by depends_on, then per layer dispatch
-       AutoEngineer instances (in parallel within a layer).
+       Engineer instances (in parallel within a layer).
 ```
 
 ## What `seed_workspace` does precisely
@@ -114,7 +114,7 @@ Two things to call out:
 
 ## What happens to the Dockerfile
 
-After seeding, the Dockerfile lives at `<workspace_root>/Dockerfile` (where the skeleton put it). docker-compose looks for it under `infra/development/<service>/Dockerfile` (where the AI's compose file points), so `auto_architect.py` mirrors the file:
+After seeding, the Dockerfile lives at `<workspace_root>/Dockerfile` (where the skeleton put it). docker-compose looks for it under `infra/development/<service>/Dockerfile` (where the AI's compose file points), so `architect.py` mirrors the file:
 
 ```python
 skeleton_dockerfile = Path(workspace.root) / "Dockerfile"
@@ -130,8 +130,8 @@ If `seed_workspace` raises `FileNotFoundError` (the skeleton isn't cloned on thi
 
 ```python
 except FileNotFoundError as e:
-    log(f"AutoArchitect: skeleton seeding failed for '{service.name}': {e}")
-    log(f"AutoArchitect: falling back to generated boilerplate for '{service.name}'")
+    log(f"Architect: skeleton seeding failed for '{service.name}': {e}")
+    log(f"Architect: falling back to generated boilerplate for '{service.name}'")
     skeleton = None  # fall through
 
 if skeleton is None:
@@ -145,7 +145,7 @@ if skeleton is None:
 
 ## How the AI knows which skeleton to pick
 
-`AutoArchitect`'s prompt includes the result of `skeletons_summary_for_prompt()`, which lists every skeleton and its description. The schema (`AutoArchitectSchema`) requires `skeleton` to be one of the registered names or `"none"`, so the AI cannot invent unknown values.
+`Architect`'s prompt includes the result of `skeletons_summary_for_prompt()`, which lists every skeleton and its description. The schema (`ArchitectSchema`) requires `skeleton` to be one of the registered names or `"none"`, so the AI cannot invent unknown values.
 
 Picking guidance baked into the descriptions:
 
@@ -159,7 +159,7 @@ Picking guidance baked into the descriptions:
 
 1. Clone the skeleton repo to `~/bizniz-skeleton-<name>` (or any path under `$BIZNIZ_SKELETONS_DIR`).
 2. Add an entry to the `_SKELETONS` dict in `bizniz/architect/skeletons.py` with `name`, `relative_path`, `service_type`, `framework`, `language`, `container_port`, and a one-paragraph description that tells the AI when to pick it.
-3. Add the new name to the `skeleton` enum in `bizniz/architect/prompts/schema.py:AutoArchitectSchema`.
+3. Add the new name to the `skeleton` enum in `bizniz/architect/prompts/schema.py:ArchitectSchema`.
 4. Make sure your skeleton uses `{project_slug}` and `{service_name}` placeholders in any file the substitution should reach (typically `pyproject.toml`, `package.json`, `README.md`, `docker-compose.override.yml`).
 
 The architect picks it up on the next decomposition.

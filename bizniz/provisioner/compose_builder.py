@@ -27,7 +27,7 @@ def build_compose(
     Parameters
     ----------
     architecture:
-        The plan from AutoArchitect — services + ports + dependencies.
+        The plan from Architect — services + ports + dependencies.
     template_outputs:
         ``{service_name: TemplateOutput}`` for any service that had a
         template render (infrastructure templates plus app-template

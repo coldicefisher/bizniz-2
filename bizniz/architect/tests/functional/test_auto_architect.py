@@ -5,22 +5,22 @@ Tests that the architect can decompose a problem into services,
 create project structure, build Docker images, and dispatch engineers.
 
 Run with:
-    pytest bizniz/architect/tests/functional/test_auto_architect.py -m functional -v
+    pytest bizniz/architect/tests/functional/test_architect.py -m functional -v
 """
 import os
 import pytest
 
-from bizniz.autocoder.autocoder import Autocoder
-from bizniz.autodebugger.autodebugger import Autodebugger
-from bizniz.agentic_debugger.agentic_debugger import AgenticDebugger
-from bizniz.autotester.autotester import Autotester
+from bizniz.agents.coder.coder import Coder
+from bizniz.agents.debugger.quick import QuickDebugger
+from bizniz.agents.debugger.agentic import AgenticDebugger
+from bizniz.tester.tester import Tester
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
 from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-from bizniz.engineer.auto_engineer import AutoEngineer
-from bizniz.architect.auto_architect import AutoArchitect
+from bizniz.engineer.engineer import Engineer
+from bizniz.architect.architect import Architect
 from bizniz.workspace.local_workspace import LocalWorkspace
 
 
@@ -43,9 +43,9 @@ def _make_orchestrator(config, workspace, suggested_model=None, image_name=None)
     issue_client = config.make_client(model=suggested_model) if suggested_model else config.make_client()
 
     return CodingOrchestrator(
-        autocoder=Autocoder(client=issue_client, environment=sandbox, workspace=workspace),
-        autotester=Autotester(client=issue_client, environment=sandbox, workspace=workspace),
-        autodebugger=Autodebugger(client=issue_client, environment=sandbox, workspace=workspace),
+        coder=Coder(client=issue_client, environment=sandbox, workspace=workspace),
+        tester=Tester(client=issue_client, environment=sandbox, workspace=workspace),
+        quick_debugger=QuickDebugger(client=issue_client, environment=sandbox, workspace=workspace),
         test_environment=test_env,
         workspace=workspace,
         client=issue_client,
@@ -57,7 +57,7 @@ def _make_orchestrator(config, workspace, suggested_model=None, image_name=None)
 
 
 def _make_engineer(config, workspace, on_status_message=None, image_name=None):
-    """Create an AutoEngineer context manager for a service workspace."""
+    """Create an Engineer context manager for a service workspace."""
 
     def orchestrator_factory(suggested_model=None):
         return _make_orchestrator(
@@ -66,7 +66,7 @@ def _make_engineer(config, workspace, on_status_message=None, image_name=None):
 
     engineer_client = config.make_engineer_client()
 
-    return AutoEngineer(
+    return Engineer(
         client=engineer_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
@@ -97,7 +97,7 @@ def test_architect_decompose(api_key, workspace_path):
 
     status_messages = []
 
-    architect = AutoArchitect(
+    architect = Architect(
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,
@@ -154,7 +154,7 @@ def test_architect_build_backend_only(api_key, workspace_path):
         "Use FastAPI."
     )
 
-    architect = AutoArchitect(
+    architect = Architect(
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
         workspace=workspace,

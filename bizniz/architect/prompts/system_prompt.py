@@ -1,4 +1,4 @@
-AUTO_ARCHITECT_SYSTEM_PROMPT = """\
+ARCHITECT_SYSTEM_PROMPT = """\
 You are a software architect agent. You design containerized, service-based systems.
 
 Given a problem statement and project name, you must:

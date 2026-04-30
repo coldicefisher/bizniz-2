@@ -152,7 +152,7 @@ env.stop()
 
 ## Interactions
 
-- **Used by:** the orchestrator (Docker pytest/jest), the autocoder (single-file `generate` only).
+- **Used by:** the orchestrator (Docker pytest/jest), the coder (single-file `generate` only).
 - **Calls into:** `subprocess` to drive Docker, the workspace for path resolution.
 
 ## Gotchas

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run auto_engineer 5 times and report results
+# Run engineer 5 times and report results
 set -o pipefail
 
 RESULTS=()
@@ -12,7 +12,7 @@ for i in $(seq 1 $NUM_RUNS); do
     echo ""
 
     START=$(date +%s)
-    python3 examples/auto_engineer.py 2>&1 | tee "/tmp/stability_run_${i}.log"
+    python3 examples/engineer.py 2>&1 | tee "/tmp/stability_run_${i}.log"
     EXIT_CODE=${PIPESTATUS[0]}
     END=$(date +%s)
     DURATION=$((END - START))

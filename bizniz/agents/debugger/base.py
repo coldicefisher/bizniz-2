@@ -52,6 +52,6 @@ class BaseDebugger(ABC):
         Run the debugger and return a diagnosis.
 
         Subclasses define their own parameter signatures but all return
-        a diagnosis model (AutodebuggerDiagnosis or AgenticDiagnosis).
+        a diagnosis model (QuickDebuggerDiagnosis or AgenticDiagnosis).
         """
         ...

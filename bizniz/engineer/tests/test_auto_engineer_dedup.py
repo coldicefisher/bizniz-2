@@ -1,5 +1,5 @@
 """
-Tests for multi-file issue creation in AutoEngineer.
+Tests for multi-file issue creation in Engineer.
 """
 import json
 import pytest
@@ -8,7 +8,7 @@ from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 from bizniz.orchestrator.types import OrchestratorResult
-from bizniz.engineer.auto_engineer import AutoEngineer
+from bizniz.engineer.engineer import Engineer
 from bizniz.engineer.tests.conftest import VALID_PLAN_RESPONSE, make_ai_response
 
 
@@ -51,7 +51,7 @@ def test_multi_file_issues_persisted(mock_environment, tmp_path):
         make_ai_response(MULTI_FILE_RESPONSE),  # refined analysis
     ]
 
-    eng = AutoEngineer(
+    eng = Engineer(
         client=mock_client,
         environment=mock_environment,
         workspace=ws,

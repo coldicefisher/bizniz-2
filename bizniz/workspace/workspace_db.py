@@ -6,7 +6,7 @@ A thin SQLite wrapper that lives inside a workspace at
 
 Tables
 ------
-problems              — problem statements submitted to the AutoEngineer
+problems              — problem statements submitted to the Engineer
 requirements          — business / functional / non-functional requirements
 use_cases             — user-facing scenarios derived from a problem
 issues                — discrete coding tasks dispatched to the CodingOrchestrator

@@ -71,7 +71,7 @@ for the test cases.
 
 ## Writable-file scope during repair
 
-When a repair iteration runs, the autocoder is shown two file lists:
+When a repair iteration runs, the coder is shown two file lists:
 
 - **Writable**: source + test files for the current issue
 - **Read-only**: prior-issue source files needed for context
@@ -102,7 +102,7 @@ config** that no issue declares as a target file:
 
 At repair time, the orchestrator scans `workspace.list_relative_files()`,
 auto-loads any matching config files, and adds them to `writable_paths`
-**and** `relevant_files`. The autocoder sees them as writable; the
+**and** `relevant_files`. The coder sees them as writable; the
 post-repair filter permits them.
 
 Lockfiles (`package-lock.json`, `yarn.lock`, `Cargo.lock`) are

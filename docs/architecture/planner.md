@@ -26,7 +26,7 @@ problem statement
           │  Evolve-mode wiring lands in a follow-up branch.)
           ▼
 ┌────────────────────┐
-│   AutoArchitect    │   one AI call per milestone
+│   Architect    │   one AI call per milestone
 │   .decompose()     │   → SystemArchitecture for THIS milestone's slice
 └─────────┬──────────┘
           ▼

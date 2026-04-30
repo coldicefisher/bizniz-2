@@ -41,9 +41,9 @@ def test_read_new_format_extracts_problem_statement():
 
 
 def test_read_new_format_returns_extra_keys():
-    code = build_metadata_block({"problem_statement": "X", "agent": "Autocoder"})
+    code = build_metadata_block({"problem_statement": "X", "agent": "Coder"})
     meta = read_code_metadata(code)
-    assert meta["agent"] == "Autocoder"
+    assert meta["agent"] == "Coder"
 
 
 def test_read_returns_none_when_no_metadata():

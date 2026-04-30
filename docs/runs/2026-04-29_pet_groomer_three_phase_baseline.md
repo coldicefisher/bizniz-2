@@ -47,8 +47,8 @@ Free-port allocation: no collisions, no remaps.
 default_model:        gemini-flash-lite
 engineer_model:       gemini-flash
 architect_model:      gemini-flash
-autocoder_models:     [gemini-flash-lite, gemini-flash, gemini-pro]
-autotester_models:    [gemini-flash-lite, gemini-flash, gemini-pro]
+coder_models:     [gemini-flash-lite, gemini-flash, gemini-pro]
+tester_models:    [gemini-flash-lite, gemini-flash, gemini-pro]
 repair_models:        [gemini-flash, gemini-pro]
 debugger_model:       gemini-pro
 debugger_max_iterations: 12
@@ -61,7 +61,7 @@ max_iterations:       20
 ## Three-phase strategy mapping
 
 - **Phase 1 (frame):** `gemini-flash-lite`, no tests, no Docker, 1 shot per ticket
-- **Phase 2 (escalate):** sub-pass per model in `autocoder_models[1:]` over still-failing tickets
+- **Phase 2 (escalate):** sub-pass per model in `coder_models[1:]` over still-failing tickets
   - Sub-pass A: `gemini-flash`, `max_iterations=2` per ticket
   - Sub-pass B: `gemini-pro`, `max_iterations=2` per ticket
 - **Phase 3 (debug):** `gemini-pro` + agentic debugger (full tools), `max_iterations=12` per ticket

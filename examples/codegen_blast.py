@@ -287,7 +287,7 @@ def _phase1_frame(issues, workspace, arch_context, make_client, env, model="gpt-
     No Docker, no tests. Writes real code to disk so later issues
     can import from earlier ones (instead of stubs).
     """
-    from bizniz.autocoder.autocoder import Autocoder
+    from bizniz.agents.coder.coder import Coder
 
     print(f"\n{'=' * 60}")
     print("  PHASE 1: FRAME (generate all code, no tests)")
@@ -305,7 +305,7 @@ def _phase1_frame(issues, workspace, arch_context, make_client, env, model="gpt-
 
         try:
             client = make_client(model)
-            autocoder = Autocoder(
+            coder = Coder(
                 client=client,
                 environment=env,
                 workspace=workspace,
@@ -319,7 +319,7 @@ def _phase1_frame(issues, workspace, arch_context, make_client, env, model="gpt-
                 problem_stmt += f"\n\nTEST SETUP HINT:\n{issue['test_setup_hint']}"
 
             # Generate source code only (no test_files)
-            result = autocoder.generate_multi(
+            result = coder.generate_multi(
                 issue_description=problem_stmt,
                 target_files=issue["target_files"],
                 architecture_context=arch_context,
@@ -418,8 +418,8 @@ def _phase2_test(
     Cycles repeat until all issues pass or max_cycles reached.
     """
     import hashlib
-    from bizniz.autocoder.autocoder import Autocoder
-    from bizniz.autotester.autotester import Autotester
+    from bizniz.agents.coder.coder import Coder
+    from bizniz.tester.tester import Tester
     from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
     from bizniz.orchestrator.strategy import CodingStrategy
     from bizniz.orchestrator.model_progression import ModelProgression
@@ -475,14 +475,14 @@ def _phase2_test(
             print(f"  Model: {model} | Max iters: {max_iters} | Agentic: {agentic}")
             client = make_client(model)
 
-            autocoder = Autocoder(
+            coder = Coder(
                 client=client,
                 environment=env,
                 workspace=workspace,
                 on_status_message=status_cb,
             )
 
-            autotester = Autotester(
+            tester = Tester(
                 client=client,
                 environment=env,
                 workspace=workspace,
@@ -492,8 +492,8 @@ def _phase2_test(
             progression = ModelProgression(round_cfg["escalation"])
 
             orchestrator = CodingOrchestrator(
-                autocoder=autocoder,
-                autotester=autotester,
+                coder=coder,
+                tester=tester,
                 test_environment=env,
                 workspace=workspace,
                 client=client,
@@ -768,7 +768,7 @@ def main(config_path=None):
     from bizniz.clients.chatgpt.chatgpt_client_config import ChatGPTClientConfig
     from bizniz.clients.claude.claude_client import ClaudeClient
     from bizniz.clients.gemini.gemini_client import GeminiClient
-    from bizniz.engineer.auto_engineer import AutoEngineer
+    from bizniz.engineer.engineer import Engineer
     from bizniz.engineer.types import ArchitecturePlan
 
     print("=" * 60)
@@ -866,7 +866,7 @@ def main(config_path=None):
                 problem_id=PROBLEM_ID,
                 **plan_data,
             )
-            arch_context = AutoEngineer.format_architecture_context(plan)
+            arch_context = Engineer.format_architecture_context(plan)
             dep_edges = plan.dependencies or []
             print(f"\n  Architecture: {plan.package_name} ({len(plan.modules)} modules, {len(dep_edges)} dependency edges)")
         except Exception as e:
@@ -1016,7 +1016,7 @@ def main(config_path=None):
     # Save initial clean state
     snapshot_workspace("baseline")
 
-    # Setup Docker environment (needed for Phase 1 autocoder env.describe() and Phase 2)
+    # Setup Docker environment (needed for Phase 1 coder env.describe() and Phase 2)
     test_runner = blast_cfg.get("test_runner", "pytest")
     if test_runner == "jest":
         env = DockerJestEnvironment(

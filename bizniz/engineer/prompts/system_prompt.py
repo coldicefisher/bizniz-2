@@ -142,4 +142,4 @@ def get_engineer_system_prompt(language: str = "python") -> str:
 
 
 # Backward compatibility
-AUTO_ENGINEER_SYSTEM_PROMPT = _AUTO_ENGINEER_SYSTEM_PROMPT_PYTHON
+ENGINEER_SYSTEM_PROMPT = _AUTO_ENGINEER_SYSTEM_PROMPT_PYTHON

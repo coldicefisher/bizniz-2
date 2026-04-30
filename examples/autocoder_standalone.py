@@ -1,5 +1,5 @@
 """
-Example: Autocoder standalone usage
+Example: Coder standalone usage
 
 Generates Python code from a prompt using the AI code generation pipeline.
 
@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from bizniz.autocoder.autocoder import Autocoder
+from bizniz.agents.coder.coder import Coder
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.docker_environment import DockerExecutionEnvironment
 from bizniz.workspace.temp_workspace import TempWorkspace
@@ -24,8 +24,8 @@ if __name__ == "__main__":
     environment = DockerExecutionEnvironment()
     workspace = TempWorkspace()
 
-    # 2. Create the Autocoder
-    autocoder = Autocoder(
+    # 2. Create the Coder
+    coder = Coder(
         client=client,
         environment=environment,
         workspace=workspace,
@@ -34,7 +34,7 @@ if __name__ == "__main__":
 
     # ── Single file generation ────────────────────────────────────────
     print("=== Single File Generation ===")
-    result = autocoder.generate_only(
+    result = coder.generate_only(
         prompt="Write a Python function called 'add' that takes two numbers and returns their sum.",
         filename="math_utils.py",
     )
@@ -50,7 +50,7 @@ if __name__ == "__main__":
         {"filepath": "calculator/ops.py", "description": "Basic arithmetic operations"},
     ]
 
-    result = autocoder.generate_multi(
+    result = coder.generate_multi(
         issue_description="Create a calculator module with add, subtract, multiply, divide functions.",
         target_files=target_files,
         architecture_context="Simple calculator package.",

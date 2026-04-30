@@ -1,7 +1,7 @@
 import pytest
 from bizniz.environment.types import ExecutionEnvironmentResult, ExecutionEnvironmentErrorDetails
-from bizniz.autocoder.types import AutocoderProcessResult, FileChange
-from bizniz.autotester.types import AutotesterResult
+from bizniz.agents.coder.types import CoderProcessResult, FileChange
+from bizniz.tester.types import TesterResult
 from bizniz.orchestrator.types import OrchestratorMaxIterationsError
 
 PROMPT = "Write an add function."
@@ -18,14 +18,14 @@ def test_stale_loop_regenerates_tests(mock_autocoder, mock_autotester, mock_test
     from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 
     # Always return the exact same code
-    mock_autocoder.generate_only.return_value = AutocoderProcessResult(changes=[FileChange(filepath="add.py", code=SAME_CODE, action="create")])
-    mock_autocoder.repair.return_value = AutocoderProcessResult(changes=[FileChange(filepath="add.py", code=SAME_CODE, action="modify")])
+    mock_autocoder.generate_only.return_value = CoderProcessResult(changes=[FileChange(filepath="add.py", code=SAME_CODE, action="create")])
+    mock_autocoder.repair.return_value = CoderProcessResult(changes=[FileChange(filepath="add.py", code=SAME_CODE, action="modify")])
     mock_workspace.read_file.return_value = SAME_CODE
     mock_test_env.execute.return_value = FAILURE_RESULT
 
     orc = CodingOrchestrator(
-        autocoder=mock_autocoder,
-        autotester=mock_autotester,
+        coder=mock_autocoder,
+        tester=mock_autotester,
         test_environment=mock_test_env,
         workspace=mock_workspace,
         max_iterations=5,
@@ -44,8 +44,8 @@ def test_no_stale_when_code_changes(mock_autocoder, mock_autotester, mock_test_e
     from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
 
     codes = [f"def add(a, b): return {i}\n" for i in range(10)]
-    mock_autocoder.generate_only.return_value = AutocoderProcessResult(changes=[FileChange(filepath="add.py", code=codes[0], action="create")])
-    mock_autocoder.repair.side_effect = [AutocoderProcessResult(changes=[FileChange(filepath="add.py", code=c, action="modify")]) for c in codes[1:]]
+    mock_autocoder.generate_only.return_value = CoderProcessResult(changes=[FileChange(filepath="add.py", code=codes[0], action="create")])
+    mock_autocoder.repair.side_effect = [CoderProcessResult(changes=[FileChange(filepath="add.py", code=c, action="modify")]) for c in codes[1:]]
     mock_workspace.read_file.side_effect = codes
 
     # Fail twice, then succeed
@@ -56,8 +56,8 @@ def test_no_stale_when_code_changes(mock_autocoder, mock_autotester, mock_test_e
     ]
 
     orc = CodingOrchestrator(
-        autocoder=mock_autocoder,
-        autotester=mock_autotester,
+        coder=mock_autocoder,
+        tester=mock_autotester,
         test_environment=mock_test_env,
         workspace=mock_workspace,
         max_iterations=10,

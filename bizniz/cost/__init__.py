@@ -11,7 +11,7 @@ Public API::
     from bizniz.cost import get_tracker, price_call, MODEL_PRICING
 
     tracker = get_tracker()
-    tracker.record(agent="autocoder", model="gemini-flash",
+    tracker.record(agent="coder", model="gemini-flash",
                    input_tokens=1500, output_tokens=800, duration_ms=3400)
     summary = tracker.summary()
 

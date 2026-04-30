@@ -1,7 +1,7 @@
 """
 QuickDebugger — one-shot diagnosis agent (no tools, fast, cheap).
 
-Formerly known as Autodebugger. Scans the workspace for related files and
+Formerly known as QuickDebugger. Scans the workspace for related files and
 asks the AI for a single-shot structured diagnosis.
 """
 
@@ -17,14 +17,14 @@ from bizniz.workspace.base_workspace import BaseWorkspace
 
 from bizniz.agents.debugger.base import BaseDebugger
 from bizniz.agents.debugger.types import (
-    AutodebuggerDiagnosis,
-    AutodebuggerOnEventCallback,
-    AutodebuggerError,
-    AutodebuggerBadAIResponseError,
+    QuickDebuggerDiagnosis,
+    QuickDebuggerOnEventCallback,
+    QuickDebuggerError,
+    QuickDebuggerBadAIResponseError,
 )
-from bizniz.agents.debugger.prompts.quick_system_prompt import AUTODEBUGGER_SYSTEM_PROMPT
+from bizniz.agents.debugger.prompts.quick_system_prompt import QUICK_DEBUGGER_SYSTEM_PROMPT
 from bizniz.agents.debugger.prompts.quick_diagnose_prompt import DIAGNOSE_PROMPT_TEMPLATE
-from bizniz.agents.debugger.prompts.quick_schema import AutodebuggerSchema
+from bizniz.agents.debugger.prompts.quick_schema import QuickDebuggerSchema
 
 
 class QuickDebugger(BaseDebugger, BaseAIAgent):
@@ -45,7 +45,7 @@ class QuickDebugger(BaseDebugger, BaseAIAgent):
         environment: BaseExecutionEnvironment,
         workspace: BaseWorkspace,
         max_retries: Optional[int] = 5,
-        on_event: Optional[Callable[[AutodebuggerOnEventCallback], None]] = None,
+        on_event: Optional[Callable[[QuickDebuggerOnEventCallback], None]] = None,
         on_status_message: Optional[Callable[[str], None]] = None,
     ):
         BaseDebugger.__init__(
@@ -69,7 +69,7 @@ class QuickDebugger(BaseDebugger, BaseAIAgent):
 
     @property
     def _process_system_prompt(self) -> str:
-        return AUTODEBUGGER_SYSTEM_PROMPT
+        return QUICK_DEBUGGER_SYSTEM_PROMPT
 
     # -- Public API -------------------------------------------------------------
 
@@ -80,9 +80,9 @@ class QuickDebugger(BaseDebugger, BaseAIAgent):
         code_filename: str,
         test_code: str,
         test_filename: str,
-        on_event: Optional[Callable[[AutodebuggerOnEventCallback], None]] = None,
+        on_event: Optional[Callable[[QuickDebuggerOnEventCallback], None]] = None,
         on_status_message: Optional[Callable[[str], None]] = None,
-    ) -> AutodebuggerDiagnosis:
+    ) -> QuickDebuggerDiagnosis:
         """
         Analyze a test failure and produce a structured diagnosis.
 
@@ -101,7 +101,7 @@ class QuickDebugger(BaseDebugger, BaseAIAgent):
 
         Returns
         -------
-        AutodebuggerDiagnosis with diagnosis, fix_target, relevant_files, suggested_approach.
+        QuickDebuggerDiagnosis with diagnosis, fix_target, relevant_files, suggested_approach.
         """
         if on_event is not None:
             self._on_event = on_event
@@ -110,7 +110,7 @@ class QuickDebugger(BaseDebugger, BaseAIAgent):
 
         # Step 1: Scan workspace and find related files
         self._log("QuickDebugger: scanning workspace for related files...")
-        self.emit(AutodebuggerOnEventCallback(stage="scan", status="start"))
+        self.emit(QuickDebuggerOnEventCallback(stage="scan", status="start"))
 
         # Filter out noisy directories from workspace listing
         _EXCLUDED_DIRS = {"node_modules", "__pycache__", ".git", ".bizniz", "dist", "build", ".next"}
@@ -131,7 +131,7 @@ class QuickDebugger(BaseDebugger, BaseAIAgent):
             workspace_files=[str(f) for f in workspace_files],
         )
 
-        self.emit(AutodebuggerOnEventCallback(stage="scan", status="success"))
+        self.emit(QuickDebuggerOnEventCallback(stage="scan", status="success"))
 
         # Step 2: Build the related files listing (paths only, no contents)
         related_listing = ""
@@ -262,7 +262,7 @@ class QuickDebugger(BaseDebugger, BaseAIAgent):
 
     # -- AI interaction ---------------------------------------------------------
 
-    def _get_diagnosis(self, user_prompt: str) -> AutodebuggerDiagnosis:
+    def _get_diagnosis(self, user_prompt: str) -> QuickDebuggerDiagnosis:
         attempts = 3
         last_error = None
         text = None
@@ -274,7 +274,7 @@ class QuickDebugger(BaseDebugger, BaseAIAgent):
                 text, job_id, output_messages = self._client.get_text(
                     messages=self.message_history,
                     response_format=ResponseFormat.JSON_SCHEMA,
-                    schema=AutodebuggerSchema,
+                    schema=QuickDebuggerSchema,
                 )
                 self.add_messages_to_history(output_messages)
 
@@ -297,14 +297,14 @@ class QuickDebugger(BaseDebugger, BaseAIAgent):
                 else:
                     relevant_files = {}
 
-                diagnosis = AutodebuggerDiagnosis(
+                diagnosis = QuickDebuggerDiagnosis(
                     diagnosis=json_response.get("diagnosis", ""),
                     fix_target=json_response.get("fix_target", "code"),
                     relevant_files=relevant_files,
                     suggested_approach=json_response.get("suggested_approach", ""),
                 )
 
-                self.emit(AutodebuggerOnEventCallback(
+                self.emit(QuickDebuggerOnEventCallback(
                     stage="diagnose",
                     status="success",
                     diagnosis=diagnosis.diagnosis,
@@ -316,7 +316,7 @@ class QuickDebugger(BaseDebugger, BaseAIAgent):
 
             except Exception as e:
                 last_error = e
-                self.emit(AutodebuggerOnEventCallback(
+                self.emit(QuickDebuggerOnEventCallback(
                     stage="diagnose",
                     status="failure",
                     prompt=user_prompt,
@@ -325,17 +325,17 @@ class QuickDebugger(BaseDebugger, BaseAIAgent):
                 ))
                 continue
 
-        self.emit(AutodebuggerOnEventCallback(
+        self.emit(QuickDebuggerOnEventCallback(
             stage="diagnose",
             status="failure",
             prompt=user_prompt,
             response=text,
             attempt=attempts,
         ))
-        raise AutodebuggerBadAIResponseError(
+        raise QuickDebuggerBadAIResponseError(
             f"AI failed to produce diagnosis after {attempts} attempts. Last error: {last_error}"
         )
 
 
 # Backward-compatible alias
-Autodebugger = QuickDebugger
+QuickDebugger = QuickDebugger
