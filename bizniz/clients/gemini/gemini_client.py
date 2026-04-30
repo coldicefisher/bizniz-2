@@ -284,45 +284,12 @@ class GeminiClient(BaseAIClient):
 
     @staticmethod
     def _sanitize_json(text: str) -> str:
-        """Fix invalid control characters inside JSON string values.
-
-        Gemini sometimes embeds raw newlines, tabs, and other control chars
-        inside JSON string values instead of proper escape sequences.
-        This walks the string, and when inside a JSON string literal,
-        replaces raw control chars with their escaped forms.
+        """Fix raw control chars and invalid backslash escapes inside JSON
+        string values. Delegates to the shared bizniz.utils.json helper so
+        every JSON-parsing path in the system stays consistent.
         """
-        result = []
-        in_string = False
-        i = 0
-        while i < len(text):
-            ch = text[i]
-            if ch == '\\' and in_string:
-                # Escaped character — pass through both chars
-                result.append(ch)
-                if i + 1 < len(text):
-                    i += 1
-                    result.append(text[i])
-                i += 1
-                continue
-            if ch == '"':
-                in_string = not in_string
-                result.append(ch)
-                i += 1
-                continue
-            if in_string and ord(ch) < 0x20:
-                # Raw control character inside a string — escape it
-                escape_map = {
-                    '\n': '\\n',
-                    '\r': '\\r',
-                    '\t': '\\t',
-                    '\x08': '\\b',
-                    '\x0c': '\\f',
-                }
-                result.append(escape_map.get(ch, f'\\u{ord(ch):04x}'))
-            else:
-                result.append(ch)
-            i += 1
-        return ''.join(result)
+        from bizniz.utils.json import fix_string_escapes
+        return fix_string_escapes(text)
 
     @staticmethod
     def _extract_first_json(text: str) -> str:
