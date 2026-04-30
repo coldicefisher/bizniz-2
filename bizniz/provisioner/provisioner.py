@@ -356,6 +356,7 @@ class Provisioner:
                     dest=Path(workspace.root),
                     project_slug=architecture.project_slug,
                     service_name=service.name,
+                    on_status=log,
                 )
                 log(
                     f"Provisioner: seeded '{service.name}' from skeleton "
