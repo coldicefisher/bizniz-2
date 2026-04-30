@@ -115,6 +115,64 @@ _SKELETONS: Dict[str, SkeletonInfo] = {
             "the teams system pattern."
         ),
     ),
+    "saas-api": SkeletonInfo(
+        name="saas-api",
+        relative_path="bizniz-skeleton-saas/api",
+        service_type="backend",
+        framework="fastapi",
+        language="python",
+        container_port=8000,
+        description=(
+            "Production-shaped FastAPI backend integrated with FusionAuth "
+            "(JWT validation, OAuth2 callback, refresh, /me, profile auto-create), "
+            "shared core/ package, demo Article entity + long-running regenerate "
+            "job dispatched via Redis Streams. Pair with saas-ws + saas-consumer "
+            "+ saas-frontend for the full bundle."
+        ),
+    ),
+    "saas-ws": SkeletonInfo(
+        name="saas-ws",
+        relative_path="bizniz-skeleton-saas/websocket-server",
+        service_type="worker",
+        framework="fastapi",
+        language="python",
+        container_port=8001,
+        description=(
+            "Dedicated WebSocket server. Validates FusionAuth JWT on connect, "
+            "subscribes to ws:user:*, ws:room:*, ws:broadcast Redis channels, "
+            "routes events to connected sockets. Handles room join/leave for "
+            "entity-scoped subscriptions. Part of the saas bundle."
+        ),
+    ),
+    "saas-consumer": SkeletonInfo(
+        name="saas-consumer",
+        relative_path="bizniz-skeleton-saas/store-consumer",
+        service_type="worker",
+        framework="redis-streams",
+        language="python",
+        container_port=None,
+        description=(
+            "Redis Streams worker for the saas bundle. Registers job handlers, "
+            "acquires processing locks (with WS broadcast), runs long-running "
+            "tasks, releases locks. Demo job: regenerate_article. Part of the "
+            "saas bundle."
+        ),
+    ),
+    "saas-frontend": SkeletonInfo(
+        name="saas-frontend",
+        relative_path="bizniz-skeleton-saas/frontend",
+        service_type="frontend",
+        framework="angular",
+        language="typescript",
+        container_port=5173,
+        description=(
+            "Angular SPA for the saas bundle. FusionAuth OAuth2 login flow, "
+            "JWT in Authorization header (interceptor), protected routes, "
+            "EntityChannelService for real-time entity events (mirrors MUSE "
+            "pattern), profile editor, article view with live processing-lock "
+            "indicator. Part of the saas bundle."
+        ),
+    ),
 }
 
 _EXCLUDE_NAMES = {
