@@ -74,10 +74,17 @@ def preflight_checks():
     """Validate prerequisites before running the pipeline."""
     errors = []
 
-    # Check API key
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        errors.append("OPENAI_API_KEY environment variable is not set. Add it to .env or export it.")
+    # Check API key — bizniz.yaml drives which provider; we accept any
+    # of the supported ones being set.
+    has_any = any(
+        os.environ.get(k)
+        for k in ("OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY")
+    )
+    if not has_any:
+        errors.append(
+            "No AI provider key set — need one of OPENAI_API_KEY, "
+            "GEMINI_API_KEY, or ANTHROPIC_API_KEY (export or in .env)."
+        )
 
     # Check Docker daemon
     try:

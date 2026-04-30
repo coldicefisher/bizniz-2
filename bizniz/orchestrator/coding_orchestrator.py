@@ -96,6 +96,23 @@ def _is_config_file(filepath: str) -> bool:
     return basename in _CONFIG_FILENAMES
 
 
+def _retag_client_for_agent(client, agent) -> None:
+    """Set ``client._caller_agent`` to the agent's class name (lowercased).
+
+    BaseAIAgent.__init__ tags the original client at construction time
+    so cost-tracker records show coder/tester/quickdebugger correctly.
+    On model escalation, the orchestrator hands each agent a fresh
+    client from the factory — that fresh client wasn't constructed via
+    BaseAIAgent and has no tag, so its calls would otherwise show up
+    as ``agent=unknown`` in the cost report. This helper restores the
+    tag after a swap.
+    """
+    try:
+        client._caller_agent = type(agent).__name__.lower()
+    except Exception:
+        pass
+
+
 class CodingOrchestrator:
     """
     Orchestrates Coder + Tester + QuickDebugger in an iterative repair loop.
@@ -513,6 +530,15 @@ class CodingOrchestrator:
                 self._tester._client = fresh_client
                 if self._quick_debugger:
                     self._quick_debugger._client = fresh_client
+                # Re-tag the fresh clients so cost-tracker records the
+                # right agent. BaseAIAgent.__init__ tags the original
+                # client at construction time, but the factory hands
+                # back a brand-new client per escalation that hasn't
+                # been through that path.
+                _retag_client_for_agent(fresh_client, self._coder)
+                _retag_client_for_agent(fresh_client, self._tester)
+                if self._quick_debugger:
+                    _retag_client_for_agent(fresh_client, self._quick_debugger)
             else:
                 self._client.set_model(current)
             log(f"Orchestrator: starting with suggested model {current}")
@@ -2222,12 +2248,19 @@ class CodingOrchestrator:
                     self._tester._client = fresh_client
                     if self._quick_debugger:
                         self._quick_debugger._client = fresh_client
+                    _retag_client_for_agent(fresh_client, self._coder)
+                    _retag_client_for_agent(fresh_client, self._tester)
+                    if self._quick_debugger:
+                        _retag_client_for_agent(fresh_client, self._quick_debugger)
                 elif agent == "coder":
                     self._coder._client = fresh_client
+                    _retag_client_for_agent(fresh_client, self._coder)
                 elif agent == "tester":
                     self._tester._client = fresh_client
+                    _retag_client_for_agent(fresh_client, self._tester)
                 elif agent == "repair":
                     self._coder._client = fresh_client  # repair uses coder
+                    _retag_client_for_agent(fresh_client, self._coder)
                 log(f"Orchestrator: escalated {agent} to model {new_model} (fresh client)")
             else:
                 self._client.set_model(new_model)
