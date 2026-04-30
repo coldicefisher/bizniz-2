@@ -17,6 +17,7 @@ class ServiceDefinition(BaseModel):
     port: Optional[int] = None
     depends_on: List[str] = []
     requirements: List[str] = []  # pip/npm packages
+    skeleton: Optional[str] = None  # fastapi | react | angular | teams-backend | teams-consumer | teams-frontend | none
     image_name: Optional[str] = None  # Docker image tag, set after build
 
 

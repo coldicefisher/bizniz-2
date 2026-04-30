@@ -9,7 +9,7 @@ Output structure:
     project_root/
     ├── backend/                  (service source code)
     ├── frontend/                 (service source code)
-    └── dockerfiles/
+    └── infra/
         └── development/
             ├── docker-compose.yml
             ├── .env
@@ -170,6 +170,8 @@ def _make_engineer(config, workspace, on_status_message=None, image_name=None, l
         on_status_message=on_status_message,
         language=language,
         available_models=config.autocoder_models or config.models,
+        debugger_model=config.debugger_model,
+        debugger_max_iterations=config.debugger_max_iterations,
     )
 
 
@@ -243,4 +245,16 @@ if __name__ == "__main__":
 
     elapsed = time.time() - _start_time
     print(f"\n  Total elapsed: {elapsed:.0f}s", flush=True)
+
+    # Cost summary for this run
+    try:
+        from bizniz.cost import get_tracker
+        cost = get_tracker().summary()
+        print(flush=True)
+        print(f"{'='*60}", flush=True)
+        print(f"  Cost", flush=True)
+        print(f"{'='*60}", flush=True)
+        print("  " + cost.format().replace("\n", "\n  "), flush=True)
+    except Exception as e:
+        print(f"  Cost summary unavailable: {e}", flush=True)
     print(flush=True)

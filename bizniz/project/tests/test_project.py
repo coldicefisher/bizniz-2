@@ -28,7 +28,7 @@ def test_project_name(project):
 
 
 def test_dev_root(project):
-    expected = project.root / "dockerfiles" / "development"
+    expected = project.root / "infra" / "development"
     assert project.dev_root == expected
 
 

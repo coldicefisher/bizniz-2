@@ -767,6 +767,7 @@ def main(config_path=None):
     from bizniz.clients.chatgpt.openai_chatgpt_client import OpenAIChat4GPTClient
     from bizniz.clients.chatgpt.chatgpt_client_config import ChatGPTClientConfig
     from bizniz.clients.claude.claude_client import ClaudeClient
+    from bizniz.clients.gemini.gemini_client import GeminiClient
     from bizniz.engineer.auto_engineer import AutoEngineer
     from bizniz.engineer.types import ArchitecturePlan
 
@@ -920,6 +921,11 @@ def main(config_path=None):
         if model_name.startswith("claude"):
             return ClaudeClient(
                 api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                model_name=model_name,
+            )
+        if model_name.startswith("gemini"):
+            return GeminiClient(
+                api_key=os.environ.get("GEMINI_API_KEY"),
                 model_name=model_name,
             )
         cfg = ChatGPTClientConfig(default_model=model_name)

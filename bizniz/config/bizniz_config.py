@@ -11,10 +11,15 @@ from bizniz.orchestrator.model_progression import ModelProgression
 
 
 CLAUDE_MODEL_PREFIXES = ("claude-",)
+GEMINI_MODEL_PREFIXES = ("gemini-",)
 
 
 def _is_claude_model(model_name: str) -> bool:
     return any(model_name.startswith(p) for p in CLAUDE_MODEL_PREFIXES)
+
+
+def _is_gemini_model(model_name: str) -> bool:
+    return any(model_name.startswith(p) for p in GEMINI_MODEL_PREFIXES)
 
 
 class BiznizConfig(BaseModel):
@@ -29,6 +34,12 @@ class BiznizConfig(BaseModel):
     autocoder_models: Optional[List[str]] = None
     autotester_models: Optional[List[str]] = None
     repair_models: Optional[List[str]] = None
+    # Three-phase strategy (used when AutoEngineer.run_three_phase is dispatched):
+    #   debugger_model           — top-tier model for Phase 3 agentic debugging
+    #                              (full context + discovery tools + run_command + run_tests)
+    #   debugger_max_iterations  — per-ticket cap for the agentic debugger
+    debugger_model: str = "gemini-pro"
+    debugger_max_iterations: int = 12
     # Escalation thresholds (consecutive failures before escalating model)
     stall_threshold: int = 3
     agentic_debug_threshold: int = 5
@@ -40,6 +51,7 @@ class BiznizConfig(BaseModel):
     max_service_workers: int = 4
     api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None
     is_azure: bool = False
     api_base: Optional[str] = None
     max_iterations: int = 20
@@ -68,12 +80,14 @@ class BiznizConfig(BaseModel):
     def make_client(self, model: Optional[str] = None) -> BaseAIClient:
         """Create an AI client for the given model.
 
-        Automatically selects Claude or OpenAI based on the model name prefix.
+        Automatically selects Claude, Gemini, or OpenAI based on the model name prefix.
         """
         resolved_model = model or self.default_model
 
         if _is_claude_model(resolved_model):
             return self._make_claude_client(resolved_model)
+        if _is_gemini_model(resolved_model):
+            return self._make_gemini_client(resolved_model)
         return self._make_openai_client(resolved_model)
 
     def make_engineer_client(self) -> BaseAIClient:
@@ -116,3 +130,8 @@ class BiznizConfig(BaseModel):
         from bizniz.clients.claude.claude_client import ClaudeClient
         api_key = self.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
         return ClaudeClient(api_key=api_key, model_name=model)
+
+    def _make_gemini_client(self, model: str) -> BaseAIClient:
+        from bizniz.clients.gemini.gemini_client import GeminiClient
+        api_key = self.gemini_api_key or os.environ.get("GEMINI_API_KEY")
+        return GeminiClient(api_key=api_key, model_name=model)

@@ -12,7 +12,7 @@ Represents a bizniz project rooted at a directory with this structure:
     ├── frontend/                (service source code)
     │   ├── src/
     │   └── tests/
-    └── dockerfiles/
+    └── infra/
         └── development/
             ├── docker-compose.yml
             ├── .env
@@ -45,8 +45,8 @@ class Project:
 
     @property
     def dev_root(self) -> Path:
-        """Returns root / dockerfiles / development (Docker configs live here)."""
-        return self._root / "dockerfiles" / "development"
+        """Returns root / infra / development (Docker configs live here)."""
+        return self._root / "infra" / "development"
 
     @property
     def docker_root(self) -> Path:

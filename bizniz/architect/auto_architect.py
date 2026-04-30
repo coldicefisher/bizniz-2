@@ -15,7 +15,7 @@ Project structure:
     ├── frontend/                 (service source code)
     │   ├── src/...
     │   └── tests/...
-    └── dockerfiles/
+    └── infra/
         └── development/
             ├── docker-compose.yml
             ├── .env
@@ -25,11 +25,13 @@ Project structure:
 
 import concurrent.futures
 import json
+import re
+import socket
 import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Callable, List
+from typing import Dict, Optional, Callable, List
 
 from bizniz.base_ai_agent import BaseAIAgent
 from bizniz.clients.base_ai_client import BaseAIClient
@@ -50,6 +52,7 @@ from bizniz.architect.types import (
 from bizniz.architect.prompts.system_prompt import AUTO_ARCHITECT_SYSTEM_PROMPT
 from bizniz.architect.prompts.decompose_prompt import DECOMPOSE_PROMPT_TEMPLATE
 from bizniz.architect.prompts.schema import AutoArchitectSchema
+from bizniz.architect.skeletons import get_skeleton, seed_workspace
 
 
 # Service types that are application code (need workspaces + engineers)
@@ -154,7 +157,7 @@ class AutoArchitect(BaseAIAgent):
         """
         Full pipeline:
         1. Decompose problem into services
-        2. Create project structure (dockerfiles/development/...)
+        2. Create project structure (infra/development/...)
         3. Generate Dockerfiles, requirements.txt, docker-compose.yml, .env
         4. Build Docker images for application services
         5. Dispatch AutoEngineer for each application service
@@ -168,11 +171,27 @@ class AutoArchitect(BaseAIAgent):
         # Step 1: Decompose
         architecture = self.decompose(problem_statement, project_name)
 
+        # Step 1b: Allocate free host ports (avoid clashing with anything else
+        # already running on the dev machine). Modifies architecture.docker_compose
+        # in place to rewrite host:container port mappings.
+        port_remap = _allocate_free_ports(architecture)
+        if port_remap:
+            log(
+                f"AutoArchitect: remapped {len(port_remap)} colliding host port(s): "
+                + ", ".join(
+                    f"{svc} {old}->{new}" for svc, (old, new) in port_remap.items()
+                )
+            )
+
         # Step 2: Create project structure
         parent = Path(self._project_parent) if self._project_parent else self._workspace.root.parent
         project = Project(root=parent / architecture.project_slug, project_name=project_name)
         project.create_structure()
         log(f"AutoArchitect: created project at {project.root}")
+
+        # Step 2b: Clean up any leftover containers/images from prior builds
+        # of this same project so we don't ship stale code.
+        _cleanup_existing_project(architecture.project_slug, log)
 
         # Save architecture snapshot
         project.db.save_architecture_snapshot(
@@ -185,7 +204,7 @@ class AutoArchitect(BaseAIAgent):
 
         # Step 3: Create service workspaces and Docker configs
         # Source code goes in project_root/<service>/
-        # Docker configs go in dockerfiles/development/<service>/
+        # Docker configs go in infra/development/<service>/
         log("AutoArchitect: creating service workspaces and Docker configs...")
         service_workspaces = {}
         for service in architecture.services:
@@ -199,17 +218,41 @@ class AutoArchitect(BaseAIAgent):
             # Docker config directory
             docker_dir = project.get_docker_service_dir(service.workspace_name)
 
-            # Generate Dockerfile in docker dir
-            dockerfile_content = self._generate_dockerfile(service)
-            (docker_dir / "Dockerfile").write_text(dockerfile_content)
+            skeleton = get_skeleton(service.skeleton)
+            if skeleton is not None:
+                # Seed from skeleton: copy the repo, then mirror its Dockerfile
+                # into infra/development/<svc>/ so docker-compose finds it where
+                # the AI's compose expects.
+                try:
+                    copied = seed_workspace(
+                        skeleton_name=skeleton.name,
+                        dest=Path(workspace.root),
+                        project_slug=architecture.project_slug,
+                        service_name=service.name,
+                    )
+                    log(
+                        f"AutoArchitect: seeded '{service.name}' from skeleton "
+                        f"'{skeleton.name}' ({len(copied)} files)"
+                    )
+                    skeleton_dockerfile = Path(workspace.root) / "Dockerfile"
+                    if skeleton_dockerfile.exists():
+                        (docker_dir / "Dockerfile").write_text(skeleton_dockerfile.read_text())
+                except FileNotFoundError as e:
+                    log(f"AutoArchitect: skeleton seeding failed for '{service.name}': {e}")
+                    log(f"AutoArchitect: falling back to generated boilerplate for '{service.name}'")
+                    skeleton = None  # fall through to generated path below
 
-            # Generate requirements file in workspace (Docker build context)
-            if service.language == "python":
-                req_content = self._generate_requirements_txt(service)
-                workspace.write_file("requirements.txt", req_content)
-            elif service.language == "typescript":
-                pkg_json = self._generate_package_json(service, architecture.project_slug)
-                workspace.write_file("package.json", pkg_json)
+            if skeleton is None:
+                # No skeleton: generate boilerplate Dockerfile + requirements/package.json
+                dockerfile_content = self._generate_dockerfile(service)
+                (docker_dir / "Dockerfile").write_text(dockerfile_content)
+
+                if service.language == "python":
+                    req_content = self._generate_requirements_txt(service)
+                    workspace.write_file("requirements.txt", req_content)
+                elif service.language == "typescript":
+                    pkg_json = self._generate_package_json(service, architecture.project_slug)
+                    workspace.write_file("package.json", pkg_json)
 
             # Register service in project DB
             project.db.save_service(
@@ -474,7 +517,9 @@ class AutoArchitect(BaseAIAgent):
                                 description=issue.description,
                             )
 
-                results = engineer.run_layered(service_prompt, analysis=analysis)
+                # Three-phase strategy: cheap framing pass → escalation chain
+                # over all still-failing tickets → agentic debug on what's left.
+                results = engineer.run_three_phase(service_prompt, analysis=analysis)
             else:
                 # Sequential per-issue dispatch (legacy behavior)
                 analysis = engineer.analyze(service_prompt)
@@ -543,7 +588,7 @@ class AutoArchitect(BaseAIAgent):
     ):
         """Build the Docker image for a service.
 
-        The Dockerfile lives in docker_dir (dockerfiles/development/<service>/)
+        The Dockerfile lives in docker_dir (infra/development/<service>/)
         and the build context is the workspace root (project_root/<service>/).
         """
         def log(msg: str):
@@ -725,6 +770,153 @@ class AutoArchitect(BaseAIAgent):
                 ])
 
         return "\n".join(lines) + "\n"
+
+
+def _is_host_port_free(port: int) -> bool:
+    """True if we can bind <port> on the host right now."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("0.0.0.0", port))
+        except OSError:
+            return False
+    return True
+
+
+def _find_free_port(preferred: int, taken: set) -> int:
+    """Return a free host port at or above ``preferred``, skipping ``taken``."""
+    port = max(preferred, 1024)
+    while port < 65535:
+        if port in taken or not _is_host_port_free(port):
+            port += 1
+            continue
+        return port
+    raise RuntimeError(f"No free port found at or above {preferred}")
+
+
+def _allocate_free_ports(architecture: SystemArchitecture) -> Dict[str, tuple]:
+    """
+    Walk all services with a host port set and reassign any that collide
+    with each other or with ports already bound on the host. Patches the
+    ``host:container`` mappings in ``architecture.docker_compose`` for the
+    affected services.
+
+    Returns a dict of service_name -> (original_host_port, new_host_port)
+    for services whose host port moved.
+    """
+    import yaml
+
+    remap: Dict[str, tuple] = {}
+    taken: set = set()
+    name_to_remap: Dict[str, tuple] = {}
+    for svc in architecture.services:
+        if svc.port is None:
+            continue
+        free = _find_free_port(svc.port, taken)
+        if free != svc.port:
+            name_to_remap[svc.name] = (svc.port, free)
+            remap[svc.name] = (svc.port, free)
+            svc.port = free
+        taken.add(free)
+
+    if not name_to_remap:
+        return remap
+
+    # Parse compose, rewrite port mappings per service, reserialize.
+    try:
+        compose_data = yaml.safe_load(architecture.docker_compose) or {}
+    except yaml.YAMLError:
+        # Compose isn't valid YAML — leave it alone, return remap so caller
+        # can log the mismatch. Service.port objects are still updated.
+        return remap
+
+    services = compose_data.get("services") or {}
+    for svc_name, (old_port, new_port) in name_to_remap.items():
+        svc_def = services.get(svc_name)
+        if not isinstance(svc_def, dict):
+            continue
+        ports = svc_def.get("ports") or []
+        new_ports = []
+        for entry in ports:
+            entry_str = str(entry)
+            host, _, rest = entry_str.partition(":")
+            try:
+                host_int = int(host)
+            except ValueError:
+                new_ports.append(entry)
+                continue
+            if host_int == old_port:
+                new_ports.append(f"{new_port}:{rest}" if rest else str(new_port))
+            else:
+                new_ports.append(entry)
+        svc_def["ports"] = new_ports
+
+    architecture.docker_compose = yaml.safe_dump(compose_data, sort_keys=False)
+    return remap
+
+
+def _cleanup_existing_project(project_slug: str, log: Callable[[str], None]) -> None:
+    """
+    Remove any leftover Docker images + containers from a prior build of this
+    project so a fresh run isn't confused by stale state. Also cleans up orphan
+    bizniz-pytest-* containers from aborted prior runs.
+    """
+    # Find images for this project (any tag): <slug>-<svc>:tag
+    try:
+        proc = subprocess.run(
+            [
+                "docker", "images",
+                "--format", "{{.Repository}}:{{.Tag}}",
+                "--filter", f"reference={project_slug}-*",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        images = [line for line in proc.stdout.strip().split("\n") if line]
+    except Exception as e:
+        log(f"AutoArchitect: cleanup image scan failed: {e}")
+        images = []
+
+    for image in images:
+        try:
+            cproc = subprocess.run(
+                ["docker", "ps", "-aq", "--filter", f"ancestor={image}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            container_ids = [c for c in cproc.stdout.strip().split("\n") if c]
+            if container_ids:
+                subprocess.run(
+                    ["docker", "rm", "-f"] + container_ids,
+                    capture_output=True, timeout=30,
+                )
+                log(f"AutoArchitect: removed {len(container_ids)} container(s) using {image}")
+        except Exception as e:
+            log(f"AutoArchitect: container cleanup for {image} failed: {e}")
+
+    if images:
+        try:
+            subprocess.run(
+                ["docker", "rmi", "-f"] + images,
+                capture_output=True, timeout=60,
+            )
+            log(f"AutoArchitect: removed {len(images)} stale image(s) for '{project_slug}'")
+        except Exception as e:
+            log(f"AutoArchitect: image rm failed: {e}")
+
+    # Sweep orphan pytest containers (any project)
+    try:
+        proc = subprocess.run(
+            ["docker", "ps", "-aq", "--filter", "name=bizniz-pytest-"],
+            capture_output=True, text=True, timeout=10,
+        )
+        ids = [c for c in proc.stdout.strip().split("\n") if c]
+        if ids:
+            subprocess.run(
+                ["docker", "rm", "-f"] + ids,
+                capture_output=True, timeout=30,
+            )
+            log(f"AutoArchitect: removed {len(ids)} orphan pytest container(s)")
+    except Exception:
+        pass
 
 
 def _sort_services_by_dependency(services):

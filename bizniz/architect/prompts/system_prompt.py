@@ -26,7 +26,7 @@ Design principles:
 - Generate a requirements.txt (Python) or package.json (TypeScript) per service
 
 Project directory structure (MANDATORY):
-Source code lives at project_root/<service>/, Docker configs at dockerfiles/development/:
+Source code lives at project_root/<service>/, Docker configs at infra/development/:
 ```
 project_root/
 ├── backend/                  <- Python backend source code
@@ -37,7 +37,7 @@ project_root/
 │   ├── src/...
 │   ├── tests/...
 │   └── package.json
-└── dockerfiles/
+└── infra/
     └── development/
         ├── docker-compose.yml
         ├── .env
@@ -47,7 +47,7 @@ project_root/
 
 Docker Compose build contexts must point to `../../<service_directory>` relative
 to the development directory (i.e. the source code root). Dockerfiles are
-referenced via the `dockerfile` key pointing to `../../dockerfiles/development/<service>/Dockerfile`.
+referenced via the `dockerfile` key pointing to `../../infra/development/<service>/Dockerfile`.
 Infrastructure services (databases, caches) use standard Docker Hub images with no build context.
 
 For each application service, generate an initial requirements file:
