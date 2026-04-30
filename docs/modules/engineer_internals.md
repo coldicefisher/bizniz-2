@@ -1,6 +1,6 @@
 # Engineer Internals
 
-`bizniz/engineer/`. Helpers below `Engineer` (which is documented at [agents/engineer.md](../agents/engineer.md)).
+`bizniz/engineer/`. Helpers below `Engineer` (which is documented at [roles/engineer.md](../roles/engineer.md)).
 
 ## Files
 

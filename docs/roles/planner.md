@@ -179,4 +179,4 @@ pytest -m functional bizniz/planner/tests/functional/   # needs GEMINI_API_KEY
 
 - [architecture/planner.md](../architecture/planner.md) — design rationale, milestone shape, module layout
 - [architecture/evolve_mode.md](../architecture/evolve_mode.md) — the build path the Planner feeds into
-- [agents/architect.md](architect.md) — the next agent down (`Architect.evolve` consumes one milestone at a time)
+- [roles/architect.md](architect.md) — the next agent down (`Architect.evolve` consumes one milestone at a time)

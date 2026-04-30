@@ -17,19 +17,22 @@ High-level cross-cutting design.
 - [architecture/cost_tracking.md](architecture/cost_tracking.md) — per-call usage capture, pricing, persistence
 - [architecture/error_classification.md](architecture/error_classification.md) — collection-error routing + config-aware repair
 
-## Agents
+## Roles
 
-Each AI agent (one page per agent), top-down from coarsest to finest.
+Each top-level pipeline role gets one page — AI agents and deterministic
+engines side-by-side, since users think of them as peers in the build
+flow. Top-down from coarsest to finest.
 
-- [agents/base_ai_agent.md](agents/base_ai_agent.md) — common base class
-- [agents/planner.md](agents/planner.md) — milestone sequencer (top of the stack)
-- [agents/architect.md](agents/architect.md) — system decomposer (also runs `evolve()` per milestone)
-- [agents/engineer.md](agents/engineer.md) — per-service requirements + architecture planning
-- [agents/coding_orchestrator.md](agents/coding_orchestrator.md) — per-issue iterative loop
-- [agents/coder.md](agents/coder.md) — code generation (single & multi-file)
-- [agents/tester.md](agents/tester.md) — test generation (three modes)
-- [agents/quick_debugger.md](agents/quick_debugger.md) — quick one-shot diagnosis
-- [agents/agentic_debugger.md](agents/agentic_debugger.md) — iterative tool-use diagnosis
+- [roles/base_ai_agent.md](roles/base_ai_agent.md) — common base class for AI roles
+- [roles/planner.md](roles/planner.md) — milestone sequencer (top of the stack)
+- [roles/architect.md](roles/architect.md) — system decomposer (also runs `evolve()` per milestone)
+- [roles/provisioner.md](roles/provisioner.md) — deterministic materializer (no AI)
+- [roles/engineer.md](roles/engineer.md) — per-service requirements + architecture planning
+- [roles/coding_orchestrator.md](roles/coding_orchestrator.md) — per-issue iterative loop
+- [roles/coder.md](roles/coder.md) — code generation (single & multi-file)
+- [roles/tester.md](roles/tester.md) — test generation (three modes)
+- [roles/quick_debugger.md](roles/quick_debugger.md) — quick one-shot diagnosis
+- [roles/agentic_debugger.md](roles/agentic_debugger.md) — iterative tool-use diagnosis
 
 ## Module reference
 
@@ -59,7 +62,7 @@ Lookup tables and full schemas.
 
 ## Conventions used in this docs tree
 
-- Absolute paths in cross-links use the relative form (`agents/coder.md`) since the docs site renders this directory tree.
+- Absolute paths in cross-links use the relative form (`roles/coder.md`) since the docs site renders this directory tree.
 - "Workspace" always means a `BaseWorkspace` subclass — a directory the agents read/write files to.
 - "Service" is one container in the system architecture (one workspace + one Docker image).
 - "Issue" is one engineering task tracked in `WorkspaceDB` and dispatched to the `CodingOrchestrator`.

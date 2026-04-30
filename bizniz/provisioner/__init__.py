@@ -20,6 +20,19 @@ Templates for common infrastructure services live in
 ``templates.registry``.
 """
 from bizniz.provisioner.provisioner import Provisioner
-from bizniz.provisioner.types import ProvisionResult, ProvisionedService
+from bizniz.provisioner.types import (
+    ProbedService,
+    ProvisionedService,
+    ProvisionResult,
+    ProvisionState,
+    ReconcileAction,
+)
 
-__all__ = ["Provisioner", "ProvisionResult", "ProvisionedService"]
+__all__ = [
+    "Provisioner",
+    "ProvisionResult",
+    "ProvisionedService",
+    "ProbedService",
+    "ProvisionState",
+    "ReconcileAction",
+]

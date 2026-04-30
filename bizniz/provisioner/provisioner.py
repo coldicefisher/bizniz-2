@@ -33,9 +33,12 @@ from bizniz.provisioner.env_builder import build_env_file
 from bizniz.provisioner.templates import lookup as lookup_template
 from bizniz.provisioner.templates.base import TemplateContext, TemplateOutput
 from bizniz.provisioner.types import (
+    ProbedService,
     ProvisionedService,
     ProvisionResult,
+    ProvisionState,
     ProvisionerError,
+    ReconcileAction,
 )
 
 
@@ -72,12 +75,45 @@ class Provisioner:
         self,
         architecture: SystemArchitecture,
         project_name: str,
+        prune: bool = False,
     ) -> ProvisionResult:
-        """Run the full provisioning sequence and return a ProvisionResult."""
+        """Probe → reconcile → materialize.
+
+        Always idempotent: probes the project root, reconciles the desired
+        architecture against observed state, and materializes whatever is
+        new or extended. Existing services are preserved.
+
+        Pass ``prune=True`` to also delete orphan Docker images (services
+        that exist in observed state but not in the desired architecture
+        — e.g. removed during a refactor). Off by default to avoid
+        clobbering work between runs.
+        """
         log = self._log
 
-        # 1. Free-port allocation across all host-port-bearing services.
-        port_remap = self._allocate_free_ports(architecture)
+        # 1. Project root (idempotent).
+        project = Project(
+            root=self._project_parent / architecture.project_slug,
+            project_name=project_name,
+        )
+        project.create_structure()
+
+        # 2. Probe observed state.
+        state = self.probe(architecture.project_slug, project.root)
+        log(
+            f"Provisioner: probed '{architecture.project_slug}' — "
+            f"{sum(1 for s in state.services if s.db_recorded)} known services, "
+            f"{len(state.orphan_workspace_dirs)} orphan workspace(s), "
+            f"{len(state.project_images)} project image(s)"
+        )
+
+        # 3. Reconcile desired vs observed → per-service action plan.
+        actions = self._reconcile(architecture, state)
+        action_by_name = {a.service_name: a for a in actions}
+
+        # 4. Port allocation: only re-map ports for services that
+        #    reconciler flagged "create" (truly new). Preserved services
+        #    keep their existing ports.
+        port_remap = self._allocate_ports_for_new(architecture, action_by_name)
         if port_remap:
             log(
                 f"Provisioner: remapped {len(port_remap)} colliding host port(s): "
@@ -86,38 +122,37 @@ class Provisioner:
                 )
             )
 
-        # 2. Project root + dependency cleanup.
-        project = Project(
-            root=self._project_parent / architecture.project_slug,
-            project_name=project_name,
-        )
-        project.create_structure()
-        log(f"Provisioner: created project at {project.root}")
+        # 5. Snapshot new architecture to project DB.
+        try:
+            project.db.save_architecture_snapshot(
+                architecture.json(),
+                description=self._snapshot_description(actions),
+            )
+        except Exception as e:
+            log(f"Provisioner: snapshot failed ({e}) — continuing")
 
-        self._cleanup_existing_project(architecture.project_slug)
-
-        # Snapshot architecture to project DB.
-        project.db.save_architecture_snapshot(
-            architecture.json(),
-            description=f"Initial decomposition: {len(architecture.services)} services",
-        )
-
-        # 3. Per-service materialization. Walk in two passes — render all
-        # template outputs first, then write to disk in one batch so
-        # dependency-aware merges (e.g. postgres injecting fusionauth DB)
-        # are visible to compose generation.
+        # 6. Per-service materialization, dispatched by reconciled action.
         template_outputs: Dict[str, TemplateOutput] = {}
         provisioned_services: List[ProvisionedService] = []
 
         for service in architecture.services:
-            ps = self._provision_service(service, architecture, project, template_outputs)
+            action = action_by_name[service.name]
+            if action.action == "create":
+                ps = self._provision_service(
+                    service, architecture, project, template_outputs,
+                )
+            else:
+                # update / preserve — re-render templates idempotently,
+                # don't re-seed app workspaces.
+                ps = self._evolve_service(
+                    service, architecture, project, template_outputs,
+                )
             provisioned_services.append(ps)
 
-        # 4. Compose + .env
+        # 7. Compose + .env (always regenerated from desired architecture).
         compose_yaml = build_compose(architecture, template_outputs, architecture.project_slug)
         env_text = build_env_file(
-            architecture,
-            self._collect_env_vars(template_outputs),
+            architecture, self._collect_env_vars(template_outputs),
         )
         compose_path = project.dev_root / "docker-compose.yml"
         env_path = project.dev_root / ".env"
@@ -126,30 +161,17 @@ class Provisioner:
         env_path.write_text(env_text)
         log("Provisioner: wrote docker-compose.yml and .env")
 
-        # 5. Build images for app services
+        # 8. Build images per reconciled action.
         if self._build_images:
-            for ps in provisioned_services:
-                if ps.is_infrastructure or ps.workspace_path is None:
-                    continue
-                image_tag = f"{architecture.project_slug}-{ps.name}:dev"
-                docker_dir = project.get_docker_service_dir(ps.workspace_name)
-                dockerfile = docker_dir / "Dockerfile"
-                try:
-                    build_image(
-                        image_tag=image_tag,
-                        context=Path(ps.workspace_path),
-                        dockerfile=dockerfile,
-                        log=self._on_status_message,
-                    )
-                    ps.image_name = image_tag
-                    ps.image_built = True
-                    project.db.update_service_image(ps.name, image_tag)
-                    project.db.update_service_status(ps.name, "ready")
-                    project.db.log_build_event(ps.name, "image_build", True, f"Built {image_tag}")
-                except Exception as e:
-                    project.db.update_service_status(ps.name, "failed")
-                    project.db.log_build_event(ps.name, "image_build", False, str(e))
-                    log(f"Provisioner: image build failed for '{ps.name}': {e}")
+            self._build_images_per_action(
+                provisioned_services, architecture, project, action_by_name,
+            )
+
+        # 9. Optional: prune orphan images for services no longer in
+        #    the desired architecture.
+        if prune:
+            desired_names = {s.name for s in architecture.services}
+            self._prune_orphan_images(state, desired_names)
 
         return ProvisionResult(
             project_name=project_name,
@@ -168,126 +190,156 @@ class Provisioner:
     ) -> ProvisionResult:
         """Idempotent re-provision for an existing project.
 
-        Differences vs ``provision()``:
-          - **No image cleanup.** We're keeping prior milestones' images.
-          - **Skeleton seeding only for new services.** Extended /
-            unchanged services are NOT re-seeded — that would trample
-            user / engineer-generated files.
-          - **Free-port allocation only for new services.** Existing
-            services keep their original ports.
-          - **Templates re-render.** Infrastructure templates are pure,
-            so re-rendering produces the same output. App-template files
-            (Dockerfile etc.) re-render only for new services.
-          - **Compose + .env regenerated** from the full architecture so
-            new services appear and old ones stay correct.
-          - **Docker images rebuilt only for new services** (or when an
-            existing service's Dockerfile content changed on disk).
-
-        Each ``ServiceDefinition`` should already have ``evolve_state``
-        set by ``Architect.evolve()``. Services without it are treated
-        as unchanged (defensive).
+        Thin alias for ``provision(prune=False)`` — preserved for
+        readability at call sites that want to signal "this is an
+        evolve, not a fresh build".
         """
-        log = self._log
+        return self.provision(architecture, project_name, prune=False)
 
-        # 1. Free-port allocation: only over services flagged "new".
-        #    Existing services keep their original ports — they were
-        #    bound by an earlier run, the dev environment is built
-        #    around them.
-        port_remap = self._allocate_free_ports_for_new_services(architecture)
-        if port_remap:
-            log(
-                f"Provisioner: evolve remapped {len(port_remap)} colliding port(s) "
-                "(new services only): "
-                + ", ".join(
-                    f"{svc} {old}->{new}" for svc, (old, new) in port_remap.items()
-                )
-            )
+    def probe(
+        self,
+        project_slug: str,
+        project_root: Optional[Path] = None,
+    ) -> ProvisionState:
+        """Read DB + filesystem + Docker to snapshot the current state of a
+        project. Pure observation — no side effects.
 
-        # 2. Project root (already exists for evolve, but create_structure
-        #    is idempotent).
-        project = Project(
-            root=self._project_parent / architecture.project_slug,
-            project_name=project_name,
+        ``project_root`` defaults to ``project_parent / project_slug``.
+        """
+        if project_root is None:
+            project_root = self._project_parent / project_slug
+        project_root = Path(project_root)
+
+        state = ProvisionState(
+            project_slug=project_slug,
+            project_root=str(project_root),
+            project_root_exists=project_root.exists(),
         )
-        project.create_structure()
+        if not project_root.exists():
+            return state
 
-        # 3. Snapshot the new architecture to the project DB. The prior
-        #    snapshot is preserved as history.
-        try:
-            project.db.save_architecture_snapshot(
-                architecture.json(),
-                description=f"Evolved: {self._summarize_evolve_states(architecture)}",
-            )
-        except Exception as e:
-            log(f"Provisioner: snapshot failed ({e}) — continuing")
+        dev_root = project_root / "infra" / "development"
+        state.compose_exists = (dev_root / "docker-compose.yml").exists()
+        state.env_exists = (dev_root / ".env").exists()
 
-        # 4. Per-service materialization. Walk in two passes — collect
-        #    template outputs, then write to disk for compose/env.
-        template_outputs: Dict[str, TemplateOutput] = {}
-        provisioned_services: List[ProvisionedService] = []
+        # DB state — only if .bizniz/project.db exists, otherwise probe
+        # FS + Docker only.
+        db_path = project_root / ".bizniz" / "project.db"
+        services_by_name: Dict[str, ProbedService] = {}
+        if db_path.exists():
+            try:
+                from bizniz.project.project_db import ProjectDB
 
-        for service in architecture.services:
-            ps = self._evolve_service(
-                service, architecture, project, template_outputs,
-            )
-            provisioned_services.append(ps)
-
-        # 5. Compose + .env (always regenerated from full architecture).
-        compose_yaml = build_compose(architecture, template_outputs, architecture.project_slug)
-        env_text = build_env_file(
-            architecture, self._collect_env_vars(template_outputs),
-        )
-        compose_path = project.dev_root / "docker-compose.yml"
-        env_path = project.dev_root / ".env"
-        project.dev_root.mkdir(parents=True, exist_ok=True)
-        compose_path.write_text(compose_yaml)
-        env_path.write_text(env_text)
-        log("Provisioner: evolve rewrote docker-compose.yml and .env")
-
-        # 6. Build images for NEW services only. Extended services may
-        #    have new code (engineer's job to write it) but the
-        #    Dockerfile structure is unchanged — the test environment
-        #    bind-mounts the workspace, so existing images keep working.
-        if self._build_images:
-            for ps in provisioned_services:
-                if ps.is_infrastructure or ps.workspace_path is None:
-                    continue
-                # Find the matching service to read its evolve_state.
-                svc = next(
-                    (s for s in architecture.services if s.name == ps.name), None,
-                )
-                if svc is None or svc.evolve_state == "unchanged":
-                    continue
-                # Build new + extended (extended in case Dockerfile changed)
-                image_tag = f"{architecture.project_slug}-{ps.name}:dev"
-                docker_dir = project.get_docker_service_dir(ps.workspace_name)
-                dockerfile = docker_dir / "Dockerfile"
-                try:
-                    build_image(
-                        image_tag=image_tag,
-                        context=Path(ps.workspace_path),
-                        dockerfile=dockerfile,
-                        log=self._on_status_message,
+                project = Project(root=project_root, project_name=project_slug)
+                latest = project.db.get_latest_architecture()
+                if latest is not None:
+                    state.last_architecture_snapshot_json = latest["snapshot_json"]
+                for row in project.db.get_services():
+                    services_by_name[row["name"]] = ProbedService(
+                        name=row["name"],
+                        db_recorded=True,
+                        db_workspace_path=row["workspace_path"] or None,
+                        db_status=row["status"] if "status" in row.keys() else None,
+                        db_image_name=row["image_name"] or None,
                     )
-                    ps.image_name = image_tag
-                    ps.image_built = True
-                    project.db.update_service_image(ps.name, image_tag)
-                    project.db.update_service_status(ps.name, "ready")
-                    project.db.log_build_event(ps.name, "image_build", True, f"Rebuilt {image_tag}")
-                except Exception as e:
-                    project.db.update_service_status(ps.name, "failed")
-                    project.db.log_build_event(ps.name, "image_build", False, str(e))
-                    log(f"Provisioner: evolve image build failed for '{ps.name}': {e}")
+            except Exception as e:
+                self._log(f"Provisioner: probe — DB read failed ({e})")
 
-        return ProvisionResult(
-            project_name=project_name,
-            project_slug=architecture.project_slug,
-            project_root=str(project.root),
-            compose_path=str(compose_path),
-            env_path=str(env_path),
-            services=provisioned_services,
-            port_remap=port_remap,
+        # Filesystem scan: every directory under project_root that isn't
+        # infra/.bizniz is a candidate workspace.
+        fs_workspaces: set = set()
+        if project_root.exists():
+            for child in project_root.iterdir():
+                if not child.is_dir():
+                    continue
+                if child.name in (".bizniz", "infra"):
+                    continue
+                fs_workspaces.add(child.name)
+
+        # Mark workspace_exists / has_dockerfile per known service.
+        for name, svc in services_by_name.items():
+            ws_dir = project_root / name
+            svc.workspace_exists_on_disk = ws_dir.exists() and ws_dir.is_dir()
+            svc.has_dockerfile = (dev_root / name / "Dockerfile").exists()
+
+        # Orphan workspaces: on disk, not in DB.
+        state.orphan_workspace_dirs = sorted(
+            fs_workspaces - set(services_by_name.keys())
         )
+
+        # Docker image inventory.
+        state.project_images = self._list_project_images(project_slug)
+        for name, svc in services_by_name.items():
+            expected_tag = f"{project_slug}-{name}:dev"
+            svc.image_in_docker = expected_tag in state.project_images
+
+        state.services = list(services_by_name.values())
+        return state
+
+    def _reconcile(
+        self,
+        architecture: SystemArchitecture,
+        state: ProvisionState,
+    ) -> List[ReconcileAction]:
+        """Decide what to do with each service based on desired vs
+        observed.
+
+        Logic per service:
+          - Not in DB AND no workspace on disk → ``create`` (true new
+            service or first-time build).
+          - In DB but workspace missing on disk → ``create`` (state drift
+            — DB says it exists, FS disagrees, rebuild from scratch).
+          - In DB and on disk, architect tagged ``new`` → defensive
+            ``create`` (architect thinks new, but state shows we already
+            built it; treat as create to materialize anything missing
+            but don't re-seed if files exist).
+          - In DB and on disk, architect tagged ``extended`` → ``update``
+            (re-render templates, leave app workspace alone).
+          - Otherwise → ``preserve``.
+
+        Image rebuild is set when ``create`` or ``update``, OR when the
+        DB says no image is recorded yet for an existing service.
+        """
+        actions: List[ReconcileAction] = []
+        for svc in architecture.services:
+            probed = state.get_service(svc.name)
+            arch_state = svc.evolve_state or "unchanged"
+
+            if probed is None:
+                action = "create"
+                reason = "not present in observed state"
+            elif not probed.workspace_exists_on_disk and svc.service_type in _APP_TYPES:
+                action = "create"
+                reason = "DB-recorded but workspace missing on disk"
+            elif arch_state == "new":
+                action = "create"
+                reason = "architect tagged new"
+            elif arch_state == "extended":
+                action = "update"
+                reason = "architect tagged extended"
+            else:
+                action = "preserve"
+                reason = "unchanged"
+
+            rebuild = action in ("create", "update")
+            if (
+                action == "preserve"
+                and svc.service_type in _APP_TYPES
+                and probed is not None
+                and not probed.image_in_docker
+            ):
+                rebuild = True
+                reason += "; image missing — rebuild"
+
+            actions.append(
+                ReconcileAction(
+                    service_name=svc.name,
+                    action=action,
+                    rebuild_image=rebuild,
+                    reason=reason,
+                )
+            )
+        return actions
 
     # ── Per-service materialization ───────────────────────────────────────────
 
@@ -356,6 +408,7 @@ class Provisioner:
                     dest=Path(workspace.root),
                     project_slug=architecture.project_slug,
                     service_name=service.name,
+                    on_status=log,
                 )
                 log(
                     f"Provisioner: seeded '{service.name}' from skeleton "
@@ -520,20 +573,24 @@ class Provisioner:
             skeleton_name=service.skeleton if service.skeleton != "none" else None,
         )
 
-    def _allocate_free_ports_for_new_services(
-        self, architecture: SystemArchitecture,
+    def _allocate_ports_for_new(
+        self,
+        architecture: SystemArchitecture,
+        action_by_name: Dict[str, ReconcileAction],
     ) -> Dict[str, tuple]:
-        """Like ``_allocate_free_ports`` but only re-allocates for
-        services flagged ``evolve_state="new"``. Existing services keep
-        the ports they were originally given."""
+        """Reassign host ports that collide with each other or the dev
+        machine, but only for services the reconciler flagged ``create``.
+        Preserved services keep their original ports."""
         remap: Dict[str, tuple] = {}
-        # Existing-service ports are already taken
         taken: set = {
             s.port for s in architecture.services
-            if s.port is not None and s.evolve_state != "new"
+            if s.port is not None
+            and action_by_name[s.name].action != "create"
         }
         for svc in architecture.services:
-            if svc.evolve_state != "new" or svc.port is None:
+            if svc.port is None:
+                continue
+            if action_by_name[svc.name].action != "create":
                 continue
             free = _find_free_port(svc.port, taken)
             if free != svc.port:
@@ -543,11 +600,48 @@ class Provisioner:
         return remap
 
     @staticmethod
-    def _summarize_evolve_states(architecture: SystemArchitecture) -> str:
-        new = sum(1 for s in architecture.services if s.evolve_state == "new")
-        ext = sum(1 for s in architecture.services if s.evolve_state == "extended")
-        unc = sum(1 for s in architecture.services if s.evolve_state == "unchanged")
-        return f"{new} new, {ext} extended, {unc} unchanged"
+    def _snapshot_description(actions: List[ReconcileAction]) -> str:
+        c = sum(1 for a in actions if a.action == "create")
+        u = sum(1 for a in actions if a.action == "update")
+        p = sum(1 for a in actions if a.action == "preserve")
+        return f"Reconciled: {c} create, {u} update, {p} preserve"
+
+    def _build_images_per_action(
+        self,
+        provisioned_services: List[ProvisionedService],
+        architecture: SystemArchitecture,
+        project: Project,
+        action_by_name: Dict[str, ReconcileAction],
+    ) -> None:
+        log = self._log
+        for ps in provisioned_services:
+            if ps.is_infrastructure or ps.workspace_path is None:
+                continue
+            action = action_by_name[ps.name]
+            if not action.rebuild_image:
+                continue
+            image_tag = f"{architecture.project_slug}-{ps.name}:dev"
+            docker_dir = project.get_docker_service_dir(ps.workspace_name)
+            dockerfile = docker_dir / "Dockerfile"
+            try:
+                build_image(
+                    image_tag=image_tag,
+                    context=Path(ps.workspace_path),
+                    dockerfile=dockerfile,
+                    log=self._on_status_message,
+                )
+                ps.image_name = image_tag
+                ps.image_built = True
+                project.db.update_service_image(ps.name, image_tag)
+                project.db.update_service_status(ps.name, "ready")
+                project.db.log_build_event(
+                    ps.name, "image_build", True,
+                    f"{action.action}: built {image_tag}",
+                )
+            except Exception as e:
+                project.db.update_service_status(ps.name, "failed")
+                project.db.log_build_event(ps.name, "image_build", False, str(e))
+                log(f"Provisioner: image build failed for '{ps.name}': {e}")
 
     def _write_infra_files(self, dev_root: Path, files: Dict[str, str]) -> None:
         for rel, content in files.items():
@@ -562,31 +656,9 @@ class Provisioner:
             env.update(out.env_vars)
         return env
 
-    # ── Free-port allocation (was in architect) ───────────────────────────────
+    # ── Docker introspection / pruning ────────────────────────────────────────
 
-    def _allocate_free_ports(self, architecture: SystemArchitecture) -> Dict[str, tuple]:
-        """Reassign any host ports that collide with each other or with
-        something already bound on the dev machine. Mutates each service's
-        ``port`` field in place."""
-        remap: Dict[str, tuple] = {}
-        taken: set = set()
-        for svc in architecture.services:
-            if svc.port is None:
-                continue
-            free = _find_free_port(svc.port, taken)
-            if free != svc.port:
-                remap[svc.name] = (svc.port, free)
-                svc.port = free
-            taken.add(free)
-        return remap
-
-    # ── Project cleanup (was in architect) ────────────────────────────────────
-
-    def _cleanup_existing_project(self, project_slug: str) -> None:
-        """Remove leftover Docker images + containers from prior builds of
-        this project so a fresh run isn't confused by stale state. Best
-        effort — failures are logged, never raised."""
-        log = self._log
+    def _list_project_images(self, project_slug: str) -> List[str]:
         try:
             proc = subprocess.run(
                 [
@@ -596,12 +668,31 @@ class Provisioner:
                 ],
                 capture_output=True, text=True, timeout=10,
             )
-            images = [line for line in proc.stdout.strip().split("\n") if line]
+            return [line for line in proc.stdout.strip().split("\n") if line]
         except Exception as e:
-            log(f"Provisioner: image scan failed: {e}")
-            images = []
+            self._log(f"Provisioner: image scan failed: {e}")
+            return []
 
-        for image in images:
+    def _prune_orphan_images(
+        self, state: ProvisionState, desired_names: set,
+    ) -> None:
+        """Remove docker images for services that are no longer in the
+        desired architecture (e.g. removed by a refactor). Best effort —
+        failures are logged, never raised.
+        """
+        log = self._log
+        slug = state.project_slug
+        # An image's service name is the suffix after "<slug>-" and before ":".
+        orphan_images: List[str] = []
+        for image in state.project_images:
+            if not image.startswith(f"{slug}-"):
+                continue
+            name_and_tag = image[len(slug) + 1 :]
+            service_part = name_and_tag.split(":", 1)[0]
+            if service_part not in desired_names:
+                orphan_images.append(image)
+
+        for image in orphan_images:
             try:
                 cproc = subprocess.run(
                     ["docker", "ps", "-aq", "--filter", f"ancestor={image}"],
@@ -613,34 +704,22 @@ class Provisioner:
                         ["docker", "rm", "-f"] + ids,
                         capture_output=True, timeout=30,
                     )
-                    log(f"Provisioner: removed {len(ids)} container(s) using {image}")
+                    log(f"Provisioner: prune — removed {len(ids)} container(s) using {image}")
             except Exception as e:
-                log(f"Provisioner: container cleanup for {image} failed: {e}")
+                log(f"Provisioner: prune — container cleanup for {image} failed: {e}")
 
-        if images:
+        if orphan_images:
             try:
                 subprocess.run(
-                    ["docker", "rmi", "-f"] + images,
+                    ["docker", "rmi", "-f"] + orphan_images,
                     capture_output=True, timeout=60,
                 )
-                log(f"Provisioner: removed {len(images)} stale image(s) for '{project_slug}'")
-            except Exception as e:
-                log(f"Provisioner: image rm failed: {e}")
-
-        try:
-            proc = subprocess.run(
-                ["docker", "ps", "-aq", "--filter", "name=bizniz-pytest-"],
-                capture_output=True, text=True, timeout=10,
-            )
-            ids = [c for c in proc.stdout.strip().split("\n") if c]
-            if ids:
-                subprocess.run(
-                    ["docker", "rm", "-f"] + ids,
-                    capture_output=True, timeout=30,
+                log(
+                    f"Provisioner: prune — removed {len(orphan_images)} orphan "
+                    f"image(s) for '{slug}': {', '.join(orphan_images)}"
                 )
-                log(f"Provisioner: removed {len(ids)} orphan pytest container(s)")
-        except Exception:
-            pass
+            except Exception as e:
+                log(f"Provisioner: prune — image rm failed: {e}")
 
     # ── Logging helper ────────────────────────────────────────────────────────
 

@@ -51,12 +51,12 @@ All data flowing on the arrows is a Pydantic model; see [reference/schemas.md](.
 | Layer | Module | Responsibility |
 |-------|--------|----------------|
 | Provider clients | [`bizniz/clients/`](../modules/clients.md) | Talk to OpenAI / Claude / Gemini, return text + token usage |
-| Core abstractions | [`bizniz/core/`](../agents/base_ai_agent.md) | `BaseAIAgent`, `BaseAIClient`, shared `Message`/`ResponseFormat` types |
-| Architect | [`bizniz/architect/`](../agents/architect.md) | Problem statement → list of services + Docker compose |
-| Engineer | [`bizniz/engineer/`](../agents/engineer.md) | Per-service problem statement → architecture plan + issues |
-| Orchestrator | [`bizniz/orchestrator/`](../agents/coding_orchestrator.md) | Per-issue: generate, test, repair until passing |
-| Code generators | [`bizniz/agents/coder/`](../agents/coder.md), [`bizniz/tester/`](../agents/tester.md) | Single-shot and multi-file code/test generation |
-| Debuggers | [`bizniz/agents/debugger/`](../agents/agentic_debugger.md) | Diagnose pytest/jest failures (quick or deep) |
+| Core abstractions | [`bizniz/core/`](../roles/base_ai_agent.md) | `BaseAIAgent`, `BaseAIClient`, shared `Message`/`ResponseFormat` types |
+| Architect | [`bizniz/architect/`](../roles/architect.md) | Problem statement → list of services + Docker compose |
+| Engineer | [`bizniz/engineer/`](../roles/engineer.md) | Per-service problem statement → architecture plan + issues |
+| Orchestrator | [`bizniz/orchestrator/`](../roles/coding_orchestrator.md) | Per-issue: generate, test, repair until passing |
+| Code generators | [`bizniz/agents/coder/`](../roles/coder.md), [`bizniz/tester/`](../roles/tester.md) | Single-shot and multi-file code/test generation |
+| Debuggers | [`bizniz/agents/debugger/`](../roles/agentic_debugger.md) | Diagnose pytest/jest failures (quick or deep) |
 | Workspace | [`bizniz/workspace/`](../modules/workspace.md) | Filesystem abstraction + per-service SQLite DB |
 | Project | [`bizniz/project/`](../modules/project.md) | Multi-service project root, infra/development/* |
 | DB | [`bizniz/db/`](../modules/db.md) | Unified MySQL/SQLite with project + workspace scopes |
@@ -78,5 +78,5 @@ All data flowing on the arrows is a Pydantic model; see [reference/schemas.md](.
 ## Where to read next
 
 - For the eight-step end-to-end pipeline narrative: [pipeline_sequence.md](../pipeline_sequence.md)
-- For how a single issue gets generated/tested/repaired: [agents/coding_orchestrator.md](../agents/coding_orchestrator.md)
+- For how a single issue gets generated/tested/repaired: [roles/coding_orchestrator.md](../roles/coding_orchestrator.md)
 - For the new skeleton flow (committed in `5a95f97`): [skeleton_seeding.md](skeleton_seeding.md)
