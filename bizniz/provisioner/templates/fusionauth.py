@@ -45,11 +45,18 @@ class FusionAuthTemplate(InfraTemplate):
     def render(self, ctx: TemplateContext) -> TemplateOutput:
         host_port = ctx.service.port or self.DEFAULT_CONTAINER_PORT
         slug = ctx.project_slug
+        # The architect can name the postgres service anything ("db",
+        # "postgres", "data") — look up the actual name and use it for
+        # depends_on + the JDBC hostname so this template works
+        # regardless of naming convention.
+        pg = ctx.find_by_framework("postgres")
+        pg_name = pg.name if pg is not None else "postgres"
+        own_name = ctx.service.name
         # Dev defaults; the project owner replaces these in .env for prod.
         admin_email = f"admin@{slug}.local"
         admin_password = "ChangeMe123!"
         api_key = "bf69486b-4733-4470-a592-f1bfce7af580"
-        issuer = f"http://fusionauth:{self.DEFAULT_CONTAINER_PORT}"
+        issuer = f"http://{own_name}:{self.DEFAULT_CONTAINER_PORT}"
 
         kickstart = {
             "variables": {
@@ -133,10 +140,10 @@ class FusionAuthTemplate(InfraTemplate):
         compose_service = {
             "image": "fusionauth/fusionauth-app:latest",
             "depends_on": {
-                "postgres": {"condition": "service_healthy"},
+                pg_name: {"condition": "service_healthy"},
             },
             "environment": {
-                "DATABASE_URL": "jdbc:postgresql://postgres:5432/fusionauth",
+                "DATABASE_URL": f"jdbc:postgresql://{pg_name}:5432/fusionauth",
                 "DATABASE_ROOT_USERNAME": "${POSTGRES_USER}",
                 "DATABASE_ROOT_PASSWORD": "${POSTGRES_PASSWORD}",
                 "DATABASE_USERNAME": "${POSTGRES_USER}",
@@ -169,5 +176,5 @@ class FusionAuthTemplate(InfraTemplate):
                     json.dumps(kickstart, indent=2) + "\n",
             },
             env_vars=env_vars,
-            depends_on_services=["postgres"],
+            depends_on_services=[pg_name],
         )

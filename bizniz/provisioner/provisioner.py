@@ -426,6 +426,7 @@ class Provisioner:
                 service=service,
                 project_slug=architecture.project_slug,
                 project_root=project.root,
+                architecture=architecture,
             )
             output = template.render(ctx)
             template_outputs[service.name] = output
@@ -492,6 +493,7 @@ class Provisioner:
                 service=service,
                 project_slug=architecture.project_slug,
                 project_root=project.root,
+                architecture=architecture,
             )
             output = template.render(ctx)
             for rel, content in output.workspace_files.items():
@@ -561,6 +563,7 @@ class Provisioner:
                 service=service,
                 project_slug=architecture.project_slug,
                 project_root=project.root,
+                architecture=architecture,
             )
             output = template.render(ctx)
             template_outputs[service.name] = output

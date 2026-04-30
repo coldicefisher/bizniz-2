@@ -6,18 +6,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from bizniz.architect.types import ServiceDefinition
+from bizniz.architect.types import ServiceDefinition, SystemArchitecture
 
 
 @dataclass
 class TemplateContext:
-    """Per-service context passed to a template."""
+    """Per-service context passed to a template.
+
+    Templates that cross-reference siblings (e.g. fusionauth needs to
+    know which service is the postgres database) read from
+    ``architecture.services``. The architect can name services anything
+    — never assume "postgres" is literally a service name.
+    """
     service: ServiceDefinition
     project_slug: str
     project_root: Path
+    architecture: Optional[SystemArchitecture] = None
     # Map of host_port -> container_port for any port mappings (after
     # free-port allocation).
     port_mappings: List[tuple] = field(default_factory=list)
+
+    def find_by_framework(self, framework: str) -> Optional[ServiceDefinition]:
+        """Find a sibling service by framework. Returns None if absent."""
+        if self.architecture is None:
+            return None
+        for s in self.architecture.services:
+            if s.framework == framework and s.name != self.service.name:
+                return s
+        return None
 
 
 @dataclass

@@ -38,6 +38,34 @@ def test_compose_depends_on_postgres_healthy():
     assert deps["postgres"]["condition"] == "service_healthy"
 
 
+def test_compose_depends_on_renamed_postgres_service():
+    """The architect can name the postgres service anything.
+    FusionAuth must depend on whatever it's actually called — not hardcode "postgres".
+    """
+    from bizniz.architect.types import SystemArchitecture
+
+    pg = ServiceDefinition(
+        name="data",  # ← architect's choice, not "postgres"
+        service_type="database", framework="postgres", language="sql",
+        description="primary db", workspace_name="postgres", port=5432,
+        depends_on=[], requirements=[], skeleton="none",
+    )
+    auth = _service()
+    arch = SystemArchitecture(
+        project_name="P", project_slug="p", description="d",
+        services=[pg, auth],
+    )
+    ctx = TemplateContext(
+        service=auth, project_slug="p", project_root=Path("/tmp"),
+        architecture=arch,
+    )
+    out = FusionAuthTemplate().render(ctx)
+    assert "data" in out.compose_service["depends_on"]
+    assert "postgres" not in out.compose_service["depends_on"]
+    assert out.depends_on_services == ["data"]
+    assert "data:5432" in out.compose_service["environment"]["DATABASE_URL"]
+
+
 def test_kickstart_file_exists_and_is_valid_json():
     out = FusionAuthTemplate().render(_ctx(_service()))
     path = "fusionauth/kickstart/kickstart.json"
