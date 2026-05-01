@@ -93,6 +93,7 @@ class Architect(BaseAIAgent):
         on_status_message: Optional[Callable[[str], None]] = None,
         provisioner: Optional["Provisioner"] = None,
         http_api_tester_factory: Optional[Callable] = None,
+        integration_debugger_factory: Optional[Callable] = None,
     ):
         super().__init__(
             client=client,
@@ -106,6 +107,7 @@ class Architect(BaseAIAgent):
         self._project_parent = project_parent
         self._provisioner = provisioner  # constructed lazily in build() if None
         self._http_api_tester_factory = http_api_tester_factory  # None → integration phase skipped
+        self._integration_debugger_factory = integration_debugger_factory  # None → no auto-repair on integration failure
 
     @property
     def _process_system_prompt(self) -> str:
@@ -884,6 +886,7 @@ class Architect(BaseAIAgent):
                         http_api_tester_factory=self._http_api_tester_factory,
                         service_workspaces=service_workspaces,
                         on_status=self._on_status_message,
+                        debugger_factory=self._integration_debugger_factory,
                     )
                     _captured_service_results = list(service_results)
                 except Exception as e:

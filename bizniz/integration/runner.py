@@ -166,6 +166,8 @@ def run_integration_phase(
     service_workspaces: Dict[str, "BaseWorkspace"],  # noqa: F821
     on_status: Optional[Callable[[str], None]] = None,
     backend_wait_s: float = 60.0,
+    debugger_factory: Optional[Callable] = None,
+    debug_max_iterations: int = 3,
 ) -> List[ServiceResult]:
     """Verify-phase orchestration. See module docstring."""
     backends = _backends(architecture)
@@ -288,10 +290,49 @@ def run_integration_phase(
             else:
                 tail = "\n".join(output.splitlines()[-30:])
                 _log(on_status, f"Integration: '{backend.name}' FAIL\n{tail}")
-                _mark_failed(
-                    out, backend.name,
-                    f"integration_failed: pytest non-zero exit. Tail:\n{tail[:1500]}",
-                )
+
+                if debugger_factory is not None:
+                    from bizniz.integration.debug_loop import repair_integration_failure
+
+                    def _rerun():
+                        return _run_pytest_in_sidecar(
+                            service=backend,
+                            workspace_path=workspace_root,
+                            compose_path=compose_path,
+                            on_status=on_status,
+                        )
+
+                    # Bind the per-service workspace into the factory
+                    # so repair_integration_failure can call it with no
+                    # args. Each backend gets a fresh debugger instance
+                    # against its own workspace.
+                    _bound_factory = lambda ws_=ws: debugger_factory(ws_)
+
+                    repaired, final_output = repair_integration_failure(
+                        service=backend,
+                        workspace=ws,
+                        failure_output=output,
+                        integration_test_rel=target_rel,
+                        debugger_factory=_bound_factory,
+                        rerun_tests=_rerun,
+                        on_status=on_status,
+                        max_iterations=debug_max_iterations,
+                    )
+
+                    if repaired:
+                        _log(on_status, f"Integration: '{backend.name}' PASS after agentic repair")
+                        continue
+
+                    final_tail = "\n".join(final_output.splitlines()[-30:])
+                    _mark_failed(
+                        out, backend.name,
+                        f"integration_failed: pytest non-zero exit after agentic repair. Tail:\n{final_tail[:1500]}",
+                    )
+                else:
+                    _mark_failed(
+                        out, backend.name,
+                        f"integration_failed: pytest non-zero exit. Tail:\n{tail[:1500]}",
+                    )
     finally:
         _log(on_status, "Integration: tearing down stack...")
         try:
