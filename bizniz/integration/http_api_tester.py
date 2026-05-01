@@ -44,10 +44,10 @@ class HTTPApiTester(BaseAIAgent):
             target_filepath=target_filepath,
         )
         self.add_messages_to_history([{"role": "user", "content": prompt}])
-        response = self._ai_client.get_text(
+        text, _, _ = self._ai_client.get_text(
             messages=self.message_history,
         )
-        return self._strip_code_block(response)
+        return self._strip_code_block(text or "")
 
     @staticmethod
     def _build_prompt(
