@@ -113,6 +113,35 @@ ARCHITECTURE RULES:
 - target_files paths must respect the skeleton contract when one is present.
 - Do NOT create __init__.py, pyproject.toml, or any Python files.
 
+NON-DESTRUCTIVE EDITING (HARD CONSTRAINT):
+──────────────────────────────────────────────────────────────
+When an issue modifies a file that ALREADY EXISTS in the workspace
+(typically a skeleton-shipped file), the engineer MUST PRESERVE
+every existing public export. Adding new symbols is the default;
+removing or renaming existing ones requires an explicit, justified
+reason in the issue description. Silent destructive rewrites of
+shared files break downstream code that imports those symbols and
+will fail at import time.
+
+The single safe pattern: prefer creating NEW files in the skeleton's
+extension points over editing existing ones.
+
+NON-DESTRUCTIVE EDITING (HARD CONSTRAINT):
+──────────────────────────────────────────────────────────────
+When an issue modifies a file that ALREADY EXISTS in the workspace
+(typically a skeleton-shipped file), the engineer MUST PRESERVE
+every existing public export. Adding new symbols is the default;
+removing or renaming existing ones requires an explicit, justified
+reason in the issue description. Silent destructive rewrites of
+shared files break downstream code that imports those symbols and
+will fail at import time. If you find yourself wanting to "clean up"
+or "simplify" a file the skeleton ships, DON'T — your job is to add
+to it, not refactor it.
+
+The single safe pattern: prefer creating NEW files in the skeleton's
+extension points over editing existing ones. Only edit a shipped
+file when the skeleton's contract explicitly allows it.
+
 ISSUE RULES — SINGLE RESPONSIBILITY:
 ──────────────────────────────────────────────────────────────
 Each issue MUST have a single, focused responsibility. An AI coder will implement
