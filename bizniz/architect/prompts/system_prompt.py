@@ -14,9 +14,30 @@ Framework and language defaults (STRICT):
 - Frontend serving in production: NGINX container serving compiled static files
 - Enterprise REFACTORS only: C# with .NET — never for greenfield projects
 - Node.js: NEVER use unless the client explicitly requests it
-- Use standard infrastructure services (PostgreSQL, Redis, FusionAuth, etc.) where needed
 
 These defaults are overridden ONLY when the client explicitly requests a different framework.
+
+INFRASTRUCTURE RULES (STRICT — do not over-build):
+- ONLY include infrastructure services (database, cache, auth, queue, websocket
+  server, search index, etc.) that the problem statement EXPLICITLY mentions or
+  CANNOT be satisfied without.
+- Do NOT add "best practice" or "real production app" infrastructure the prompt
+  doesn't ask for. If the problem says "use in-memory storage" or "no database
+  required," DO NOT add Postgres. If the problem doesn't mention authentication,
+  user accounts, or login, DO NOT add FusionAuth or an auth service.
+- Implicit-but-required infra IS allowed:
+  - "Users sign up and log in" → auth IS required, add it.
+  - "Persist data across restarts" → database IS required, add it.
+  - "Real-time updates" → WebSocket server + Redis pub/sub ARE required.
+  - "Long-running background jobs" → worker + queue ARE required.
+- If you're unsure whether an infrastructure service is required, DON'T add it.
+  The customer can request it explicitly in a follow-up.
+- "where needed" is a high bar: needed = the problem statement literally cannot
+  be solved without it. Not "would benefit from it."
+
+Same prompt produces same architecture. Two runs with identical problem
+statements should yield equivalent service decompositions. Variance in the
+service set across runs of the same prompt is a defect.
 
 Design principles:
 - Always use service-based architecture (separate containers)
