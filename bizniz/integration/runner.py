@@ -29,7 +29,10 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from bizniz.architect.types import ServiceDefinition, ServiceResult, SystemArchitecture
-from bizniz.integration.contracts import capture_backend_contracts
+from bizniz.integration.contracts import (
+    _wait_for_openapi,
+    capture_backend_contracts,
+)
 
 
 def _log(on_status: Optional[Callable[[str], None]], msg: str) -> None:
@@ -138,6 +141,56 @@ def _run_pytest_in_sidecar(
     return proc.returncode == 0, output
 
 
+def _capture_container_logs(compose_path: str, service_name: str) -> str:
+    """Read docker compose logs for one service. Best-effort — return
+    whatever's available, even if the container is gone."""
+    try:
+        proc = subprocess.run(
+            ["docker", "compose", "-f", compose_path, "logs", "--no-color", service_name],
+            capture_output=True, text=True, timeout=30,
+        )
+        return (proc.stdout or "") + (proc.stderr or "")
+    except Exception as e:
+        return f"(could not read container logs: {e})"
+
+
+def _log_tail(text: str, n: int) -> str:
+    if not text:
+        return ""
+    return "\n".join(text.splitlines()[-n:])
+
+
+def _retry_backend_health(
+    backend: ServiceDefinition,
+    compose_path: str,
+    on_status: Optional[Callable[[str], None]],
+    backend_wait_s: float,
+) -> tuple[bool, str]:
+    """After an agentic-debug repair iteration, the workspace has
+    new files. Restart the backend container and try /openapi.json
+    again. Returns (passed, output_for_next_iteration).
+
+    The "output" returned is fresh docker logs if startup fails, or
+    a success marker if it works — that's what the debugger sees on
+    the next iteration.
+    """
+    _log(on_status, f"Integration debug: restarting '{backend.name}' to test repair...")
+    try:
+        subprocess.run(
+            ["docker", "compose", "-f", compose_path, "restart", backend.name],
+            capture_output=True, text=True, timeout=120,
+        )
+    except Exception as e:
+        return False, f"docker compose restart failed: {e}"
+
+    doc = _wait_for_openapi(backend.port, deadline_s=backend_wait_s)
+    if doc is not None:
+        return True, "Backend now responds on /openapi.json"
+
+    logs = _capture_container_logs(compose_path, backend.name)
+    return False, logs
+
+
 def _mark_failed(
     results: List[ServiceResult],
     name: str,
@@ -223,16 +276,74 @@ def run_integration_phase(
 
             contract = contracts.get(backend.name)
             if contract is None:
+                # Backend container is up (or tried to be) but never
+                # responded on /openapi.json. Most common cause: the
+                # app crashed at startup. Capture docker logs and
+                # hand them to the debugger if available, so we can
+                # auto-repair startup bugs (lifespan crashes,
+                # missing env vars, import errors).
+                logs = _capture_container_logs(compose_path, backend.name)
                 _log(
                     on_status,
                     f"Integration: '{backend.name}' has no captured contract — "
-                    f"marking integration_failed (couldn't reach /openapi.json)"
+                    f"backend likely crashed at startup. Tail of logs:\n"
+                    f"{_log_tail(logs, 25)}"
                 )
-                _mark_failed(
-                    out, backend.name,
-                    "integration_failed: backend did not expose /openapi.json",
-                )
-                continue
+
+                if debugger_factory is not None:
+                    workspace_root = Path(ws.root) if hasattr(ws, "root") else None
+                    if workspace_root is not None:
+                        from bizniz.integration.debug_loop import repair_integration_failure
+
+                        # Re-run = bring backend up again and try to
+                        # hit /openapi.json. If it works, we have a
+                        # contract and the debugger has fixed startup.
+                        def _rerun_startup():
+                            return _retry_backend_health(backend, compose_path, on_status, backend_wait_s)
+
+                        _bound_factory = lambda ws_=ws: debugger_factory(ws_)
+
+                        repaired, final_output = repair_integration_failure(
+                            service=backend,
+                            workspace=ws,
+                            failure_output=logs,
+                            integration_test_rel="(no tests yet — backend startup)",
+                            debugger_factory=_bound_factory,
+                            rerun_tests=_rerun_startup,
+                            on_status=on_status,
+                            max_iterations=debug_max_iterations,
+                        )
+
+                        if repaired:
+                            _log(on_status, f"Integration: '{backend.name}' backend now reachable after agentic repair — re-capturing contract")
+                            doc = _wait_for_openapi(backend.port, deadline_s=backend_wait_s)
+                            if doc is not None:
+                                contract = doc
+                                # fall through to test generation below
+                            else:
+                                _mark_failed(
+                                    out, backend.name,
+                                    "integration_failed: backend started after repair but /openapi.json still unreachable",
+                                )
+                                continue
+                        else:
+                            _mark_failed(
+                                out, backend.name,
+                                f"integration_failed: backend startup did not recover after agentic repair. Tail:\n{_log_tail(final_output, 25)[:1500]}",
+                            )
+                            continue
+                    else:
+                        _mark_failed(
+                            out, backend.name,
+                            "integration_failed: backend did not expose /openapi.json (no workspace.root for debug)",
+                        )
+                        continue
+                else:
+                    _mark_failed(
+                        out, backend.name,
+                        "integration_failed: backend did not expose /openapi.json",
+                    )
+                    continue
 
             # Wait for the backend's /health (or /) to confirm it's up
             # post-stack-bringup (the contracts capture stopped them).
