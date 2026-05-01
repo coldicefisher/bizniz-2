@@ -207,7 +207,7 @@ if __name__ == "__main__":
     architect_client = config.make_client(model=config.architect_model)
     log(f"Architect client ready (model={config.architect_model})")
 
-    project_name = "Pet Groomer NoSkel" if no_skeleton else "Pet Groomer V9"
+    project_name = "Pet Groomer NoSkel" if no_skeleton else "Pet Groomer V10"
     project_parent = Path.home() / "bizniz_projects"
     project_parent.mkdir(parents=True, exist_ok=True)
 
@@ -222,6 +222,9 @@ if __name__ == "__main__":
         )
 
     def _make_integration_debugger(workspace):
+        # Defaults: 15 inner tool-call turns × 3 outer repair
+        # iterations = up to 45 debugger interactions per failing
+        # service.
         return AgenticDebugger(
             client=config.make_client(model=config.debugger_model),
             workspace=workspace,

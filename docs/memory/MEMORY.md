@@ -1,0 +1,8 @@
+- [Bizniz auto-engineering work plan](project_workplan.md) — 4 priorities: skeleton wiring → port quick-pass → fix two bugs → docs
+- [Architect/Provisioner split](project_architect_provisioner_split.md) — Architect plans, Provisioner materializes (templates, deterministic compose, FusionAuth default)
+- [Skeleton repos for project seeding](reference_skeleton_repos.md) — fastapi, react, angular, teams skeletons on disk
+- [Two pipeline bugs surfaced 2026-04-29](project_pipeline_bugs.md) — collection-error misclassification + read-only filter blocks fixes
+- [Branch state as of 2026-04-29](project_branch_state.md) — main + refactor/agent-specialization (latter has Gemini)
+- [Run Python via the project venv](feedback_use_venv.md) — examples/ scripts need .venv python with PYTHONPATH or installed package
+- [Build vs evolve strategy](project_build_vs_evolve_strategy.md) — greenfield handoff first, then evolve mode with discovery anchored on v0 artifacts (digest, integration tests, SKELETON.md, contracts)
+- [Pet-groomer buildout plan](project_pet_groomer_buildout_plan.md) — milestone-driven validation of the full pipeline (build → evolve → review → refactor → regress) on the first real customer
