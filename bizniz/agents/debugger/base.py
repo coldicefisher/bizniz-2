@@ -46,6 +46,21 @@ class BaseDebugger(ABC):
         if self._on_status_message:
             self._on_status_message(msg)
 
+    @property
+    def _ai_client(self):
+        """Return ``self._client`` after stamping ``_caller_agent``
+        with this debugger's class name. Mirrors ``BaseAIAgent``'s
+        per-call attribution fix so cost-tracker rollups attribute
+        debugger calls correctly. Without this, ``self._ai_client``
+        attribute lookups in AgenticDebugger raise AttributeError
+        (regression from the BaseAIAgent property addition — debuggers
+        don't subclass BaseAIAgent)."""
+        try:
+            self._client._caller_agent = type(self).__name__.lower()
+        except Exception:
+            pass
+        return self._client
+
     @abstractmethod
     def diagnose(self, **kwargs):
         """
