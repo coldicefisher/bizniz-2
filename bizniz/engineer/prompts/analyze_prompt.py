@@ -1,6 +1,8 @@
 _ANALYZE_PROMPT_PYTHON = """
 Analyze the following problem statement and produce a complete engineering breakdown.
 
+{skeleton_contract}
+
 PROBLEM STATEMENT:
 ──────────────────────────────────────────────────────────────
 {problem_statement}
@@ -31,7 +33,13 @@ RULES FOR ISSUES — SINGLE RESPONSIBILITY IS MANDATORY:
            "Implement AppointmentsRepository" → tests/test_appointments_repository.py
   NEVER assign the same test file to multiple issues.
 - If a task has multiple concerns, split it: "Create app factory and DI providers" → 2 issues.
-- All file paths must be inside the package namespace or tests/ directory.
+- When a Skeleton directory contract is present, file paths MUST be
+  inside the skeleton's declared extension points (e.g. for the
+  FastAPI skeleton: app/api/routes/<feature>.py,
+  app/models/<feature>.py, app/schemas/<feature>.py). NEVER place
+  files in a parallel package outside the skeleton's root.
+- Without a skeleton, all paths must be inside the package
+  namespace or tests/ directory.
 - Domain model issues come FIRST — they define shared types other issues depend on.
 - An issue can create multiple files (e.g. a domain model file + its __init__.py update).
 - test_files paths should start with "tests/".
@@ -42,10 +50,14 @@ RULES FOR ISSUES — SINGLE RESPONSIBILITY IS MANDATORY:
 TEST SETUP HINTS — REQUIRED for endpoint/route/integration issues:
 - For each issue, provide a "test_setup_hint" explaining how tests should be set up.
 - For endpoint/route issues: explain how the app is constructed, how to import it for
-  testing, and how to create a test client. Example:
-    "The FastAPI app is created via create_app() in pet_groomer/app.py. Tests should:
-     from pet_groomer.app import create_app; from fastapi.testclient import TestClient;
-     client = TestClient(create_app())"
+  testing, and how to create a test client.
+- When a skeleton contract is present, the test_setup_hint should
+  reference the skeleton's app entrypoint (e.g. for FastAPI:
+    "The FastAPI app is `app.main:app` from app/main.py. Tests:
+     from app.main import app; from fastapi.testclient import TestClient;
+     client = TestClient(app)").
+- Without a skeleton, the test_setup_hint should reference the
+  generated package's app factory.
 - For issues that integrate with other components: explain import paths and required mocks.
 - For standalone units (data classes, pure functions): use empty string "".
 """
@@ -53,6 +65,8 @@ TEST SETUP HINTS — REQUIRED for endpoint/route/integration issues:
 _ANALYZE_PROMPT_TYPESCRIPT = """
 Analyze the following problem statement and produce a complete engineering breakdown.
 This is a TypeScript project.
+
+{skeleton_contract}
 
 PROBLEM STATEMENT:
 ──────────────────────────────────────────────────────────────

@@ -118,6 +118,25 @@ class Engineer(BaseAIAgent):
     def _process_system_prompt(self) -> str:
         return get_engineer_system_prompt(self._language)
 
+    # ── Skeleton awareness ────────────────────────────────────────────────────
+
+    def _has_skeleton_contract(self) -> bool:
+        try:
+            return self._workspace.path("SKELETON.md").is_file()
+        except Exception:
+            return False
+
+    def _skeleton_contract_for_user_prompt(self) -> str:
+        """Return the SKELETON.md content as a user-prompt section,
+        or empty string if absent. Injected into analyze + plan prompts
+        because system-prompt placement was getting overridden by the
+        more-concrete user prompt's "design a Python package"
+        instructions — the AI followed the user prompt, ignoring the
+        skeleton."""
+        from bizniz.workspace.skeleton_conventions import load_skeleton_conventions
+        section = load_skeleton_conventions(self._workspace)
+        return section or ""
+
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def analyze(self, problem_statement: str) -> EngineeringAnalysis:
@@ -137,10 +156,12 @@ class Engineer(BaseAIAgent):
         # Step 1: Initial analysis (requirements, use cases, issues)
         log("Engineer: calling AI for engineering analysis...")
         models_str = ", ".join(self._available_models)
+        skeleton_contract = self._skeleton_contract_for_user_prompt()
         user_prompt = get_analyze_prompt(self._language).format(
             problem_statement=problem_statement,
             architecture_context="",
             available_models=models_str,
+            skeleton_contract=skeleton_contract,
         )
         raw = self._call_ai_for_analysis(user_prompt)
 
@@ -160,6 +181,7 @@ class Engineer(BaseAIAgent):
             problem_statement=problem_statement,
             architecture_context=f"ARCHITECTURE PLAN:\n{arch_context}",
             available_models=models_str,
+            skeleton_contract=skeleton_contract,
         )
         refined_raw = self._call_ai_for_analysis(refined_prompt)
 
@@ -199,6 +221,13 @@ class Engineer(BaseAIAgent):
         # Step 4: Create the workspace package structure
         if self._language == "typescript":
             log("Engineer: skipping Python package structure for TypeScript project")
+        elif self._has_skeleton_contract():
+            # Skeleton already provides the package layout; creating
+            # a parallel pyproject.toml + package/__init__.py would
+            # produce a second top-level package next to the
+            # skeleton's app/ root and re-introduce the dark-domain
+            # bug. Trust the skeleton.
+            log("Engineer: skipping package structure — skeleton provides layout")
         else:
             log("Engineer: creating package structure...")
             self.create_package_structure(plan)
@@ -1025,6 +1054,7 @@ class Engineer(BaseAIAgent):
             problem_statement=problem_statement,
             requirements_text=requirements_text,
             use_cases_text=use_cases_text,
+            skeleton_contract=self._skeleton_contract_for_user_prompt(),
         )
 
         log("Engineer: calling AI for architecture plan...")
