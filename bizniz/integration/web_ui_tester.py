@@ -33,7 +33,7 @@ class WebUITester(BaseAIAgent):
         problem_statement: str,
         service: ServiceDefinition,
         backend_contracts: Optional[dict] = None,
-        target_filepath: str = "tests/integration/ui.spec.ts",
+        target_filepath: str = "tests/integration/ui.spec.cjs",
     ) -> str:
         """Returns a complete TypeScript file as a string, ready to
         write to ``target_filepath`` in the service workspace.

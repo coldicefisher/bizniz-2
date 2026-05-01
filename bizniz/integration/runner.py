@@ -111,12 +111,38 @@ def _run_playwright_in_sidecar(
     # The sidecar installs @playwright/test on top of the official
     # Playwright image (which already has browsers + system deps).
     # Pinning version keeps the install fast and reproducible.
-    install_cmd = "npm install --silent --prefix /tmp/_pw @playwright/test@1.40.0"
+    # Write a minimal playwright.config.ts that points testDir at
+    # tests/integration/ — without a config, Playwright's CLI picks
+    # an unhelpful default and reports "No tests found".
+    # Install @playwright/test inside the workspace so its test
+    # runner can find the project's tsconfig.json — without that,
+    # Node refuses to load .ts files and Playwright reports
+    # "Unknown file extension". --no-save keeps package.json clean.
+    # Plain CommonJS config — TS at config-load time isn't supported
+    # (Playwright's transform applies to test files, not config).
+    # We use a workspace-local config path since /tmp would be
+    # outside Node's resolution context.
+    install_cmd = "npm install --silent --no-save @playwright/test@1.40.0"
+    # .cjs extension forces CommonJS parsing regardless of the
+    # workspace's package.json "type" field. (Vite frontends often
+    # set "type": "module" which would break a plain .js config.)
+    # Using `printf` rather than heredoc — heredoc inside a shell
+    # `-c` arg requires EOF on its own line, but the && chaining
+    # we need puts content on the same line, swallowing the rest
+    # of the script as heredoc body. (Lost ~30 minutes to this.)
+    config_body = (
+        'module.exports = { testDir: "tests/integration", '
+        'testMatch: ["**/*.spec.cjs", "**/*.spec.js"], '
+        'reporter: "list", timeout: 30000, '
+        'fullyParallel: false, workers: 1, '
+        'forbidOnly: true, '
+        'use: { trace: "off", video: "off", screenshot: "off" } };'
+    )
+    write_config = f"printf '%s' {shlex.quote(config_body)} > playwright.smoke.config.cjs"
     run_cmd = (
-        f"cd /workspace && {install_cmd} && "
+        f"cd /workspace && {install_cmd} && {write_config} && "
         f"FRONTEND_URL={shlex.quote(base_url)} "
-        f"npx --prefix /tmp/_pw playwright test tests/integration/ "
-        f"--reporter=list --config=/dev/null"
+        f"npx playwright test --config=playwright.smoke.config.cjs"
     )
 
     cmd = [
@@ -539,7 +565,7 @@ def run_integration_phase(
                     )
                     continue
 
-                target_rel_fe = "tests/integration/ui.spec.ts"
+                target_rel_fe = "tests/integration/ui.spec.cjs"
                 target_path_fe = ws.path(target_rel_fe)
                 target_path_fe.parent.mkdir(parents=True, exist_ok=True)
                 target_path_fe.write_text(test_source)
