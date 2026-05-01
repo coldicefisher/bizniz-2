@@ -36,6 +36,7 @@ load_dotenv()
 from bizniz.agents.coder.coder import Coder
 from bizniz.agents.debugger.quick import QuickDebugger
 from bizniz.agents.debugger.agentic import AgenticDebugger
+from bizniz.integration.http_api_tester import HTTPApiTester
 from bizniz.tester.tester import Tester
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
@@ -211,6 +212,14 @@ if __name__ == "__main__":
 
     root_workspace = LocalWorkspace.from_name(project_name, parent=project_parent)
 
+    def _make_http_api_tester(workspace):
+        return HTTPApiTester(
+            client=config.make_engineer_client(),
+            environment=PythonSandboxExecutionEnvironment(),
+            workspace=workspace,
+            on_status_message=log,
+        )
+
     architect = Architect(
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
@@ -218,6 +227,7 @@ if __name__ == "__main__":
         engineer_factory=lambda ws, on_status_message=None, image_name=None, language="python": _make_engineer(
             config, ws, on_status_message=on_status_message, image_name=image_name, language=language,
         ),
+        http_api_tester_factory=lambda workspace: _make_http_api_tester(workspace),
         project_parent=str(project_parent),
         on_status_message=log,
     )

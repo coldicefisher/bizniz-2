@@ -29,7 +29,7 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Callable, List, TYPE_CHECKING
+from typing import Dict, Optional, Callable, List, TYPE_CHECKING
 
 from bizniz.base_ai_agent import BaseAIAgent
 from bizniz.clients.base_ai_client import BaseAIClient
@@ -92,6 +92,7 @@ class Architect(BaseAIAgent):
         on_event: Optional[Callable] = None,
         on_status_message: Optional[Callable[[str], None]] = None,
         provisioner: Optional["Provisioner"] = None,
+        http_api_tester_factory: Optional[Callable] = None,
     ):
         super().__init__(
             client=client,
@@ -104,6 +105,7 @@ class Architect(BaseAIAgent):
         self._engineer_factory = engineer_factory
         self._project_parent = project_parent
         self._provisioner = provisioner  # constructed lazily in build() if None
+        self._http_api_tester_factory = http_api_tester_factory  # None → integration phase skipped
 
     @property
     def _process_system_prompt(self) -> str:
@@ -806,6 +808,7 @@ class Architect(BaseAIAgent):
             service_layers = _sort_services_by_dependency(app_services)
             log(f"Architect: {len(app_services)} services in {len(service_layers)} dependency layer(s)")
 
+            self._captured_contracts: Dict[str, dict] = {}
             service_results = []
             for layer_idx, layer in enumerate(service_layers):
                 layer_names = [s.name for s in layer]
@@ -821,26 +824,70 @@ class Architect(BaseAIAgent):
                 service_results.extend(layer_results)
                 _captured_service_results = list(service_results)
 
+                # If this layer produced any HTTP backends that passed
+                # AND there's another layer coming, capture their
+                # OpenAPI specs so the next layer's engineers see
+                # actual endpoints, not guesses. Skipped on the last
+                # layer (the integration phase below captures all).
+                if layer_idx < len(service_layers) - 1:
+                    layer_passed_backends = [
+                        s.name for s in layer
+                        if s.service_type == "backend" and s.port and any(
+                            r.service_name == s.name and r.success
+                            for r in layer_results
+                        )
+                    ]
+                    if layer_passed_backends:
+                        from bizniz.integration.contracts import capture_backend_contracts
+                        compose_path_so_far = str(project.dev_root / "docker-compose.yml")
+                        log(
+                            f"Architect: capturing contracts from layer {layer_idx + 1} "
+                            f"backends ({', '.join(layer_passed_backends)}) for downstream layers..."
+                        )
+                        try:
+                            captured = capture_backend_contracts(
+                                architecture=architecture,
+                                project_root=project.root,
+                                compose_path=compose_path_so_far,
+                                on_status=self._on_status_message,
+                                only_names=layer_passed_backends,
+                            )
+                            self._captured_contracts.update(captured)
+                        except Exception as e:
+                            log(f"Architect: between-layer contract capture failed ({e}) — continuing without contracts")
+
             compose_path = str(project.dev_root / "docker-compose.yml")
             _captured_compose_path = compose_path
 
-            # Post-build smoke verification: run the actual stack, hit
-            # /openapi.json on each backend, fail any service whose
-            # domain is dark (only baseline skeleton routes mounted).
-            # Skipped if every service already failed — no point.
-            if service_results and any(getattr(r, "success", False) for r in service_results):
-                from bizniz.architect.smoke_verification import verify_domain_coverage
-                tracker.set_phase("smoke_verify")
+            # Post-build integration phase: bring the stack up, capture
+            # backend contracts, dispatch HTTPApiTester for each
+            # backend to author + run real integration tests, fail any
+            # service whose tests don't pass. Replaces the framework-
+            # coupled smoke_verification with a generative tester that
+            # works across any HTTP backend skeleton. Skipped if no
+            # services passed engineering OR no tester factory was
+            # provided.
+            if (
+                self._http_api_tester_factory is not None
+                and service_results
+                and any(getattr(r, "success", False) for r in service_results)
+            ):
+                from bizniz.integration import run_integration_phase
+                tracker.set_phase("integration")
                 try:
-                    service_results = verify_domain_coverage(
+                    service_results = run_integration_phase(
                         architecture=architecture,
                         service_results=service_results,
+                        project_root=project.root,
+                        problem_statement=problem_statement,
                         compose_path=compose_path,
+                        http_api_tester_factory=self._http_api_tester_factory,
+                        service_workspaces=service_workspaces,
                         on_status=self._on_status_message,
                     )
                     _captured_service_results = list(service_results)
                 except Exception as e:
-                    log(f"Architect: smoke verification raised ({e}) — continuing without it")
+                    log(f"Architect: integration phase raised ({e}) — continuing without it")
                 tracker.set_phase(None)
 
             # Determine job status from service results
@@ -1168,8 +1215,8 @@ class Architect(BaseAIAgent):
             issues_passed=successes,
         )
 
-    @staticmethod
     def _build_service_prompt(
+        self,
         problem_statement: str,
         service: ServiceDefinition,
         architecture: SystemArchitecture,
@@ -1182,6 +1229,13 @@ class Architect(BaseAIAgent):
         ]
         other_services_text = "\n".join(other_services) if other_services else "(none)"
 
+        # Backend contracts captured from prior layers — present only
+        # for services dispatched after at least one backend has been
+        # built and verified. Frontends use this to know exactly which
+        # endpoints exist and what shapes they accept, so they don't
+        # have to guess.
+        contracts_section = self._format_contracts_for_prompt(architecture, service)
+
         return (
             f"Overall project: {problem_statement}\n\n"
             f"You are building the '{service.name}' service for the "
@@ -1193,10 +1247,51 @@ class Architect(BaseAIAgent):
             f"- Description: {service.description}\n"
             f"- Port: {service.port}\n\n"
             f"Other services in the system:\n{other_services_text}\n\n"
+            f"{contracts_section}"
             f"Build ONLY this service. Use {service.language} with {service.framework}. "
             f"Focus on clean, working code with tests. "
             f"The service will run in a Docker container."
         )
+
+    def _format_contracts_for_prompt(
+        self,
+        architecture: SystemArchitecture,
+        current_service: ServiceDefinition,
+    ) -> str:
+        """Render captured backend OpenAPI contracts as a prompt
+        section. Returns an empty string when no contracts have been
+        captured yet (first-layer services).
+
+        For frontends, this turns "guess what the backend looks like"
+        into "consume the spec the backend just published" — closing
+        the contract drift that integration tests would otherwise
+        have to catch reactively.
+        """
+        contracts = getattr(self, "_captured_contracts", None) or {}
+        if not contracts:
+            return ""
+        lines = [
+            "Backend contracts (already built and verified — call these "
+            "endpoints, do not guess shapes):\n"
+        ]
+        for svc_name, doc in contracts.items():
+            if svc_name == current_service.name:
+                continue  # don't show a service its own contract
+            svc_def = next(
+                (s for s in architecture.services if s.name == svc_name), None,
+            )
+            base = f"http://{svc_name}:{svc_def.port}" if svc_def and svc_def.port else f"http://{svc_name}"
+            lines.append(f"### {svc_name} — base URL: {base}")
+            paths = doc.get("paths") or {}
+            for path, ops in sorted(paths.items()):
+                if not isinstance(ops, dict):
+                    continue
+                methods = sorted(m.upper() for m in ops.keys() if isinstance(ops.get(m), dict))
+                if methods:
+                    lines.append(f"  {','.join(methods):<20s} {path}")
+            lines.append("")
+        return "\n".join(lines) + "\n"
+
 
 def _sort_services_by_dependency(services):
     """
