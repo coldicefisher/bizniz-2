@@ -103,10 +103,18 @@ def _run_pytest_in_sidecar(
 
     base_url = f"http://{service.name}:{service.port}"
     install_cmd = "pip install --quiet pytest httpx"
+    # --noconftest: HTTPApiTester writes self-contained tests with
+    # their own httpx.Client fixture. Loading the project's
+    # tests/conftest.py would require installing the service's full
+    # requirements (sqlalchemy, fastapi, etc.) in the sidecar — a
+    # ~30-60s tax for fixtures the integration tests don't use.
+    # --rootdir tests/integration: keeps pytest from walking up
+    # looking for parent conftest/pyproject.
     run_cmd = (
         f"cd /workspace && {install_cmd} && "
         f"API_BASE_URL={shlex.quote(base_url)} "
-        f"pytest tests/integration/ -v --tb=short --no-header"
+        f"pytest tests/integration/ --noconftest --rootdir tests/integration "
+        f"-v --tb=short --no-header"
     )
 
     cmd = [
