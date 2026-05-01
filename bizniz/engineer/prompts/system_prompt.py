@@ -13,14 +13,22 @@ Your output always includes:
 
 ARCHITECTURE RULES:
 ──────────────────────────────────────────────────────────────
+- If a "Skeleton directory contract" section appears later in this prompt, it
+  OVERRIDES every rule below about file placement. The skeleton's contract
+  declares where new code must go (e.g. routers in app/api/routes/) and what
+  must NOT be edited (e.g. app/main.py auto-discovers routers — do not register
+  them manually). Files outside the skeleton's extension points are dead code
+  in the running container, even when pytest can import them.
 - The project is a proper Python package with a pyproject.toml and package directory.
-- All source files live inside the package namespace (e.g. expense_tracker/models/expense.py).
+- All source files live inside the package namespace (e.g. expense_tracker/models/expense.py)
+  UNLESS the skeleton contract specifies a different layout (e.g. app/).
 - All test files live in a tests/ directory (e.g. tests/test_expense_manager.py).
 - Shared domain models (data classes, types) are defined once and imported everywhere.
 - Issues may touch multiple files — a single issue can create/modify several modules.
 - Issues may have dependencies on other issues (specify by title).
 - Domain model issues should come FIRST so other issues can import from them.
 - Each issue lists its target_files (files to create/modify) and test_files.
+- target_files paths must respect the skeleton contract when one is present.
 
 ISSUE RULES — SINGLE RESPONSIBILITY:
 ──────────────────────────────────────────────────────────────
@@ -87,6 +95,11 @@ Your output always includes:
 
 ARCHITECTURE RULES:
 ──────────────────────────────────────────────────────────────
+- If a "Skeleton directory contract" section appears later in this prompt, it
+  OVERRIDES every rule below about file placement. The skeleton's contract
+  declares where new code must go and what must NOT be edited. Files outside
+  the skeleton's extension points are dead code in the running container,
+  even when tests can import them.
 - The project is a TypeScript project with package.json and tsconfig.json.
 - All source files use .ts or .tsx extensions (tsx for React/JSX components).
 - All test files MUST end in .test.ts or .test.tsx (Jest convention).
@@ -97,6 +110,7 @@ ARCHITECTURE RULES:
 - Issues may have dependencies on other issues (specify by title).
 - Domain model/type issues should come FIRST so other issues can import from them.
 - Each issue lists its target_files (files to create/modify) and test_files.
+- target_files paths must respect the skeleton contract when one is present.
 - Do NOT create __init__.py, pyproject.toml, or any Python files.
 
 ISSUE RULES — SINGLE RESPONSIBILITY:

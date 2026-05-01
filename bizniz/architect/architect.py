@@ -823,6 +823,26 @@ class Architect(BaseAIAgent):
 
             compose_path = str(project.dev_root / "docker-compose.yml")
             _captured_compose_path = compose_path
+
+            # Post-build smoke verification: run the actual stack, hit
+            # /openapi.json on each backend, fail any service whose
+            # domain is dark (only baseline skeleton routes mounted).
+            # Skipped if every service already failed — no point.
+            if service_results and any(getattr(r, "success", False) for r in service_results):
+                from bizniz.architect.smoke_verification import verify_domain_coverage
+                tracker.set_phase("smoke_verify")
+                try:
+                    service_results = verify_domain_coverage(
+                        architecture=architecture,
+                        service_results=service_results,
+                        compose_path=compose_path,
+                        on_status=self._on_status_message,
+                    )
+                    _captured_service_results = list(service_results)
+                except Exception as e:
+                    log(f"Architect: smoke verification raised ({e}) — continuing without it")
+                tracker.set_phase(None)
+
             # Determine job status from service results
             if service_results and not all(getattr(r, "success", False) for r in service_results):
                 job_status = "failed"
