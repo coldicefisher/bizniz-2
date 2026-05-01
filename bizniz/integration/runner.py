@@ -85,6 +85,62 @@ def _compose_project_name(compose_path: str) -> str:
     return Path(compose_path).resolve().parent.name
 
 
+def _frontends(arch: SystemArchitecture) -> List[ServiceDefinition]:
+    return [
+        s for s in arch.services
+        if s.service_type == "frontend" and s.port
+    ]
+
+
+def _run_playwright_in_sidecar(
+    service: ServiceDefinition,
+    workspace_path: Path,
+    compose_path: str,
+    on_status: Optional[Callable[[str], None]] = None,
+    timeout_s: float = 240.0,
+) -> tuple[bool, str]:
+    """Run Playwright tests against the live frontend container via a
+    sidecar joined to the compose project's network. Mirrors the
+    pytest sidecar pattern: install deps at run time, run the tests,
+    capture output.
+    """
+    project_name = _compose_project_name(compose_path)
+    network = f"{project_name}_app-network"
+    base_url = f"http://{service.name}:{service.port}"
+
+    # The sidecar installs @playwright/test on top of the official
+    # Playwright image (which already has browsers + system deps).
+    # Pinning version keeps the install fast and reproducible.
+    install_cmd = "npm install --silent --prefix /tmp/_pw @playwright/test@1.40.0"
+    run_cmd = (
+        f"cd /workspace && {install_cmd} && "
+        f"FRONTEND_URL={shlex.quote(base_url)} "
+        f"npx --prefix /tmp/_pw playwright test tests/integration/ "
+        f"--reporter=list --config=/dev/null"
+    )
+
+    cmd = [
+        "docker", "run", "--rm",
+        "--network", network,
+        "-v", f"{workspace_path}:/workspace",
+        "-w", "/workspace",
+        "--ipc=host",
+        "mcr.microsoft.com/playwright:v1.40.0-focal",
+        "sh", "-c", run_cmd,
+    ]
+
+    _log(on_status, f"Integration: running Playwright sidecar for '{service.name}' against {base_url}...")
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as e:
+        return False, f"playwright sidecar timed out after {timeout_s:.0f}s\n{e.stdout or ''}{e.stderr or ''}"
+
+    output = (proc.stdout or "") + (proc.stderr or "")
+    return proc.returncode == 0, output
+
+
 def _run_pytest_in_sidecar(
     service: ServiceDefinition,
     workspace_path: Path,
@@ -221,6 +277,7 @@ def run_integration_phase(
     backend_wait_s: float = 60.0,
     debugger_factory: Optional[Callable] = None,
     debug_max_iterations: int = 3,
+    web_ui_tester_factory: Optional[Callable] = None,
 ) -> List[ServiceResult]:
     """Verify-phase orchestration. See module docstring."""
     backends = _backends(architecture)
@@ -444,6 +501,101 @@ def run_integration_phase(
                         out, backend.name,
                         f"integration_failed: pytest non-zero exit. Tail:\n{tail[:1500]}",
                     )
+
+        # ── Frontend phase: WebUITester via Playwright sidecar ────────
+        if web_ui_tester_factory is not None:
+            for frontend in _frontends(architecture):
+                ws = service_workspaces.get(frontend.name)
+                if ws is None:
+                    _log(on_status, f"Integration: '{frontend.name}' has no workspace, skipping")
+                    continue
+
+                # Wait for frontend to actually serve content
+                fe_base = f"http://localhost:{frontend.port}"
+                if not _wait_http_ok(f"{fe_base}/", deadline_s=backend_wait_s):
+                    _log(
+                        on_status,
+                        f"Integration: '{frontend.name}' didn't respond on /"
+                    )
+                    _mark_failed(
+                        out, frontend.name,
+                        "integration_failed: frontend not reachable on /",
+                    )
+                    continue
+
+                _log(on_status, f"Integration: generating UI tests for '{frontend.name}'...")
+                tester = web_ui_tester_factory(workspace=ws)
+                try:
+                    test_source = tester.generate_test_file(
+                        problem_statement=problem_statement,
+                        service=frontend,
+                        backend_contracts=contracts,
+                    )
+                except Exception as e:
+                    _log(on_status, f"Integration: UI test generation failed for '{frontend.name}': {e}")
+                    _mark_failed(
+                        out, frontend.name,
+                        f"integration_failed: UI test generation error — {type(e).__name__}: {e}",
+                    )
+                    continue
+
+                target_rel_fe = "tests/integration/ui.spec.ts"
+                target_path_fe = ws.path(target_rel_fe)
+                target_path_fe.parent.mkdir(parents=True, exist_ok=True)
+                target_path_fe.write_text(test_source)
+                _log(on_status, f"Integration: '{frontend.name}' UI tests written → {target_rel_fe}")
+
+                workspace_root_fe = Path(ws.root) if hasattr(ws, "root") else target_path_fe.parent.parent.parent
+                fe_passed, fe_output = _run_playwright_in_sidecar(
+                    service=frontend,
+                    workspace_path=workspace_root_fe,
+                    compose_path=compose_path,
+                    on_status=on_status,
+                )
+
+                if fe_passed:
+                    _log(on_status, f"Integration: '{frontend.name}' UI PASS")
+                else:
+                    fe_tail = "\n".join(fe_output.splitlines()[-30:])
+                    _log(on_status, f"Integration: '{frontend.name}' UI FAIL\n{fe_tail}")
+
+                    if debugger_factory is not None:
+                        from bizniz.integration.debug_loop import repair_integration_failure
+
+                        def _rerun_fe(svc=frontend, ws_root=workspace_root_fe):
+                            return _run_playwright_in_sidecar(
+                                service=svc,
+                                workspace_path=ws_root,
+                                compose_path=compose_path,
+                                on_status=on_status,
+                            )
+
+                        _bound_factory_fe = lambda ws_=ws: debugger_factory(ws_)
+                        repaired_fe, final_fe_output = repair_integration_failure(
+                            service=frontend,
+                            workspace=ws,
+                            failure_output=fe_output,
+                            integration_test_rel=target_rel_fe,
+                            debugger_factory=_bound_factory_fe,
+                            rerun_tests=_rerun_fe,
+                            on_status=on_status,
+                            max_iterations=debug_max_iterations,
+                        )
+
+                        if repaired_fe:
+                            _log(on_status, f"Integration: '{frontend.name}' UI PASS after agentic repair")
+                            continue
+
+                        final_fe_tail = "\n".join(final_fe_output.splitlines()[-30:])
+                        _mark_failed(
+                            out, frontend.name,
+                            f"integration_failed: playwright non-zero exit after agentic repair. Tail:\n{final_fe_tail[:1500]}",
+                        )
+                    else:
+                        _mark_failed(
+                            out, frontend.name,
+                            f"integration_failed: playwright non-zero exit. Tail:\n{fe_tail[:1500]}",
+                        )
     finally:
         _log(on_status, "Integration: tearing down stack...")
         try:

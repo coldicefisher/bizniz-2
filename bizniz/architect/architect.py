@@ -94,6 +94,7 @@ class Architect(BaseAIAgent):
         provisioner: Optional["Provisioner"] = None,
         http_api_tester_factory: Optional[Callable] = None,
         integration_debugger_factory: Optional[Callable] = None,
+        web_ui_tester_factory: Optional[Callable] = None,
     ):
         super().__init__(
             client=client,
@@ -108,6 +109,7 @@ class Architect(BaseAIAgent):
         self._provisioner = provisioner  # constructed lazily in build() if None
         self._http_api_tester_factory = http_api_tester_factory  # None → integration phase skipped
         self._integration_debugger_factory = integration_debugger_factory  # None → no auto-repair on integration failure
+        self._web_ui_tester_factory = web_ui_tester_factory  # None → no Playwright UI tests
 
     @property
     def _process_system_prompt(self) -> str:
@@ -887,6 +889,7 @@ class Architect(BaseAIAgent):
                         service_workspaces=service_workspaces,
                         on_status=self._on_status_message,
                         debugger_factory=self._integration_debugger_factory,
+                        web_ui_tester_factory=self._web_ui_tester_factory,
                     )
                     _captured_service_results = list(service_results)
                 except Exception as e:

@@ -37,6 +37,7 @@ from bizniz.agents.coder.coder import Coder
 from bizniz.agents.debugger.quick import QuickDebugger
 from bizniz.agents.debugger.agentic import AgenticDebugger
 from bizniz.integration.http_api_tester import HTTPApiTester
+from bizniz.integration.web_ui_tester import WebUITester
 from bizniz.tester.tester import Tester
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
@@ -206,7 +207,7 @@ if __name__ == "__main__":
     architect_client = config.make_client(model=config.architect_model)
     log(f"Architect client ready (model={config.architect_model})")
 
-    project_name = "Pet Groomer NoSkel" if no_skeleton else "Pet Groomer V7"
+    project_name = "Pet Groomer NoSkel" if no_skeleton else "Pet Groomer V9"
     project_parent = Path.home() / "bizniz_projects"
     project_parent.mkdir(parents=True, exist_ok=True)
 
@@ -228,6 +229,14 @@ if __name__ == "__main__":
             on_status_message=log,
         )
 
+    def _make_web_ui_tester(workspace):
+        return WebUITester(
+            client=config.make_engineer_client(),
+            environment=PythonSandboxExecutionEnvironment(),
+            workspace=workspace,
+            on_status_message=log,
+        )
+
     architect = Architect(
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
@@ -237,6 +246,7 @@ if __name__ == "__main__":
         ),
         http_api_tester_factory=lambda workspace: _make_http_api_tester(workspace),
         integration_debugger_factory=lambda workspace: _make_integration_debugger(workspace),
+        web_ui_tester_factory=lambda workspace: _make_web_ui_tester(workspace),
         project_parent=str(project_parent),
         on_status_message=log,
     )
