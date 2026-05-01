@@ -684,6 +684,7 @@ class Architect(BaseAIAgent):
         self, problem_statement: str, project_name: str,
         parallel: bool = True, max_workers: int = 4,
         layered: bool = True,
+        force_no_skeleton: bool = False,
     ) -> ArchitectResult:
         """
         Full pipeline:
@@ -695,6 +696,12 @@ class Architect(BaseAIAgent):
 
         The architect plans; the Provisioner materializes; the engineer
         codes. Architect.build() is the thin orchestration shell.
+
+        ``force_no_skeleton``: after decompose, override every app
+        service's ``skeleton`` to ``"none"`` so the Provisioner falls
+        back to the minimal generated boilerplate (Dockerfile +
+        requirements.txt / package.json) and the AI must build the rest
+        from scratch. Used for apples-to-apples cost experiments.
         """
         from bizniz.project.project import Project
         from bizniz.provisioner import Provisioner
@@ -733,6 +740,16 @@ class Architect(BaseAIAgent):
             architecture = self.decompose(problem_statement, project_name)
             _captured_architecture = architecture
             tracker.set_phase(None)
+
+            if force_no_skeleton:
+                _APP_TYPES = {"backend", "frontend", "worker"}
+                wiped = []
+                for svc in architecture.services:
+                    if svc.service_type in _APP_TYPES and svc.skeleton and svc.skeleton != "none":
+                        wiped.append(f"{svc.name}({svc.skeleton})")
+                        svc.skeleton = "none"
+                if wiped:
+                    log(f"Architect: --no-skeleton — wiped skeletons on {', '.join(wiped)}")
 
             # Step 2: Provisioner — turn the plan into a real project on disk +
             # built Docker images.

@@ -203,6 +203,11 @@ class CodingOrchestrator:
         if language != "python":
             self._apply_language_system_prompts()
 
+        # Append skeleton directory conventions if the workspace ships
+        # a SKELETON.md. Done after language overrides so it layers on
+        # top of either the default or the language-specific prompt.
+        self._apply_skeleton_conventions()
+
     def _apply_language_system_prompts(self):
         """Override coder/tester system prompts for the configured language."""
         eval_env = ""
@@ -213,6 +218,15 @@ class CodingOrchestrator:
 
         tester_prompt = self._lang.get_tester_system_prompt()
         self._tester.set_system_prompt_override(tester_prompt)
+
+    def _apply_skeleton_conventions(self):
+        from bizniz.workspace.skeleton_conventions import load_skeleton_conventions
+        section = load_skeleton_conventions(self._workspace)
+        if not section:
+            return
+        for agent in (self._coder, self._tester, self._quick_debugger):
+            base = agent._system_prompt_override or agent._process_system_prompt
+            agent.set_system_prompt_override(base + "\n\n" + section)
 
     # ── Language helpers (delegated to LanguageStrategy) ─────────────────────
 

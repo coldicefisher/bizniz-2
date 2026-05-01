@@ -107,6 +107,11 @@ class Engineer(BaseAIAgent):
         self._orchestrator_factory = orchestrator_factory
         self._available_models = available_models or ["gpt-4o", "gpt-5"]
 
+        from bizniz.workspace.skeleton_conventions import load_skeleton_conventions
+        _skel = load_skeleton_conventions(workspace)
+        if _skel:
+            self.set_system_prompt_override(self._process_system_prompt + "\n\n" + _skel)
+
     # ── BaseAIAgent contract ────────────────────────────────────────────────────
 
     @property
