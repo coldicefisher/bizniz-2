@@ -1,0 +1,34 @@
+Build a property management web application for small landlords (1-20 units).
+
+The system must support:
+
+1) TENANT MANAGEMENT
+   - Landlord can add properties (address, unit count, description, photos)
+   - Landlord can add tenants and assign them to units
+   - Each tenant has: name, email, phone, lease start/end dates, monthly rent amount
+   - Tenants can log in and see their own lease details and payment history
+
+2) RENT COLLECTION
+   - System tracks monthly rent for each tenant
+   - Landlord can record manual payments (check, cash) with date and amount
+   - Tenants see their payment history and current balance
+   - Overdue rent is flagged automatically (grace period: 5 days after the 1st)
+
+3) MAINTENANCE REQUESTS
+   - Tenants can submit maintenance requests (title, description, urgency: low/medium/high/emergency)
+   - Landlord sees all open requests, can assign status (open/in_progress/completed)
+   - Both parties can add comments to a request
+   - Email notifications on status changes (use a notification queue, actual sending is mocked)
+
+4) AUTHENTICATION & AUTHORIZATION
+   - JWT-based authentication (access + refresh tokens)
+   - Two roles: landlord and tenant
+   - Landlord sees all properties, tenants, payments, and requests
+   - Tenant sees only their own data
+   - Registration with email verification (verification is mocked, but the flow must exist)
+
+TECHNICAL REQUIREMENTS:
+- Backend: REST API with PostgreSQL database (not in-memory — use real migrations)
+- Frontend: React with proper routing and state management
+- All API endpoints must validate input and return proper error codes
+- Database schema must use foreign keys and proper constraints

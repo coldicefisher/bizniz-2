@@ -38,6 +38,13 @@ SKELETON.md contracts, captured OpenAPI, and a per-run report.
   Turbo, Parcel, etc.) at the walk level. V11 frontend: 527 → 27 files.
   Debug loop also sends manifests (package.json, requirements.txt)
   first, excludes lockfiles.
+- **Milestone builds wired**: `build_with_plan` now runs integration
+  tests after each milestone. `examples/milestone_build.py` supports
+  `--plan-only`, `--milestone N`, `--resume` for human-gated flow.
+- **Property Manager test**: first full-lifecycle test in
+  `tests/e2e/property_manager/`. Real Postgres, JWT auth, two roles,
+  4 domains. Exercises planner → evolve → engineer → integration →
+  debugger across multiple milestones.
 - **Pending**: clone react skeleton manually, run V12 with skeleton
   frontend to exercise WebUITester + Playwright debugger path.
 
@@ -48,6 +55,7 @@ SKELETON.md contracts, captured OpenAPI, and a per-run report.
 | This repo (orchestration) | `~/bizniz/` |
 | Generated apps | `~/bizniz_projects/<slug>/` |
 | Per-run reports | `<project>/docs/runs/<job_id>.md` (and .json) |
+| E2E lifecycle tests | `tests/e2e/` (property_manager is the first) |
 | Skeleton repos (5) | `~/bizniz-skeleton-{fastapi,react,angular,teams,saas}/` |
 | Auto-memory (this machine) | `~/.claude/projects/-home-jamey-bizniz/memory/` |
 | Portable memory copy (this repo) | `docs/memory/` |
@@ -78,6 +86,13 @@ PYTHONPATH=. .venv/bin/python -u examples/debug_integration.py \
   ~/bizniz_projects/pet_groomer_v11
 # Flags: --backend-only, --frontend-only, --max-iterations 5,
 #         --debugger-model gemini-pro
+
+# E2E lifecycle test (property manager)
+./tests/e2e/property_manager/run.sh plan    # plan only (~$0.01)
+./tests/e2e/property_manager/run.sh m1      # milestone 1 (greenfield)
+./tests/e2e/property_manager/run.sh m2      # milestone 2 (evolve)
+./tests/e2e/property_manager/run.sh integration  # integration tests
+./tests/e2e/property_manager/run.sh up      # stand up for manual review
 
 # Test suite
 .venv/bin/python -m pytest bizniz/integration/tests/ \

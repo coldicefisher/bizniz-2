@@ -7,3 +7,4 @@
 - [Build vs evolve strategy](project_build_vs_evolve_strategy.md) — greenfield handoff first, then evolve mode with discovery anchored on v0 artifacts (digest, integration tests, SKELETON.md, contracts)
 - [Pet-groomer buildout plan](project_pet_groomer_buildout_plan.md) — milestone-driven validation of the full pipeline (build → evolve → review → refactor → regress) on the first real customer
 - [Integration debugger tuning](project_debugger_tuning.md) — V11: container restart + prompt context + server logs + inspect_container tool. 1-iteration fix verified.
+- [Property Manager E2E test](project_property_manager_test.md) — first full-lifecycle test: Postgres, JWT, 5 milestones, integration tests per milestone
