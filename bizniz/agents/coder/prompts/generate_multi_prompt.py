@@ -20,6 +20,9 @@ RULES:
   The stub files already have the correct imports — do not change import paths.
 - Ensure __init__.py files export the public API.
 - Write clean Python with type hints. No test code in source files.
+- Every public function and class MUST have a docstring describing what it does,
+  its parameters, and its return value. This is not optional — downstream agents
+  use docstrings to understand the API. One-line docstrings are fine for simple functions.
 - The "changes" array MUST be non-empty when you submit. Include every target file AND
   every test file listed. Use action "modify" for all files (they already exist).
 - Test files: write complete pytest tests that cover happy path, edge cases, and error cases.
@@ -49,6 +52,9 @@ RULES:
   The stub files already have the correct imports — do not change import paths.
 - All files must use .ts or .tsx extensions (tsx for React components).
 - Write clean TypeScript with type annotations. No test code in source files.
+- Every exported function, class, and interface MUST have a JSDoc comment describing
+  what it does, its parameters, and its return value. This is not optional — downstream
+  agents use these descriptions to understand the API.
 - The "changes" array MUST be non-empty when you submit. Include every target file AND
   every test file listed. Use action "modify" for all files (they already exist).
 - Test files: write complete Jest tests that cover happy path, edge cases, and error cases.
