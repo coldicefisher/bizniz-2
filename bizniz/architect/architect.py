@@ -570,6 +570,51 @@ class Architect(BaseAIAgent):
                         getattr(r, "success", False) for r in m_results
                     ) if m_results else True
 
+                    # Integration phase: run integration tests against the
+                    # live stack after engineering passes. Same logic as
+                    # build() — tests are the source of truth.
+                    if (
+                        milestone_succeeded
+                        and m_results
+                        and self._http_api_tester_factory is not None
+                    ):
+                        from bizniz.integration import run_integration_phase
+                        from bizniz.workspace.local_workspace import LocalWorkspace as _LW
+                        tracker.set_phase("integration")
+                        compose_path = str(project.dev_root / "docker-compose.yml")
+                        # Build workspace map for ALL app services (not just
+                        # changed ones) — integration tests verify the whole stack.
+                        all_app_services = [
+                            s for s in evolved_arch.services
+                            if s.service_type in {"backend", "frontend", "worker"}
+                        ]
+                        all_workspaces = {
+                            s.name: _LW(root=str(project.root / s.workspace_name))
+                            for s in all_app_services
+                            if (project.root / s.workspace_name).is_dir()
+                        }
+                        try:
+                            log(f"Architect: milestone {m_label} — running integration phase...")
+                            m_results = run_integration_phase(
+                                architecture=evolved_arch,
+                                service_results=list(m_results),
+                                project_root=project.root,
+                                problem_statement=problem_statement,
+                                compose_path=compose_path,
+                                http_api_tester_factory=self._http_api_tester_factory,
+                                service_workspaces=all_workspaces,
+                                on_status=self._on_status_message,
+                                debugger_factory=self._integration_debugger_factory,
+                                web_ui_tester_factory=self._web_ui_tester_factory,
+                            )
+                            # Re-evaluate success after integration
+                            milestone_succeeded = all(
+                                getattr(r, "success", False) for r in m_results
+                            )
+                        except Exception as e:
+                            log(f"Architect: milestone {m_label} integration phase raised ({e}) — continuing")
+                        tracker.set_phase(None)
+
                     if milestone_succeeded:
                         if milestone.db_id is not None:
                             project.db.update_milestone_status(milestone.db_id, "completed")
