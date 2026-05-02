@@ -160,6 +160,7 @@ class FusionAuthTemplate(InfraTemplate):
         }
 
         env_vars = {
+            "FUSIONAUTH_URL": issuer,  # internal Docker URL for backend → FusionAuth
             "FUSIONAUTH_ADMIN_EMAIL": admin_email,
             "FUSIONAUTH_ADMIN_PASSWORD": admin_password,
             "FUSIONAUTH_API_KEY": api_key,

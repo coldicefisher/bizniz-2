@@ -562,6 +562,53 @@ class Architect(BaseAIAgent):
                             break
                     tracker.set_phase(None)
 
+                    # Step 2b.6: configure FusionAuth (roles, test users, contract)
+                    has_auth = any(
+                        s.service_type == "auth" for s in evolved_arch.services
+                    )
+                    if has_auth and stack_healthy:
+                        tracker.set_phase("fusionauth_provision")
+                        try:
+                            from bizniz.provisioner.fusionauth_agent import provision_fusionauth
+                            # Read FusionAuth connection details from the .env
+                            env_path = project.dev_root / ".env"
+                            env_vars = {}
+                            if env_path.exists():
+                                for line in env_path.read_text().splitlines():
+                                    line = line.strip()
+                                    if line and not line.startswith("#") and "=" in line:
+                                        k, v = line.split("=", 1)
+                                        env_vars[k.strip()] = v.strip()
+
+                            fa_host_url = env_vars.get("FUSIONAUTH_HOST_URL", "http://localhost:9011")
+                            fa_api_key = env_vars.get("FUSIONAUTH_API_KEY", "")
+                            fa_app_id = env_vars.get("FUSIONAUTH_APPLICATION_ID", "")
+                            frontend_svc = next(
+                                (s for s in evolved_arch.services if s.service_type == "frontend"),
+                                None,
+                            )
+                            fe_port = frontend_svc.port if frontend_svc else 5173
+
+                            fa_result = provision_fusionauth(
+                                problem_statement=problem_statement,
+                                project_root=project.root,
+                                fusionauth_url=fa_host_url,
+                                fusionauth_api_key=fa_api_key,
+                                application_id=fa_app_id,
+                                frontend_port=fe_port,
+                                ai_client=self._client,
+                                on_status=self._on_status_message,
+                            )
+                            log(
+                                f"Architect: FusionAuth configured — "
+                                f"{len(fa_result['roles'])} role(s), "
+                                f"{len(fa_result['test_users'])} test user(s), "
+                                f"smoke={'PASS' if fa_result['smoke_passed'] else 'FAIL'}"
+                            )
+                        except Exception as e:
+                            log(f"Architect: FusionAuth provisioning failed ({e}) — continuing")
+                        tracker.set_phase(None)
+
                     # Step 2c: engineer dispatch on changed services only
                     changed_services = [
                         s for s in evolved_arch.services

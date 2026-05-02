@@ -41,4 +41,27 @@ def load_skeleton_conventions(workspace: BaseWorkspace) -> Optional[str]:
     body = body.strip()
     if not body:
         return None
-    return _HEADER + body + _FOOTER
+
+    # Also load AUTH_CONTRACT.md from project root (parent of workspace)
+    # if it exists. This gives the engineer the FusionAuth configuration
+    # (roles, test users, endpoints) alongside the skeleton contract.
+    auth_section = ""
+    try:
+        # Walk up from workspace to find AUTH_CONTRACT.md at project root
+        project_root = workspace.root.parent
+        auth_path = project_root / "AUTH_CONTRACT.md"
+        if auth_path.exists() and auth_path.is_file():
+            auth_body = auth_path.read_text().strip()
+            if auth_body:
+                auth_section = (
+                    "\n\n## Auth Contract (HARD CONSTRAINT)\n\n"
+                    + auth_body
+                    + "\n\n**Do NOT implement your own auth.** Use get_current_user "
+                    "and require_roles from app.core.auth. FusionAuth handles "
+                    "registration, login, tokens, email verification, and "
+                    "password reset."
+                )
+    except Exception:
+        pass
+
+    return _HEADER + body + _FOOTER + auth_section
