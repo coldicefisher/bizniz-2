@@ -132,6 +132,7 @@ def _run_playwright_in_sidecar(
         "-v", f"{workspace_path}:/workspace",
         "-w", "/workspace",
         "--ipc=host",
+        "-e", "NODE_PATH=/usr/lib/node_modules",
         PLAYWRIGHT_SIDECAR_IMAGE,
         "sh", "-c", run_cmd,
     ]
