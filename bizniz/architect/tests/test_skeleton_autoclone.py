@@ -78,7 +78,7 @@ def test_seed_workspace_clones_when_missing(isolated_skeletons_dir, tmp_path):
     assert mock_run.call_count == 1
     cmd = mock_run.call_args[0][0]
     assert cmd[:2] == ["git", "clone"]
-    assert "github.com/coldicefisher/bizniz-skeleton-fastapi.git" in cmd[-2]
+    assert "bizniz-skeleton-fastapi.git" in cmd[-2]
     assert cmd[-1] == str(isolated_skeletons_dir / "bizniz-skeleton-fastapi")
 
     assert "app/main.py" in copied

@@ -3,7 +3,7 @@ Auto Architect types.
 """
 
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class ServiceDefinition(BaseModel):
@@ -12,6 +12,14 @@ class ServiceDefinition(BaseModel):
     service_type: str  # "backend", "frontend", "database", "cache", "proxy", "auth", etc.
     framework: str  # "fastapi", "react", "angular", "nginx", "redis", "postgres", etc.
     language: str  # "python", "typescript", "yaml", etc.
+
+    @field_validator("service_type", "framework", "language", mode="before")
+    @classmethod
+    def _normalize_lowercase(cls, v):
+        """AI returns 'TypeScript', 'FastAPI', 'PostgreSQL' — normalize
+        to lowercase so downstream comparisons (test environment selection,
+        template lookup, skeleton matching) don't silently mismatch."""
+        return v.lower() if isinstance(v, str) else v
     description: str
     workspace_name: str  # directory name for source code at project_root/<workspace_name>/
     port: Optional[int] = None
