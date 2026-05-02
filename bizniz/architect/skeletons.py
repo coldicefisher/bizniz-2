@@ -213,7 +213,7 @@ def _skeleton_repo_root(skeleton: SkeletonInfo) -> Path:
 
 
 def _skeleton_clone_url(skeleton: SkeletonInfo) -> str:
-    return f"https://github.com/{_GITHUB_ORG}/{_skeleton_repo_name(skeleton)}.git"
+    return f"git@github.com:{_GITHUB_ORG}/{_skeleton_repo_name(skeleton)}.git"
 
 
 def _ensure_skeleton_present(
