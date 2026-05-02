@@ -1,6 +1,6 @@
 # Bizniz pipeline sequence
 
-_Last updated: 2026-04-30 UTC_
+_Last updated: 2026-05-02 UTC_
 
 ## Overview
 
@@ -8,28 +8,44 @@ _Last updated: 2026-04-30 UTC_
 Problem Statement
        │
        ▼
-  Architect          Step 1: Decompose into services (one AI call)
+  Planner              Step 0: Decompose into milestones (one AI call)
+       │                     product-shaped slices, not engineering tasks
+       │
+       │  For each milestone:
+       ▼
+  Architect.evolve     Step 1: Decompose milestone into services
+       │                     (one AI call; greenfield on M1, evolve on M2+)
+       ▼
+  Provisioner.evolve   Step 2: Materialize on disk + Docker images
+       │                     (no AI: skeletons, infra templates, compose, env)
+       ▼
+  Engineer             Step 3: Per-service analyze → architecture plan → issues
+       │                     (three structured AI passes)
+       ▼
+  Scaffold             Step 4: Deterministic stub files from architecture plan
        │
        ▼
-  Provisioner            Step 2: Materialize plan on disk + Docker images
-       │                  (no AI: skeletons, infra templates, compose, env)
-       ▼
-  Engineer           Step 3: Per-service analyze → architecture plan → issues
-       │                  (three structured AI passes)
-       ▼
-  Scaffold               Step 4: Deterministic stub files from architecture plan
+  Phase 1 framing      Step 5: Cheap-tier coder per issue, no tests
        │
        ▼
-  Phase 1 framing        Step 5: Cheap-tier coder per issue, no tests
+  Preflight            Step 5.5: Static import validation + "did you mean?"
+       │                     + auto-stub missing __init__.py
+       ▼
+  Phase 2 escalation   Step 6: Test + repair per issue per model in chain
+       │                     (max_iterations=2 per model tier)
+       ▼
+  Phase 3 agentic      Step 7: Top-tier debugger w/ tools on remaining failures
+       │                     (max_iterations=12, only if needed)
+       ▼
+  Integration phase    Step 8: Tests against the live Docker stack
+       │                     HTTPApiTester + WebUITester + AgenticDebugger
+       ▼
+  Finalization         Step 9: Cost rollup, run report, milestone status
        │
        ▼
-  Phase 2 escalation     Step 6: One attempt per issue per model in chain,
-       │                  with tests + repair (max_iterations=2)
-       ▼
-  Phase 3 agentic        Step 7: Top-tier debugger w/ tools on remaining failures
-       │                  (max_iterations=12, only if needed)
-       ▼
-  Working Service        Step 8: All tests pass; cost rolled up to jobs table
+  Human verification   (pause between milestones)
+       │
+       └─── next milestone ───▶ back to Step 1 (evolve)
 ```
 
 Cost tracking and on-disk persistence happen alongside every step — see
@@ -37,78 +53,88 @@ Cost tracking and on-disk persistence happen alongside every step — see
 
 ---
 
-## Step 1: Architect.decompose()
+## Step 0: Planner.plan()
 
-**File:** `bizniz/architect/architect.py`
+**File:** `bizniz/planner/planner.py`
 
 **Input:** Problem statement (natural language), project name
 
 **What happens:**
-1. Single AI call (`architect_model`, default `gemini-flash`) with
+1. Single AI call (`planner_model`, default `gemini-pro`) with
    `JSON_SCHEMA` response.
-2. AI returns a `SystemArchitecture`:
-   - `services: List[ServiceDefinition]` — each with name, type
-     (`backend`/`frontend`/`worker`/`database`/`cache`/`proxy`/`auth`),
-     framework, language, port, depends_on, requirements, and a
-     `skeleton` choice (one of the 6 registered skeletons or `"none"`).
-   - `description` and `project_slug`.
-3. Cost tracker opens a `job_id` and tags the call with
-   `phase=architect.decompose`. Records buffer in memory until the
-   project DB exists (Step 2).
+2. AI returns a `ProjectPlan` with N milestones, each containing:
+   - `name` — human-readable milestone label
+   - `problem_slice` — self-contained problem statement the Architect
+     can read in isolation (this is what Step 1 receives)
+   - `use_cases` — user stories shipped in this milestone
+   - `success_criteria` — testable outcomes
+   - `depends_on_names` — topological ordering
+   - `estimated_effort` — S/M/L sizing hint
+3. Plan is saved to `<project>/docs/plan.json` for resume.
+4. Milestones are persisted to project DB if available.
 
-**Output:** `SystemArchitecture` with services list. **No file writes,
-no docker subprocess.** The architect is pure planning.
+**Output:** `ProjectPlan` with ordered milestones.
 
-**Example:** "Pet Groomer with login" → 4 services: backend (fastapi),
-frontend (react), auth (fusionauth), postgres (database).
+**Key invariant:** Milestones are product-shaped (user value), not
+engineering-shaped. The Planner says "users can register and log in"
+— the Architect decides that means FusionAuth + Postgres.
+
+**Example:** Property Manager → 5 milestones: Auth → Properties →
+Tenants/Leases → Rent → Maintenance.
 
 ---
 
-## Step 2: Provisioner.provision()
+## Step 1: Architect.evolve()
+
+**File:** `bizniz/architect/architect.py`
+
+**Input:** Milestone's `problem_slice`, existing `SystemArchitecture`
+(empty for M1, populated for M2+)
+
+**What happens:**
+1. Single AI call (`architect_model`, default `gemini-pro`) with
+   `JSON_SCHEMA` response. The evolve prompt includes:
+   - The milestone's problem_slice
+   - All existing services (for M2+)
+   - Available skeletons
+   - Framework and infrastructure rules
+2. AI returns services with `evolve_state` tags:
+   - `"new"` — service didn't exist before
+   - `"extended"` — service exists, this milestone adds to it
+   - `"unchanged"` — service exists, not touched
+3. Defenses: existing services preserve identity (framework, language,
+   port, skeleton, image_name). Dropped services are auto-restored.
+4. `ServiceDefinition` fields normalized to lowercase (service_type,
+   framework, language) via Pydantic validator.
+
+**M1 special case:** `evolve()` receives empty architecture → all
+services tagged `"new"` → effectively a greenfield decompose.
+
+**Output:** `SystemArchitecture` with evolve_state per service.
+
+---
+
+## Step 2: Provisioner.evolve()
 
 **File:** `bizniz/provisioner/provisioner.py`
 
-**Input:** `SystemArchitecture` from Step 1, project name
+**Input:** Evolved `SystemArchitecture`, project name
 
 **What happens:**
-1. **Free-port allocation** — walks every host port and bumps any that
-   collide with each other or with something already bound on the dev
-   machine.
-2. **Project structure** — creates `project_root/` and
-   `project_root/infra/development/`. Saves an architecture snapshot
-   to `ProjectDB`.
-3. **Cleanup** — removes any leftover `<project_slug>-*` Docker images
-   and dangling containers from prior builds.
-4. **Per-service materialization:**
-   - **Infrastructure services** (database, cache, proxy, auth) →
-     render the matching template:
-     - `postgres` → compose entry with healthcheck + `pgdata` volume,
-       `init.sql` that creates the FusionAuth DB alongside the app DB.
-     - `redis` → compose entry with healthcheck.
-     - `fusionauth` → compose entry depending on postgres-healthy +
-       full `kickstart.json` (default tenant issuer, application named
-       after project_slug, admin/user roles, OAuth redirects for both
-       React and Angular, JWT settings, initial admin user, bootstrap
-       API key).
-   - **Application services with a skeleton** → seed from
-     `~/bizniz-skeleton-<name>` (skipping `.git`, `node_modules`,
-     lockfiles), substitute `{project_slug}` placeholders, mirror the
-     skeleton's Dockerfile into `infra/development/<svc>/Dockerfile`.
-   - **Application services without a skeleton** → render the generic
-     `PythonAppTemplate` or `TypeScriptAppTemplate`: Dockerfile +
-     requirements.txt or package.json with framework defaults.
-5. **Compose + .env:** `compose_builder.build_compose()` assembles a
-   single YAML deterministically from the per-service template outputs
-   (no AI parsing). `env_builder.build_env_file()` aggregates env vars
-   contributed by every template, grouped by prefix.
-6. **Docker image builds** for app services (`build_images=True` by
-   default; pass `False` for tests).
-7. Cost tracker attaches to the project DB; buffered records flush.
+1. **Probe** — reads DB + filesystem + Docker to snapshot current state.
+2. **Reconcile** per service:
+   - `new` → full materialization (skeleton seed, register DB, build image)
+   - `extended` → re-render templates, preserve app code, rebuild image
+   - `unchanged` → re-render infra only, skip image rebuild
+3. **Skeleton seeding** — clone via SSH from GitHub if not on disk,
+   copy into workspace, substitute `{project_slug}` placeholders.
+4. **Infrastructure templates** — postgres (init.sql, healthcheck),
+   fusionauth (kickstart.json with tenant/app/roles/admin), redis.
+   Lookup is case-insensitive with aliases (PostgreSQL → postgres).
+5. **Compose + .env** — deterministic from template outputs.
+6. **Docker image builds** for new/extended app services.
 
-**Output:** `ProvisionResult` with project_root, compose_path,
-env_path, per-service workspaces, image tags, port_remap dict.
-
-See [architect_provisioner_split.md](architecture/architect_provisioner_split.md).
+**Output:** `ProvisionResult` with per-service workspaces, image tags.
 
 ---
 
@@ -116,31 +142,27 @@ See [architect_provisioner_split.md](architecture/architect_provisioner_split.md
 
 **File:** `bizniz/engineer/engineer.py`
 
-**Input:** Per-service problem prompt, service framework + language,
-existing architecture snapshot from `ProjectDB`.
+**Input:** Per-service problem prompt (milestone's `problem_slice`
+scoped to this service), workspace with skeleton code.
 
 **What happens — three-pass analysis:**
 
 ### Pass 1: rough draft
-1. AI call with `ANALYZE_PROMPT` → requirements, use cases, draft issues.
-2. Persist draft issues to workspace DB.
+1. AI call → requirements, use cases, draft issues.
 
 ### Architecture planning
-3. AI call with `PLAN_PROMPT` → `ArchitecturePlan` (package_name,
-   namespaces, domain models, modules, dependencies).
+2. AI call → `ArchitecturePlan` (package_name, namespaces, domain
+   models, modules, dependencies).
 
 ### Pass 2: refined issues with architecture context
-4. Clear message history, re-call analyze with the architecture plan
-   in scope → refined issues with:
-   - `target_files: [{filepath, action: "create"|"modify"}]`
-   - `test_files: ["tests/test_*.py"]`
-   - `depends_on_titles`
-   - `suggested_model`
-   - `test_setup_hint`
-5. Delete draft issues, write refined ones.
+3. Re-call with architecture plan in scope → refined issues with
+   `target_files`, `test_files`, `depends_on_titles`,
+   `suggested_model`, `test_setup_hint`.
+4. SKELETON.md conventions are injected into both system and user
+   prompts so the AI knows what files it can/can't edit.
 
-Cost tracker tags each call with
-`(service_name, phase=engineer.analyze)`.
+**Only dispatched for `new` and `extended` services** — `unchanged`
+services skip engineering entirely.
 
 **Output:** `EngineeringAnalysis` (requirements, use cases, issues,
 architecture plan).
@@ -151,34 +173,58 @@ architecture plan).
 
 **File:** `bizniz/engineer/scaffold.py`
 
-For every namespace / domain model / module in the architecture plan,
-write a stub file (`class Foo: pass`, function signatures). Test files
-get pytest stubs. Every directory containing a `.py` file gets an
-`__init__.py`. Issues with `target_files[].action == "create"` get
-flipped to `"modify"` since the stubs now exist.
+For every namespace/domain model/module in the architecture plan,
+write a stub file. Test files get pytest stubs. Every directory gets
+`__init__.py`. Issues with `action == "create"` flip to `"modify"`.
 
 This guarantees every file in the plan exists with valid imports
-before any LLM does codegen — eliminates a class of "module not found"
-failures.
+before any LLM does codegen.
 
 ---
 
-## Step 5: Phase 1 framing (`frame_issues`)
+## Step 5: Phase 1 framing
 
 **File:** `bizniz/engineer/framing.py`
 
-**Input:** Issues in topological order, cheap coder
-
-For each issue:
-1. Run `Coder.generate_multi(test_files=None)` — codegen only, no
-   tests, no Docker.
-2. Write the generated `FileChange`s into the workspace.
-3. Run preflight (auto-stub missing locals, rewrite broken imports).
-4. Cost tracker tags with `(issue_id=N, phase=phase1.frame)`.
+For each issue in topological order:
+1. `Coder.generate_multi(test_files=None)` — codegen only, no tests.
+2. Write `FileChange`s into workspace.
+3. Run preflight (Step 5.5).
 
 By the time Step 6 runs tests, every issue's target files contain
-real working code — not empty stubs — and later issues import working
-code from earlier ones.
+real code, and later issues import working code from earlier ones.
+
+---
+
+## Step 5.5: Preflight validation
+
+**File:** `bizniz/preflight/python_validator.py`
+
+Runs after code generation, before tests:
+
+1. **Extract imports** — AST-parse every generated `.py` file.
+2. **Resolve each import** against:
+   - Workspace files (is `app/api/deps.py` a real file?)
+   - Declared dependencies (is `fastapi` in requirements.txt?)
+   - stdlib modules
+   - PyPI (HEAD check for unknown packages)
+3. **"Did you mean?"** — for unresolved workspace imports, build a
+   `WorkspaceIndex` of all modules + exported symbols, fuzzy-match
+   with `difflib.get_close_matches`, and append suggestions:
+   ```
+   Module 'app.api.deps' not found. Did you mean:
+     - from app.core.auth import get_current_user, require_roles
+   ```
+4. **Auto-stub** — create missing `__init__.py` files.
+5. **Shadow detection** — remove files that shadow packages
+   (e.g. `pydantic.py` shadowing the real pydantic).
+6. **Auto-install** — packages confirmed on PyPI get added to the
+   install list.
+
+**Import search tool** (`bizniz/tools/import_tools.py`):
+- `build_workspace_index(path)` — indexes all modules + symbols
+- `resolve_import(module, index)` — resolves with fuzzy suggestions
+- `search_imports(symbol, index)` — finds all modules exporting a symbol
 
 ---
 
@@ -186,86 +232,76 @@ code from earlier ones.
 
 **File:** `bizniz/engineer/engineer.py:run_three_phase`
 
-For each model in `coder_models[1:]` (the escalation chain after
-the framing tier — typically `gemini-flash`, then `gemini-pro`):
-
-1. Iterate every still-failing issue in topological order.
-2. Set cost-tracker context: `phase=phase2.<model>, issue_id=N`.
-3. Build a fresh `CodingOrchestrator` with `max_iterations=2` and
-   `enable_agentic_debug=False`.
-4. `orchestrator.run_multi()` — generates code + tests, runs pytest /
-   jest in Docker, attempts one repair on failure.
-5. If success → close issue in DB; if failure → ticket carries to next
-   model.
-
-The collection-error router (`_is_source_import_error`) chooses
-between source repair and test regen on each pytest exit-code-2
-failure. Universal config files (jest.config, package.json,
-pyproject.toml, Dockerfile, etc.) are auto-loaded into the writable
-repair pool — see [error_classification.md](architecture/error_classification.md).
+For each model in the escalation chain (flash → pro):
+1. Fresh `CodingOrchestrator` with `max_iterations=2`.
+2. `orchestrator.run_multi()` — code + tests, pytest/jest in Docker,
+   one repair on failure.
+3. **Regression detection** — baseline passing tests are re-checked
+   after each issue. Regressions trigger repair.
+4. Collection errors (pytest exit code 2/4) are classified:
+   - Source import error → repair source code
+   - Test import error → regenerate tests
 
 ---
 
-## Step 7: Phase 3 agentic debug (only if needed)
+## Step 7: Phase 3 agentic debug
 
-For any tickets still failing after Phase 2:
-
-1. Set cost-tracker context: `phase=phase3.agentic`.
-2. Build a `CodingOrchestrator` on `debugger_model` (default
-   `gemini-pro`) with `enable_agentic_debug=True` and
-   `max_iterations=debugger_max_iterations` (default 12).
-3. The agentic debugger has full tools: `view_file`, `list_directory`,
-   `search_files`, `run_command`, `run_tests`. It can read the
-   workspace, diagnose the failure, and patch source/tests/configs
-   directly.
-
-In the 2026-04-29 baseline run, Phase 3 was never triggered —
-Phase 1+2 resolved 8/8 tickets.
+For tickets still failing after Phase 2:
+1. `AgenticDebugger` with full tools: `view_file`, `list_directory`,
+   `search_files`, `run_command`, `run_tests`, `inspect_container`.
+2. `inspect_container` runs commands inside the Docker container
+   (where dependencies are installed).
+3. `max_iterations=12` per ticket.
 
 ---
 
-## Step 8: Finalization + cost rollup
+## Step 8: Integration phase
 
-1. Each closed issue is marked `closed` in the workspace DB.
-2. `architect.build()` calls `tracker.finish_job(status)` —
-   refreshes the job row with totals (calls, tokens, cost).
-3. The build prints a `CostSummary.format()` to stdout:
+**File:** `bizniz/integration/runner.py`
 
-   ```
-   calls=42  input=128,440  output=53,920  total=$0.1832
-     by model:
-       gemini-2.5-flash-lite               calls=38  $0.0182
-       gemini-3.1-flash-lite-preview       calls= 3  $0.0102
-       gemini-3.1-pro-preview              calls= 1  $0.1338
-     by agent:
-       coder         calls=22  $0.1402
-       tester        calls=12  $0.0238
-       engineer     calls= 7  $0.0183
-       architect    calls= 1  $0.0009
-   ```
+Runs after all services pass engineering (unit tests). Tests the
+services against each other in the live Docker stack.
 
-4. Failed runs still record cost (so you can see what a failed run
-   cost) and finish with `status=failed`.
+### 8a: Contract capture
+1. Bring up backend containers.
+2. Poll each backend's `/openapi.json` → save to `contracts/`.
+3. Stop backends.
+
+### 8b: Full stack up
+4. `docker compose up -d` — all services including Postgres,
+   FusionAuth, frontend.
+
+### 8c: Backend integration tests
+5. `HTTPApiTester` reads problem statement + OpenAPI contract →
+   generates `tests/integration/test_api.py` (pytest + httpx).
+6. Tests run in a **sidecar container** (`python:3.12-slim`)
+   joined to the compose network. Hits `http://backend:8000`.
+7. If tests fail → dispatch `AgenticDebugger`:
+   - Server logs (last 60 lines) auto-prepended to error output
+   - Debugger reads code, submits `code_fixes`
+   - **Container restarted** to pick up fixes
+   - Tests re-run in sidecar
+   - Up to 3 iterations
+
+### 8d: Frontend integration tests
+8. `WebUITester` generates `.spec.cjs` Playwright tests.
+9. Tests run in Playwright sidecar (`mcr.microsoft.com/playwright`)
+   against `http://frontend:5173`.
+10. Same debugger loop as backend on failure.
+
+### 8e: Teardown
+11. `docker compose down` (always, in finally block).
 
 ---
 
-## Step 9: Per-run efficiency log
+## Step 9: Finalization + cost rollup
 
-After a successful run, copy the format from
-`docs/runs/2026-04-29_pet_groomer_three_phase_baseline.md` into a new
-`docs/runs/<date>_<project>_<note>.md`. Capture architecture, models
-config, per-issue table (which phase + model solved each), wall-clock
-time, total cost, and a "compare with prior runs" row. The series of
-run docs is the efficiency log.
-
-Cost rollups for the run are available via:
-
-```python
-from bizniz.project.project import Project
-project = Project(root="/home/jamey/bizniz_projects/<slug>", project_name="X")
-for row in project.db.cost_by_issue(job_id=...):
-    print(row["issue_id"], row["calls"], row["total_cost"])
-```
+1. Milestone marked `completed` or `failed` in project DB.
+2. `tracker.finish_job(status)` → cost summary.
+3. `write_run_report()` → per-run efficiency doc at
+   `<project>/docs/runs/<job_id>.md`.
+4. Plan status updated and saved to `plan.json`.
+5. Human verification gate between milestones.
 
 ---
 
@@ -275,16 +311,17 @@ for row in project.db.cost_by_issue(job_id=...):
 |-----|---------|---------|
 | `default_model` | `gemini-flash-lite` | Phase 1 framing tier |
 | `engineer_model` | `gemini-flash` | Engineer's analyze + plan calls |
-| `architect_model` | `gemini-flash` | Architect.decompose |
-| `coder_models` | `[gemini-flash-lite, gemini-flash, gemini-pro]` | Escalation chain (Phase 1 = first; Phase 2 = the rest) |
+| `architect_model` | `gemini-pro` | Architect.decompose / evolve |
+| `planner_model` | `gemini-pro` | Planner (one call per project) |
+| `coder_models` | `[flash-lite, flash, pro]` | Escalation chain |
 | `tester_models` | same | Test generation escalation |
-| `repair_models` | `[gemini-flash, gemini-pro]` | Stall-escalation chain |
-| `debugger_model` | `gemini-pro` | Phase 3 agentic debugger |
+| `repair_models` | `[flash, pro]` | Stall-escalation chain |
+| `debugger_model` | `gemini-pro` | Phase 3 + integration debugger |
 | `debugger_max_iterations` | 12 | Per-ticket cap in Phase 3 |
-| `stall_threshold` | 3 | Consecutive failures before declaring stall |
-| `agentic_debug_threshold` | 2 | When agentic debug kicks in (legacy; auto-on in Phase 3) |
-| `enable_agentic_debug` | false | Phase 3 forces this on regardless |
-| `max_iterations` | 20 | Hard cap inside any single orchestrator dispatch |
-| `layered_generation` | true | Currently always-on |
-| `parallel_services` | true | Multi-service projects dispatch in parallel |
+| `stall_threshold` | 3 | Consecutive failures before stall |
+| `agentic_debug_threshold` | 2 | Legacy; Phase 3 forces on |
+| `enable_agentic_debug` | false | Phase 3 forces on regardless |
+| `max_iterations` | 20 | Hard cap per orchestrator dispatch |
+| `layered_generation` | true | Always-on |
+| `parallel_services` | true | Multi-service parallel dispatch |
 | `max_service_workers` | 4 | Thread pool size |
