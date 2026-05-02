@@ -207,7 +207,7 @@ if __name__ == "__main__":
     architect_client = config.make_client(model=config.architect_model)
     log(f"Architect client ready (model={config.architect_model})")
 
-    project_name = "Pet Groomer NoSkel" if no_skeleton else "Pet Groomer V10"
+    project_name = "Pet Groomer NoSkel" if no_skeleton else "Pet Groomer V11"
     project_parent = Path.home() / "bizniz_projects"
     project_parent.mkdir(parents=True, exist_ok=True)
 
