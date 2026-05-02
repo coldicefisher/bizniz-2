@@ -43,6 +43,21 @@ def _read_workspace_files(
     return out
 
 
+# Project manifests: always include these if they exist — they're
+# small and tell the debugger what's installed and how the build works.
+_MANIFEST_FILES = frozenset({
+    "package.json", "requirements.txt", "tsconfig.json",
+    "vite.config.ts", "pyproject.toml", "setup.cfg",
+})
+
+# Lockfiles / noise: never include these — they're huge and
+# add no diagnostic value.
+_SKIP_FILES = frozenset({
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "poetry.lock", "Pipfile.lock",
+})
+
+
 def _list_relevant_source_files(workspace, max_files: int = 30) -> list[str]:
     """Return up to ``max_files`` source files the debugger can use as
     initial context. The agent has discovery tools to fetch more on
@@ -51,20 +66,30 @@ def _list_relevant_source_files(workspace, max_files: int = 30) -> list[str]:
         relatives = workspace.list_relative_files()
     except Exception:
         return []
-    # Filter to source code, deprioritize tests/contracts/docs/cache.
-    keep = []
+
+    # Always include manifests first — they're small and critical.
+    manifests = []
+    source = []
     for rel in relatives:
         s = str(rel)
+        basename = s.rsplit("/", 1)[-1] if "/" in s else s
+        if basename in _SKIP_FILES:
+            continue
         if any(skip in s for skip in (
             "__pycache__", ".pytest_cache", "node_modules",
             ".bizniz/", "docs/", "contracts/", ".egg-info",
         )):
             continue
-        # Source code
-        if s.startswith("app/") or s.endswith(".py") or s.endswith((".ts", ".tsx")):
-            keep.append(s)
-        if len(keep) >= max_files:
-            break
+        if basename in _MANIFEST_FILES:
+            manifests.append(s)
+        elif s.startswith(("app/", "src/")) or s.endswith((".py", ".ts", ".tsx")):
+            source.append(s)
+
+    # Manifests first, then source up to the cap.
+    keep = manifests
+    remaining = max_files - len(keep)
+    if remaining > 0:
+        keep.extend(source[:remaining])
     return keep
 
 
