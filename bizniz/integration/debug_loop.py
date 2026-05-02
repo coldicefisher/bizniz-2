@@ -78,6 +78,7 @@ def repair_integration_failure(
     rerun_tests: Callable[[], Tuple[bool, str]],
     on_status: Optional[Callable[[str], None]] = None,
     max_iterations: int = 3,
+    capture_logs: Optional[Callable[[], str]] = None,
 ) -> Tuple[bool, str]:
     """Run the agentic debug loop. Returns ``(passed, final_output)``.
 
@@ -85,9 +86,32 @@ def repair_integration_failure(
     the pytest sidecar against the now-modified workspace and returns
     ``(passed, output)``. Keeping it as a callback means this module
     doesn't have to know about docker; the integration runner does.
+
+    ``capture_logs`` is an optional closure that returns the container's
+    recent log output (e.g., docker compose logs). When provided, the
+    logs are prepended to the error output so the debugger can see
+    server-side tracebacks, not just client-side assertion failures.
     """
     last_output = failure_output
     repair_history: list[str] = []
+
+    # Capture server-side logs on the initial failure so the debugger
+    # sees both "assert 422 == 200" AND the server's traceback.
+    if capture_logs is not None:
+        try:
+            server_logs = capture_logs()
+            if server_logs and server_logs.strip():
+                # Tail to avoid overwhelming the context — last 60 lines
+                # covers most startup + request-handling tracebacks.
+                tail = "\n".join(server_logs.splitlines()[-60:])
+                last_output = (
+                    f"=== Server logs ({service.name}) ===\n"
+                    f"{tail}\n\n"
+                    f"=== Test output ===\n"
+                    f"{last_output}"
+                )
+        except Exception:
+            pass
 
     for iteration in range(1, max_iterations + 1):
         _log(
@@ -154,6 +178,22 @@ def repair_integration_failure(
         # Re-run integration tests
         _log(on_status, f"Integration debug: '{service.name}' re-running pytest sidecar...")
         passed, output = rerun_tests()
+
+        # Prepend fresh server logs so the next iteration sees updated
+        # tracebacks (the container was restarted with new code).
+        if not passed and capture_logs is not None:
+            try:
+                server_logs = capture_logs()
+                if server_logs and server_logs.strip():
+                    tail = "\n".join(server_logs.splitlines()[-60:])
+                    output = (
+                        f"=== Server logs ({service.name}) ===\n"
+                        f"{tail}\n\n"
+                        f"=== Test output ===\n"
+                        f"{output}"
+                    )
+            except Exception:
+                pass
         last_output = output
 
         if passed:

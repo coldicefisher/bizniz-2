@@ -386,6 +386,9 @@ def run_integration_phase(
 
                         _bound_factory = lambda ws_=ws: debugger_factory(ws_)
 
+                        def _capture_startup_logs():
+                            return _capture_container_logs(compose_path, backend.name)
+
                         repaired, final_output = repair_integration_failure(
                             service=backend,
                             workspace=ws,
@@ -395,6 +398,7 @@ def run_integration_phase(
                             rerun_tests=_rerun_startup,
                             on_status=on_status,
                             max_iterations=debug_max_iterations,
+                            capture_logs=_capture_startup_logs,
                         )
 
                         if repaired:
@@ -516,6 +520,9 @@ def run_integration_phase(
                     # against its own workspace.
                     _bound_factory = lambda ws_=ws: debugger_factory(ws_)
 
+                    def _capture_backend_logs():
+                        return _capture_container_logs(compose_path, backend.name)
+
                     repaired, final_output = repair_integration_failure(
                         service=backend,
                         workspace=ws,
@@ -525,6 +532,7 @@ def run_integration_phase(
                         rerun_tests=_rerun,
                         on_status=on_status,
                         max_iterations=debug_max_iterations,
+                        capture_logs=_capture_backend_logs,
                     )
 
                     if repaired:
@@ -621,6 +629,10 @@ def run_integration_phase(
                             )
 
                         _bound_factory_fe = lambda ws_=ws: debugger_factory(ws_)
+
+                        def _capture_frontend_logs(svc_name=frontend.name):
+                            return _capture_container_logs(compose_path, svc_name)
+
                         repaired_fe, final_fe_output = repair_integration_failure(
                             service=frontend,
                             workspace=ws,
@@ -630,6 +642,7 @@ def run_integration_phase(
                             rerun_tests=_rerun_fe,
                             on_status=on_status,
                             max_iterations=debug_max_iterations,
+                            capture_logs=_capture_frontend_logs,
                         )
 
                         if repaired_fe:
