@@ -494,20 +494,20 @@ def run_integration_phase(
                     from bizniz.integration.debug_loop import repair_integration_failure
 
                     def _rerun():
-                        # Restart the backend container so it picks up
-                        # code fixes written to the volume-mounted workspace.
-                        # Without this, uvicorn serves stale code and the
-                        # debugger's fixes never take effect.
-                        _log(on_status, f"Integration debug: restarting '{backend.name}' to pick up code fixes...")
+                        # Rebuild + restart the backend container so it picks
+                        # up code fixes AND any new dependencies written to
+                        # requirements.txt. Using --build ensures the image
+                        # is fresh, not just the process.
+                        _log(on_status, f"Integration debug: rebuilding + restarting '{backend.name}'...")
                         try:
                             subprocess.run(
-                                ["docker", "compose", "-f", compose_path, "restart", backend.name],
-                                capture_output=True, text=True, timeout=120,
+                                ["docker", "compose", "-f", compose_path,
+                                 "up", "-d", "--build", "--force-recreate", backend.name],
+                                capture_output=True, text=True, timeout=300,
                             )
-                            # Wait for backend to be healthy before re-running tests
-                            _wait_http_ok(f"http://localhost:{backend.port}/openapi.json", deadline_s=30)
+                            _wait_http_ok(f"http://localhost:{backend.port}/openapi.json", deadline_s=60)
                         except Exception as e:
-                            _log(on_status, f"Integration debug: restart failed ({e})")
+                            _log(on_status, f"Integration debug: rebuild failed ({e})")
                         return _run_pytest_in_sidecar(
                             service=backend,
                             workspace_path=workspace_root,
@@ -613,16 +613,18 @@ def run_integration_phase(
                         from bizniz.integration.debug_loop import repair_integration_failure
 
                         def _rerun_fe(svc=frontend, ws_root=workspace_root_fe):
-                            # Restart frontend so it picks up code fixes
-                            _log(on_status, f"Integration debug: restarting '{svc.name}' to pick up code fixes...")
+                            # Rebuild + restart frontend so it picks up code
+                            # fixes AND any new npm packages.
+                            _log(on_status, f"Integration debug: rebuilding + restarting '{svc.name}'...")
                             try:
                                 subprocess.run(
-                                    ["docker", "compose", "-f", compose_path, "restart", svc.name],
-                                    capture_output=True, text=True, timeout=120,
+                                    ["docker", "compose", "-f", compose_path,
+                                     "up", "-d", "--build", "--force-recreate", svc.name],
+                                    capture_output=True, text=True, timeout=300,
                                 )
-                                _wait_http_ok(f"http://localhost:{svc.port}/", deadline_s=30)
+                                _wait_http_ok(f"http://localhost:{svc.port}/", deadline_s=60)
                             except Exception as e:
-                                _log(on_status, f"Integration debug: restart failed ({e})")
+                                _log(on_status, f"Integration debug: rebuild failed ({e})")
                             return _run_playwright_in_sidecar(
                                 service=svc,
                                 workspace_path=ws_root,
