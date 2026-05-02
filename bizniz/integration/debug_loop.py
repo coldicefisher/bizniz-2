@@ -78,6 +78,7 @@ def _list_relevant_source_files(workspace, max_files: int = 30) -> list[str]:
         if any(skip in s for skip in (
             "__pycache__", ".pytest_cache", "node_modules",
             ".bizniz/", "docs/", "contracts/", ".egg-info",
+            "coverage/", ".git/",
         )):
             continue
         if basename in _MANIFEST_FILES:

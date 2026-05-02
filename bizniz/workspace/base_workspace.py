@@ -117,9 +117,26 @@ class BaseWorkspace:
     # code and can contain tens of thousands of files (node_modules
     # alone caused 527-file prompts in V11's frontend repair context).
     _EXCLUDE_DIRS = frozenset({
-        "node_modules", "__pycache__", ".pytest_cache", ".git",
-        ".bizniz", ".egg-info", "dist", "build", ".next", ".nuxt",
-        ".venv", "venv",
+        # Package managers / dependencies
+        "node_modules", ".yarn", ".pnp",
+        # Python
+        "__pycache__", ".pytest_cache", ".venv", "venv",
+        ".egg-info", ".mypy_cache", ".ruff_cache",
+        # Build output
+        "dist", "build", "out", ".output",
+        # Framework caches
+        ".next",                    # Next.js
+        ".nuxt",                    # Nuxt (Vue)
+        ".angular",                 # Angular CLI cache
+        ".astro",                   # Astro
+        ".svelte-kit",              # SvelteKit
+        ".turbo",                   # Turborepo
+        ".parcel-cache",            # Parcel
+        ".cache",                   # Generic / Gatsby
+        # Test / coverage
+        "coverage", ".nyc_output",
+        # VCS / project
+        ".git", ".bizniz",
     })
 
     def _walk_files(self):
