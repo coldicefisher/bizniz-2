@@ -79,6 +79,7 @@ def repair_integration_failure(
     on_status: Optional[Callable[[str], None]] = None,
     max_iterations: int = 3,
     capture_logs: Optional[Callable[[], str]] = None,
+    compose_path: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Run the agentic debug loop. Returns ``(passed, final_output)``.
 
@@ -105,7 +106,7 @@ def repair_integration_failure(
                 # covers most startup + request-handling tracebacks.
                 tail = "\n".join(server_logs.splitlines()[-60:])
                 last_output = (
-                    f"=== Server logs ({service.name}) ===\n"
+                    f"=== Server logs ({service.name}, last 60 lines — use inspect_container for more) ===\n"
                     f"{tail}\n\n"
                     f"=== Test output ===\n"
                     f"{last_output}"
@@ -129,6 +130,12 @@ def repair_integration_failure(
 
         try:
             debugger = debugger_factory()
+            # Arm the debugger with container inspection if we have
+            # a compose path. This lets it pull more logs or exec
+            # commands inside the running container on demand.
+            if compose_path and hasattr(debugger, '_compose_path'):
+                debugger._compose_path = compose_path
+                debugger._service_name = service.name
             diagnosis = debugger.diagnose(
                 error_output=last_output,
                 source_files=source_files,
@@ -187,7 +194,7 @@ def repair_integration_failure(
                 if server_logs and server_logs.strip():
                     tail = "\n".join(server_logs.splitlines()[-60:])
                     output = (
-                        f"=== Server logs ({service.name}) ===\n"
+                        f"=== Server logs ({service.name}, last 60 lines — use inspect_container for more) ===\n"
                         f"{tail}\n\n"
                         f"=== Test output ===\n"
                         f"{output}"

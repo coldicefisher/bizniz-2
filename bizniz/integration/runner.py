@@ -399,6 +399,7 @@ def run_integration_phase(
                             on_status=on_status,
                             max_iterations=debug_max_iterations,
                             capture_logs=_capture_startup_logs,
+                            compose_path=compose_path,
                         )
 
                         if repaired:
@@ -533,6 +534,7 @@ def run_integration_phase(
                         on_status=on_status,
                         max_iterations=debug_max_iterations,
                         capture_logs=_capture_backend_logs,
+                        compose_path=compose_path,
                     )
 
                     if repaired:
@@ -643,6 +645,7 @@ def run_integration_phase(
                             on_status=on_status,
                             max_iterations=debug_max_iterations,
                             capture_logs=_capture_frontend_logs,
+                            compose_path=compose_path,
                         )
 
                         if repaired_fe:

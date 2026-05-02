@@ -34,16 +34,25 @@ Search for a regex pattern across all files in the workspace. Returns matching l
 - Use this to find where functions/classes are defined, trace imports, find usages
 
 ### run_command
-Execute any shell command in the workspace directory. Use this for anything the other tools can't do.
+Execute any shell command in the workspace directory (on the HOST, not inside Docker).
 - Set `action` to "run_command"
-- Set `path` to the command to run (e.g., "pip list", "python3 -c 'import json; print(json.dumps({}))'", "find . -name '*.py' | head -20")
+- Set `path` to the command to run (e.g., "grep -r 'double' app/", "find . -name '*.py' | head -20")
 - The command runs with the workspace as the current directory
-- Use this for: checking installed packages, running Python snippets, complex file searches, inspecting environment
+- Use this for: grep, find, cat, file inspection — NOT for running the app, pip install, or pytest (those only work inside the container)
 
 ### run_tests
-Execute pytest on specific test files.
+Execute pytest on specific test files (runs on the host — may fail if dependencies aren't installed locally).
 - Set `action` to "run_tests"
 - Set `path` to space-separated test file paths (e.g., "tests/test_expense.py tests/test_cli.py")
+
+### inspect_container
+Inspect the running Docker container for this service. Use this to see server-side logs, tracebacks, or run commands inside the container where the app and its dependencies are installed.
+- Set `action` to "inspect_container"
+- Set `path` to one of:
+  - `"logs"` or `""` — last 100 lines of container logs
+  - `"logs 200"` — last 200 lines of container logs
+  - `"exec <command>"` — run a command inside the container (e.g., `"exec pip list"`, `"exec python3 -c 'from app.main import app; print(app.routes)'"`)
+- The error output you receive already includes the last 60 lines of server logs. Use this tool when you need MORE context (e.g., earlier logs, or to run a diagnostic command inside the container).
 
 ### submit_fix
 Submit your final diagnosis and optional code fixes. This ends the debugging session.

@@ -68,6 +68,8 @@ class AgenticDebugger(BaseDebugger):
         max_turns: int = 15,
         timeout_seconds: int = 600,
         on_status_message: Optional[Callable[[str], None]] = None,
+        compose_path: Optional[str] = None,
+        service_name: Optional[str] = None,
     ):
         super().__init__(
             client=client,
@@ -77,6 +79,8 @@ class AgenticDebugger(BaseDebugger):
         )
         self._max_turns = max_turns
         self._timeout_seconds = timeout_seconds
+        self._compose_path = compose_path
+        self._service_name = service_name
 
     def diagnose(
         self,
@@ -260,6 +264,14 @@ class AgenticDebugger(BaseDebugger):
                     "content": f"[TOOL RESULT: run_tests(\"{path}\")]\n{result}",
                 })
 
+            elif action_type == "inspect_container":
+                self._log(f"AgenticDebugger: inspecting container logs ({path or 'default'})")
+                result = self._tool_inspect_container(path)
+                messages.append({
+                    "role": "user",
+                    "content": f"[TOOL RESULT: inspect_container(\"{path}\")]\n{result}",
+                })
+
             else:
                 messages.append({
                     "role": "user",
@@ -358,6 +370,58 @@ class AgenticDebugger(BaseDebugger):
             return "ERROR: Command timed out after 60 seconds."
         except Exception as e:
             return f"ERROR: Command failed: {e}"
+
+    def _tool_inspect_container(self, path: str) -> str:
+        """Pull logs from the Docker container running this service.
+
+        ``path`` controls what to fetch:
+          - "" or "logs"     → last 100 lines of container logs
+          - "logs 200"       → last 200 lines
+          - "exec <command>" → run a command inside the container
+        """
+        if not self._compose_path or not self._service_name:
+            return "ERROR: Container inspection not available (no compose_path/service_name configured)."
+
+        path = (path or "").strip()
+        if not path or path == "logs":
+            path = "logs 100"
+
+        try:
+            if path.startswith("logs"):
+                parts = path.split()
+                n_lines = int(parts[1]) if len(parts) > 1 else 100
+                n_lines = min(n_lines, 500)  # cap to avoid context explosion
+                result = subprocess.run(
+                    ["docker", "compose", "-f", self._compose_path,
+                     "logs", "--no-color", "--tail", str(n_lines), self._service_name],
+                    capture_output=True, text=True, timeout=30,
+                )
+                output = (result.stdout or "") + (result.stderr or "")
+                if not output.strip():
+                    return f"(no logs available for {self._service_name})"
+                return f"=== Container logs ({self._service_name}, last {n_lines} lines) ===\n{output}"
+
+            elif path.startswith("exec "):
+                command = path[5:].strip()
+                if not command:
+                    return "ERROR: No command provided. Usage: exec <command>"
+                result = subprocess.run(
+                    ["docker", "compose", "-f", self._compose_path,
+                     "exec", "-T", self._service_name, "sh", "-c", command],
+                    capture_output=True, text=True, timeout=60,
+                )
+                output = (result.stdout or "") + (result.stderr or "")
+                if len(output) > 10000:
+                    output = output[:10000] + "\n\n... (output truncated)"
+                return f"{output}\n(exit code: {result.returncode})"
+
+            else:
+                return f"ERROR: Unknown inspect_container subcommand '{path}'. Use 'logs', 'logs N', or 'exec <command>'."
+
+        except subprocess.TimeoutExpired:
+            return "ERROR: Container inspection timed out."
+        except Exception as e:
+            return f"ERROR: Container inspection failed: {e}"
 
     def _tool_run_tests(self, path: str) -> str:
         """Run pytest on the specified test files."""

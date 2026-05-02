@@ -20,12 +20,12 @@ AgenticDebuggerActionSchema = {
             },
             "action": {
                 "type": "string",
-                "enum": ["view_file", "list_directory", "search_files", "run_command", "run_tests", "submit_fix"],
+                "enum": ["view_file", "list_directory", "search_files", "run_command", "run_tests", "inspect_container", "submit_fix"],
                 "description": "The action to take.",
             },
             "path": {
                 "type": "string",
-                "description": "For view_file: file path. For list_directory: directory path. For search_files: regex pattern. For run_command: the shell command. For run_tests: space-separated test file paths. For submit_fix: leave empty.",
+                "description": "For view_file: file path. For list_directory: directory path. For search_files: regex pattern. For run_command: the shell command. For run_tests: space-separated test file paths. For inspect_container: 'logs', 'logs N', or 'exec <command>'. For submit_fix: leave empty.",
             },
             "fix_target": {
                 "type": "string",
