@@ -19,6 +19,9 @@ Problem Statement
   Provisioner.evolve   Step 2: Materialize on disk + Docker images
        │                     (no AI: skeletons, infra templates, compose, env)
        ▼
+  Stack Validation     Step 2.5: compose up + health check + infra debugger
+       │                     (proves stack runs before engineering starts)
+       ▼
   Engineer             Step 3: Per-service analyze → architecture plan → issues
        │                     (three structured AI passes)
        ▼
@@ -37,6 +40,9 @@ Problem Statement
   Phase 3 agentic      Step 7: Top-tier debugger w/ tools on remaining failures
        │                     (max_iterations=12, only if needed)
        ▼
+  Image Rebuild        Step 7.5: Rebuild Docker images with final code + deps
+       │                     (bakes engineer's changes into the images)
+       ▼
   Integration phase    Step 8: Tests against the live Docker stack
        │                     HTTPApiTester + WebUITester + AgenticDebugger
        ▼
@@ -50,6 +56,59 @@ Problem Statement
 
 Cost tracking and on-disk persistence happen alongside every step — see
 [cost_tracking.md](architecture/cost_tracking.md).
+
+### Cross-language support
+
+The pipeline is language-agnostic at the orchestration layer. Python
+(FastAPI) and TypeScript (React/Angular) are first-class, with
+language-specific components at each layer:
+
+| Layer | Python | TypeScript |
+|---|---|---|
+| Skeleton | `bizniz-skeleton-fastapi` | `bizniz-skeleton-react`, `bizniz-skeleton-angular` |
+| Test environment | `DockerPytestEnvironment` | `DockerJestEnvironment` |
+| Preflight validator | `PythonPreflightValidator` (AST) | `TypeScriptPreflightValidator` |
+| Scaffold | `.py` stubs + `__init__.py` | `.ts`/`.tsx` stubs |
+| Coder prompt | Python-specific rules + docstrings | TypeScript-specific rules + JSDoc |
+| Import tools | `search_imports`, `list_all_imports` (AST) | Future extension |
+
+Adding a new language requires: a skeleton, a test environment, a
+preflight validator, and language-specific coder/tester prompts. The
+orchestration, architect, planner, and integration layers are unchanged.
+
+### Structure — AI versus rigidity
+
+The pipeline is designed for web applications with emphasis on SaaS.
+The temptation toward fully-AI workflows is constant. The value,
+however, comes from the discipline of mixing deterministic guardrails
+with AI generation.
+
+**The core principle:** deterministic guardrails make AI *more*
+capable, not less. Without skeletons, the AI wastes tokens
+reinventing auth. Without preflight, it wastes iterations on wrong
+imports. Without stack validation, it writes code for 30 minutes
+against infrastructure that doesn't run.
+
+We rely on AI as much as possible. 100% autonomous generation is
+the aspiration. But where practical, we implement deterministic
+code to push AI to make faster, higher-quality leaps:
+
+- **Skeletons** — ship working auth, routing, DB, Docker, tests.
+  The AI extends, it doesn't reinvent.
+- **Preflight** — catch import errors statically before burning
+  test cycles. Suggest corrections with "did you mean?"
+- **Scaffold** — every file exists before AI writes code.
+  Eliminates "module not found" at import time.
+- **Stack validation** — prove infrastructure works before
+  spending on engineering. No wasted AI cost on a broken stack.
+- **Image rebuild** — bake final code into images before
+  integration. No stale-container debugging.
+- **Integration tests as source of truth** — unit tests pass
+  against mocks. Integration tests pass against reality.
+
+The premise: AI generates, deterministic code validates and
+corrects. Each guardrail exists because we measured its absence
+costing real time and money in prior runs.
 
 ---
 
@@ -106,6 +165,8 @@ Tenants/Leases → Rent → Maintenance.
    port, skeleton, image_name). Dropped services are auto-restored.
 4. `ServiceDefinition` fields normalized to lowercase (service_type,
    framework, language) via Pydantic validator.
+5. **FusionAuth** is mandatory whenever the problem involves user
+   accounts or login. The architect prompt enforces this.
 
 **M1 special case:** `evolve()` receives empty architecture → all
 services tagged `"new"` → effectively a greenfield decompose.
@@ -135,6 +196,33 @@ services tagged `"new"` → effectively a greenfield decompose.
 6. **Docker image builds** for new/extended app services.
 
 **Output:** `ProvisionResult` with per-service workspaces, image tags.
+
+---
+
+## Step 2.5: Stack validation
+
+**File:** `bizniz/provisioner/stack_validator.py`
+
+**Input:** `SystemArchitecture`, compose path, port remap
+
+**What happens:**
+1. `docker compose up -d` — bring the full stack up.
+2. **Health check** each service:
+   - Backend: HTTP `/openapi.json`
+   - Frontend: HTTP `/`
+   - Auth (FusionAuth): HTTP `/api/status`
+   - Database: TCP connection
+   - Cache: TCP connection
+3. If unhealthy: capture container logs, dispatch `AgenticDebugger`
+   against infrastructure files (Dockerfile, compose, init.sql,
+   kickstart.json). Up to 3 repair iterations.
+4. `docker compose down` — clean state for engineering.
+
+**Key insight:** the stack must be proven runnable before we spend
+AI cost on engineering. This step closes the gap where provisioning
+wrote files and built images but never verified the stack could run.
+
+**Output:** `StackValidation` with per-service health + logs.
 
 ---
 
@@ -178,7 +266,8 @@ write a stub file. Test files get pytest stubs. Every directory gets
 `__init__.py`. Issues with `action == "create"` flip to `"modify"`.
 
 This guarantees every file in the plan exists with valid imports
-before any LLM does codegen.
+before any LLM does codegen. Language-agnostic — works for Python
+(`.py`) and TypeScript (`.ts`/`.tsx`).
 
 ---
 
@@ -190,6 +279,11 @@ For each issue in topological order:
 1. `Coder.generate_multi(test_files=None)` — codegen only, no tests.
 2. Write `FileChange`s into workspace.
 3. Run preflight (Step 5.5).
+
+Coder prompt requires **docstrings on all public functions and
+classes** (Python) / **JSDoc on all exports** (TypeScript). These
+feed the `search_imports` tool so downstream agents see what a
+function does, not just its name.
 
 By the time Step 6 runs tests, every issue's target files contain
 real code, and later issues import working code from earlier ones.
@@ -209,8 +303,9 @@ Runs after code generation, before tests:
    - stdlib modules
    - PyPI (HEAD check for unknown packages)
 3. **"Did you mean?"** — for unresolved workspace imports, build a
-   `WorkspaceIndex` of all modules + exported symbols, fuzzy-match
-   with `difflib.get_close_matches`, and append suggestions:
+   `WorkspaceIndex` of all modules + exported symbols (with full
+   signatures and docstrings), fuzzy-match with
+   `difflib.get_close_matches`, and append suggestions:
    ```
    Module 'app.api.deps' not found. Did you mean:
      - from app.core.auth import get_current_user, require_roles
@@ -220,11 +315,16 @@ Runs after code generation, before tests:
    (e.g. `pydantic.py` shadowing the real pydantic).
 6. **Auto-install** — packages confirmed on PyPI get added to the
    install list.
+7. **Hint injection** — unresolved import suggestions are stored
+   and injected into the repair prompt if tests fail, so the repair
+   LLM sees the correct path instead of guessing.
 
-**Import search tool** (`bizniz/tools/import_tools.py`):
-- `build_workspace_index(path)` — indexes all modules + symbols
-- `resolve_import(module, index)` — resolves with fuzzy suggestions
-- `search_imports(symbol, index)` — finds all modules exporting a symbol
+**Import tools available to all agents** (`bizniz/tools/import_tools.py`):
+- `search_imports(symbol)` — find all modules exporting a symbol,
+  with full function signatures, parameter types, and docstrings
+- `list_all_imports(module)` — list every importable symbol in a
+  module with signatures and types
+- Available as discovery actions to coder, tester, and debugger
 
 ---
 
@@ -239,8 +339,13 @@ For each model in the escalation chain (flash → pro):
 3. **Regression detection** — baseline passing tests are re-checked
    after each issue. Regressions trigger repair.
 4. Collection errors (pytest exit code 2/4) are classified:
-   - Source import error → repair source code
+   - Source import error → repair source code (with preflight hints)
    - Test import error → regenerate tests
+
+**Execution model:** code is written on the host filesystem. Tests
+execute inside fresh Docker containers (`docker run --rm`) that
+volume-mount the workspace. Each test run starts a clean container —
+no stale state between iterations.
 
 ---
 
@@ -248,10 +353,28 @@ For each model in the escalation chain (flash → pro):
 
 For tickets still failing after Phase 2:
 1. `AgenticDebugger` with full tools: `view_file`, `list_directory`,
-   `search_files`, `run_command`, `run_tests`, `inspect_container`.
+   `search_files`, `search_imports`, `list_all_imports`,
+   `run_command`, `run_tests`, `inspect_container`.
 2. `inspect_container` runs commands inside the Docker container
    (where dependencies are installed).
-3. `max_iterations=12` per ticket.
+3. `search_imports` and `list_all_imports` provide full function
+   signatures with docstrings — no guessing import paths.
+4. `max_iterations=12` per ticket.
+
+---
+
+## Step 7.5: Image rebuild
+
+**File:** `bizniz/architect/architect.py`
+
+After engineering completes, rebuild Docker images for all services
+that passed. This bakes the engineer's final code + any new
+dependencies into the images so integration tests run against the
+real artifact, not the skeleton's initial state.
+
+Uses `docker compose build <service_names>` — only rebuilds changed
+services. Infrastructure images (postgres, fusionauth, redis) are
+not rebuilt.
 
 ---
 
@@ -259,8 +382,8 @@ For tickets still failing after Phase 2:
 
 **File:** `bizniz/integration/runner.py`
 
-Runs after all services pass engineering (unit tests). Tests the
-services against each other in the live Docker stack.
+Runs after image rebuild. Tests the services against each other in
+the live Docker stack.
 
 ### 8a: Contract capture
 1. Bring up backend containers.
@@ -279,7 +402,7 @@ services against each other in the live Docker stack.
 7. If tests fail → dispatch `AgenticDebugger`:
    - Server logs (last 60 lines) auto-prepended to error output
    - Debugger reads code, submits `code_fixes`
-   - **Container restarted** to pick up fixes
+   - **Image rebuilt + container recreated** (`--build --force-recreate`)
    - Tests re-run in sidecar
    - Up to 3 iterations
 

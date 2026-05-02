@@ -45,8 +45,21 @@ SKELETON.md contracts, captured OpenAPI, and a per-run report.
   `tests/e2e/property_manager/`. Real Postgres, JWT auth, two roles,
   4 domains. Exercises planner → evolve → engineer → integration →
   debugger across multiple milestones.
-- **Pending**: clone react skeleton manually, run V12 with skeleton
-  frontend to exercise WebUITester + Playwright debugger path.
+- **Stack validation**: provisioner now brings stack up + health
+  checks all services before engineering starts. Infra debugger
+  dispatched on failure (Dockerfile, compose, init.sql).
+- **Image rebuild**: Docker images rebuilt after engineering so
+  integration tests run against final code, not skeleton state.
+  Integration repair uses `--build --force-recreate` (not restart).
+- **Import tools**: `search_imports` and `list_all_imports` available
+  to all agents (coder, tester, debugger). Full signatures + docstrings.
+  Preflight "did you mean?" hints injected into repair prompts.
+- **FusionAuth skeleton**: fastapi skeleton delegates all auth to
+  FusionAuth. No local JWT minting or password hashing.
+- **Case normalization**: `ServiceDefinition` normalizes service_type,
+  framework, language to lowercase via Pydantic validator. Template
+  lookup case-insensitive with aliases.
+- **Pending**: run Property Manager M1 end-to-end with all fixes.
 
 ## Where things live
 
