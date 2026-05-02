@@ -20,6 +20,8 @@ from bizniz.tools.discovery_tools import (
     tool_view_file,
     tool_list_directory,
     tool_search_files,
+    tool_search_imports,
+    tool_list_all_imports,
 )
 
 
@@ -251,6 +253,12 @@ def run_tool_loop(
         elif action_type == "search_files":
             log(f"{agent_name}: searching for '{path}'")
             result = tool_search_files(workspace, path)
+        elif action_type == "search_imports":
+            log(f"{agent_name}: searching imports for '{path}'")
+            result = tool_search_imports(workspace, path)
+        elif action_type == "list_all_imports":
+            log(f"{agent_name}: listing imports from '{path}'")
+            result = tool_list_all_imports(workspace, path)
         elif extra_tool_handlers and action_type in extra_tool_handlers:
             log(f"{agent_name}: {action_type} {path[:80] if path else ''}")
             result = extra_tool_handlers[action_type](action, messages)

@@ -248,6 +248,24 @@ class AgenticDebugger(BaseDebugger):
                     "content": f"[TOOL RESULT: search_files(\"{path}\")]\n{result}",
                 })
 
+            elif action_type == "search_imports":
+                self._log(f"AgenticDebugger: searching imports for '{path}'")
+                from bizniz.tools.discovery_tools import tool_search_imports
+                result = tool_search_imports(self._workspace, path)
+                messages.append({
+                    "role": "user",
+                    "content": f"[TOOL RESULT: search_imports(\"{path}\")]\n{result}",
+                })
+
+            elif action_type == "list_all_imports":
+                self._log(f"AgenticDebugger: listing imports from '{path}'")
+                from bizniz.tools.discovery_tools import tool_list_all_imports
+                result = tool_list_all_imports(self._workspace, path)
+                messages.append({
+                    "role": "user",
+                    "content": f"[TOOL RESULT: list_all_imports(\"{path}\")]\n{result}",
+                })
+
             elif action_type == "run_command":
                 self._log(f"AgenticDebugger: running command: {path[:80]}")
                 result = self._tool_run_command(path)

@@ -7,7 +7,7 @@ agent-specific terminal actions, compatible with OpenAI's strict mode.
 
 
 # Discovery tool actions available to all agents
-DISCOVERY_ACTIONS = ["view_file", "list_directory", "search_files"]
+DISCOVERY_ACTIONS = ["view_file", "list_directory", "search_files", "search_imports", "list_all_imports"]
 
 
 def build_tool_action_schema(
@@ -53,7 +53,7 @@ def build_tool_action_schema(
         },
         "path": {
             "type": "string",
-            "description": "File path, directory path, or search pattern (depending on action). Empty string if not applicable.",
+            "description": "File path, directory path, search pattern, symbol name, or module path (depending on action). Empty string if not applicable.",
         },
     }
 

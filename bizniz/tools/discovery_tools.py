@@ -84,6 +84,30 @@ def tool_search_files(workspace: BaseWorkspace, pattern: str) -> str:
         return f"ERROR: Search failed: {e}"
 
 
+def tool_search_imports(workspace: BaseWorkspace, symbol_name: str) -> str:
+    """Search for a symbol across all workspace modules. Returns full signatures + docstrings."""
+    try:
+        if not symbol_name:
+            return "ERROR: No symbol name provided. Usage: search_imports with path set to a symbol name (e.g. 'get_current_user')."
+        from bizniz.tools.import_tools import build_workspace_index, search_imports
+        index = build_workspace_index(workspace.root)
+        return search_imports(symbol_name, index)
+    except Exception as e:
+        return f"ERROR: Import search failed: {e}"
+
+
+def tool_list_all_imports(workspace: BaseWorkspace, module_path: str) -> str:
+    """List every importable symbol in a module with full signatures."""
+    try:
+        if not module_path:
+            return "ERROR: No module path provided. Usage: list_all_imports with path set to a module path (e.g. 'app.core.auth')."
+        from bizniz.tools.import_tools import build_workspace_index, list_all_imports
+        index = build_workspace_index(workspace.root)
+        return list_all_imports(module_path, index)
+    except Exception as e:
+        return f"ERROR: Import listing failed: {e}"
+
+
 def build_filtered_file_tree(workspace: BaseWorkspace) -> str:
     """Build a filtered file tree string, excluding noisy directories."""
     try:

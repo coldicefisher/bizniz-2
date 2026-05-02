@@ -33,6 +33,18 @@ Search for a regex pattern across all files in the workspace. Returns matching l
 - Set `path` to the regex pattern to search for (e.g., "class Expense", "def add_expense", "from.*import.*Expense")
 - Use this to find where functions/classes are defined, trace imports, find usages
 
+### search_imports
+Find where a symbol (function, class, variable) is defined in the workspace, with full signatures and docstrings.
+- Set `action` to "search_imports"
+- Set `path` to the symbol name (e.g., "get_current_user", "User", "require_roles")
+- Use this BEFORE guessing import paths — it tells you exactly where to import from
+
+### list_all_imports
+List every importable symbol in a specific module with full signatures.
+- Set `action` to "list_all_imports"
+- Set `path` to the module path (e.g., "app.core.auth", "app.models.user")
+- Use this to discover what a module offers before importing from it
+
 ### run_command
 Execute any shell command in the workspace directory (on the HOST, not inside Docker).
 - Set `action` to "run_command"
