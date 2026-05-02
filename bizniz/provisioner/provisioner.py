@@ -226,6 +226,10 @@ class Provisioner:
             desired_names = {s.name for s in architecture.services}
             self._prune_orphan_images(state, desired_names)
 
+        # 10. Pre-pull sidecar images used by integration tests so the
+        #     first test run doesn't burn its timeout on image download.
+        self._prepull_sidecar_images(architecture)
+
         return ProvisionResult(
             project_name=project_name,
             project_slug=architecture.project_slug,
@@ -824,6 +828,44 @@ class Provisioner:
         except Exception as e:
             self._log(f"Provisioner: image scan failed: {e}")
             return []
+
+    # Sidecar images used by integration tests. Pre-pulled during
+    # provisioning so the first test run doesn't timeout on download.
+    _SIDECAR_IMAGES = [
+        "python:3.12-slim",                         # pytest + httpx sidecar
+        "mcr.microsoft.com/playwright:v1.40.0-focal",  # Playwright sidecar
+    ]
+
+    def _prepull_sidecar_images(self, architecture: SystemArchitecture) -> None:
+        """Pre-pull Docker images used by integration test sidecars."""
+        log = self._log
+        has_backend = any(s.service_type == "backend" for s in architecture.services)
+        has_frontend = any(s.service_type == "frontend" for s in architecture.services)
+
+        images_to_pull = []
+        if has_backend:
+            images_to_pull.append("python:3.12-slim")
+        if has_frontend:
+            images_to_pull.append("mcr.microsoft.com/playwright:v1.40.0-focal")
+
+        for image in images_to_pull:
+            try:
+                # Check if already cached
+                check = subprocess.run(
+                    ["docker", "image", "inspect", image],
+                    capture_output=True, timeout=10,
+                )
+                if check.returncode == 0:
+                    continue
+
+                log(f"Provisioner: pre-pulling sidecar image {image}...")
+                subprocess.run(
+                    ["docker", "pull", image],
+                    capture_output=True, text=True, timeout=300,
+                )
+                log(f"Provisioner: pre-pulled {image}")
+            except Exception as e:
+                log(f"Provisioner: pre-pull of {image} failed ({e}) — integration tests may be slow on first run")
 
     def _prune_orphan_images(
         self, state: ProvisionState, desired_names: set,

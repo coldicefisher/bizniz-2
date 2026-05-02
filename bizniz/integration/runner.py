@@ -97,7 +97,7 @@ def _run_playwright_in_sidecar(
     workspace_path: Path,
     compose_path: str,
     on_status: Optional[Callable[[str], None]] = None,
-    timeout_s: float = 240.0,
+    timeout_s: float = 600.0,
 ) -> tuple[bool, str]:
     """Run Playwright tests against the live frontend container via a
     sidecar joined to the compose project's network. Mirrors the
@@ -333,7 +333,7 @@ def run_integration_phase(
     _log(on_status, "Integration: bringing up full stack for test execution...")
     up = subprocess.run(
         ["docker", "compose", "-f", compose_path, "up", "-d"],
-        capture_output=True, text=True, timeout=240,
+        capture_output=True, text=True, timeout=600,
     )
     if up.returncode != 0:
         _log(
