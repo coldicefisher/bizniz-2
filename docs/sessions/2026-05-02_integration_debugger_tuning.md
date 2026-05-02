@@ -87,15 +87,14 @@ project and ran the standalone harness:
 | `bd24e90` | Container restart + prompt tuning + harness |
 | `5ad097a` | Auto-tailed server logs in error output |
 | `f11ba67` | inspect_container tool + compose_path wiring |
+| `dbaf827` | Workspace: exclude node_modules via os.walk pruning (527 → 27 files) |
+| `d305148` | Debug loop: manifests first, lockfiles excluded, src/ recognized |
+| `f1fae9d` | Workspace: comprehensive framework cache exclusions (Angular, Astro, Vue, Svelte, etc.) |
 
-## Known issues surfaced
+## Known issues remaining
 
 - **React skeleton missing**: GitHub auth failed on auto-clone, fell
   back to generated boilerplate. Need to manually clone or fix auth.
-- **527 source files in frontend repair context**: `node_modules`
-  is being included in the workspace file listing, bloating the
-  repair prompt. Needs filtering in `_list_relevant_source_files`
-  or workspace-level exclusion.
 - **Frontend never responded on `/`**: the generated boilerplate
   frontend (no skeleton) doesn't build/serve correctly in the Docker
   container. Vite config / index.html likely misconfigured.
@@ -108,4 +107,4 @@ project and ran the standalone harness:
 1. Clone the react skeleton manually and re-run to get skeleton-based
    frontend + Playwright tests exercising the debugger
 2. Confirm `inspect_container exec` works when the debugger uses it
-3. Watch for the node_modules bloat in frontend repair context
+3. Confirm workspace filtering keeps frontend repair prompts lean

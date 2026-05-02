@@ -33,9 +33,13 @@ SKELETON.md contracts, captured OpenAPI, and a per-run report.
 - **Standalone harness**: `examples/debug_integration.py` runs only
   the integration phase against an already-built project — no need
   to re-pay engineering cost while tuning the debugger.
+- **Workspace filtering fixed**: `list_relative_files()` now prunes
+  node_modules + framework caches (Angular, Astro, SvelteKit, Vue/Nuxt,
+  Turbo, Parcel, etc.) at the walk level. V11 frontend: 527 → 27 files.
+  Debug loop also sends manifests (package.json, requirements.txt)
+  first, excludes lockfiles.
 - **Pending**: clone react skeleton manually, run V12 with skeleton
   frontend to exercise WebUITester + Playwright debugger path.
-  Also: node_modules bloat in frontend repair context needs fixing.
 
 ## Where things live
 
