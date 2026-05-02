@@ -540,6 +540,28 @@ class Architect(BaseAIAgent):
                         if ps and ps.image_name:
                             s.image_name = ps.image_name
 
+                    # Step 2b.5: validate the stack comes up healthy
+                    tracker.set_phase("stack_validation")
+                    compose_path = str(project.dev_root / "docker-compose.yml")
+                    stack_healthy = self._validate_and_repair_stack(
+                        architecture=evolved_arch,
+                        compose_path=compose_path,
+                        project_root=project.root,
+                        port_remap=provision_result.port_remap,
+                    )
+                    if not stack_healthy:
+                        log(f"Architect: milestone {m_label} — stack validation failed, skipping engineering")
+                        if not continue_on_failure:
+                            job_status = "failed"
+                            results.append(ArchitectResult(
+                                project_name=project_name,
+                                architecture=evolved_arch,
+                                service_results=[],
+                                project_root=str(project.root),
+                            ))
+                            break
+                    tracker.set_phase(None)
+
                     # Step 2c: engineer dispatch on changed services only
                     changed_services = [
                         s for s in evolved_arch.services
@@ -852,6 +874,20 @@ class Architect(BaseAIAgent):
                 if ps and ps.image_name:
                     service.image_name = ps.image_name
 
+            # Step 2.5: Validate the stack comes up healthy before engineering
+            compose_path = str(project.dev_root / "docker-compose.yml")
+            _captured_compose_path = compose_path
+            tracker.set_phase("stack_validation")
+            stack_healthy = self._validate_and_repair_stack(
+                architecture=architecture,
+                compose_path=compose_path,
+                project_root=project.root,
+                port_remap=provision_result.port_remap,
+            )
+            if not stack_healthy:
+                log("Architect: stack validation failed — continuing with engineering (may fail at integration)")
+            tracker.set_phase(None)
+
             # Step 3: Dispatch engineers for application services (in dependency order)
             app_services = [s for s in architecture.services if s.name in service_workspaces]
             service_layers = _sort_services_by_dependency(app_services)
@@ -995,6 +1031,120 @@ class Architect(BaseAIAgent):
                     log(f"Architect: run report written to {md_path}")
                 except Exception as e:
                     log(f"Architect: run report write failed ({e}) — continuing")
+
+    # ── Stack validation ────────────────────────────────────────────────────────
+
+    def _validate_and_repair_stack(
+        self,
+        architecture: SystemArchitecture,
+        compose_path: str,
+        project_root: Path,
+        port_remap: Optional[Dict] = None,
+        max_repair_iterations: int = 3,
+    ) -> bool:
+        """Bring the stack up, health-check, and auto-repair on failure.
+
+        Returns True if the stack is healthy (possibly after repairs).
+        If unhealthy after all iterations, logs the failure and returns False
+        — the caller can decide whether to abort or continue.
+        """
+        from bizniz.provisioner.stack_validator import validate_stack
+        from bizniz.integration.debug_loop import repair_integration_failure
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        validation = validate_stack(
+            architecture=architecture,
+            compose_path=compose_path,
+            on_status=self._on_status_message,
+            port_remap=port_remap,
+        )
+
+        if validation.healthy:
+            return True
+
+        # Stack is unhealthy — try to repair infrastructure files
+        if self._integration_debugger_factory is None:
+            log("Architect: stack unhealthy but no debugger factory — cannot auto-repair")
+            log(f"Architect: unhealthy services: {[s.name for s in validation.unhealthy_services]}")
+            return False
+
+        failure_output = validation.failure_summary()
+        log(f"Architect: stack unhealthy — {len(validation.unhealthy_services)} service(s) failed. Dispatching infra debugger...")
+
+        # Build a workspace rooted at the project for infra file access
+        from bizniz.workspace.local_workspace import LocalWorkspace
+        infra_workspace = LocalWorkspace(root=str(project_root), create=False)
+
+        def _debugger_factory():
+            return self._integration_debugger_factory(infra_workspace)
+
+        def _rerun_stack():
+            """Re-validate the stack after a repair attempt."""
+            revalidation = validate_stack(
+                architecture=architecture,
+                compose_path=compose_path,
+                on_status=self._on_status_message,
+                port_remap=port_remap,
+                service_timeout_s=45.0,
+            )
+            if revalidation.healthy:
+                return True, "Stack is healthy"
+            return False, revalidation.failure_summary()
+
+        def _capture_infra_logs():
+            """Capture logs from all unhealthy services."""
+            parts = []
+            for svc in validation.unhealthy_services:
+                from bizniz.provisioner.stack_validator import _capture_logs
+                logs = _capture_logs(compose_path, svc.name)
+                if logs.strip():
+                    parts.append(f"=== {svc.name} ===\n{logs}")
+            return "\n\n".join(parts)
+
+        # Use the first unhealthy service as the "service" for the debug loop
+        # (the debugger can edit any file in the project workspace)
+        from bizniz.architect.types import ServiceDefinition as _SD
+        infra_service = _SD(
+            name="infrastructure",
+            service_type="backend",
+            framework="docker",
+            language="yaml",
+            description="Docker infrastructure (Dockerfile, compose, init scripts)",
+            workspace_name=".",
+        )
+
+        repaired, final_output = repair_integration_failure(
+            service=infra_service,
+            workspace=infra_workspace,
+            failure_output=failure_output,
+            integration_test_rel="(infrastructure stack validation)",
+            debugger_factory=_debugger_factory,
+            rerun_tests=_rerun_stack,
+            on_status=self._on_status_message,
+            max_iterations=max_repair_iterations,
+            capture_logs=_capture_infra_logs,
+            compose_path=compose_path,
+        )
+
+        if repaired:
+            log("Architect: stack repaired — infrastructure is healthy")
+            # Rebuild images if Dockerfiles were modified
+            try:
+                import subprocess
+                subprocess.run(
+                    ["docker", "compose", "-f", compose_path, "build"],
+                    capture_output=True, text=True, timeout=300,
+                )
+            except Exception:
+                pass
+        else:
+            log("Architect: stack repair failed — infrastructure still unhealthy")
+            log(f"Architect: last failure:\n{final_output[-500:] if final_output else '(no output)'}")
+
+        return repaired
 
     # ── Private helpers ────────────────────────────────────────────────────────
 
