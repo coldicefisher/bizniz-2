@@ -684,12 +684,16 @@ class Architect(BaseAIAgent):
                             if (project.root / s.workspace_name).is_dir()
                         }
                         try:
+                            # Use the milestone's problem_slice so integration
+                            # tests only verify this milestone's scope, not the
+                            # full project. M1 tests auth, not M3's rent collection.
+                            milestone_problem = milestone.problem_slice or problem_statement
                             log(f"Architect: milestone {m_label} — running integration phase...")
                             m_results = run_integration_phase(
                                 architecture=evolved_arch,
                                 service_results=list(m_results),
                                 project_root=project.root,
-                                problem_statement=problem_statement,
+                                problem_statement=milestone_problem,
                                 compose_path=compose_path,
                                 http_api_tester_factory=self._http_api_tester_factory,
                                 service_workspaces=all_workspaces,
