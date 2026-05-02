@@ -8,6 +8,13 @@ from typing import Dict, List, Optional
 
 from bizniz.architect.types import ServiceDefinition, SystemArchitecture
 
+# Common aliases for framework names the AI may return in
+# non-canonical form (e.g. "PostgreSQL" instead of "postgres").
+_ALIASES = {
+    "postgresql": "postgres",
+    "redis-server": "redis",
+}
+
 
 @dataclass
 class TemplateContext:
@@ -27,11 +34,15 @@ class TemplateContext:
     port_mappings: List[tuple] = field(default_factory=list)
 
     def find_by_framework(self, framework: str) -> Optional[ServiceDefinition]:
-        """Find a sibling service by framework. Returns None if absent."""
+        """Find a sibling service by framework (case-insensitive). Returns None if absent."""
         if self.architecture is None:
             return None
+        target = framework.lower()
+        target = _ALIASES.get(target, target)
         for s in self.architecture.services:
-            if s.framework == framework and s.name != self.service.name:
+            key = s.framework.lower()
+            key = _ALIASES.get(key, key)
+            if key == target and s.name != self.service.name:
                 return s
         return None
 
@@ -89,8 +100,15 @@ def register(name: str, template: InfraTemplate) -> None:
 
 
 def lookup(framework: str) -> Optional[InfraTemplate]:
-    """Find a template by framework name. Returns None when no match."""
-    return _REGISTRY.get(framework)
+    """Find a template by framework name (case-insensitive + aliases).
+
+    The architect AI may return "FusionAuth" or "PostgreSQL" while
+    templates register as "fusionauth" and "postgres". Normalizing
+    to lowercase + aliasing prevents silent misses.
+    """
+    key = framework.lower()
+    key = _ALIASES.get(key, key)
+    return _REGISTRY.get(key)
 
 
 def all_templates() -> Dict[str, InfraTemplate]:
