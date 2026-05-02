@@ -113,16 +113,35 @@ class BaseWorkspace:
         """Create a directory inside the workspace."""
         self.path(path).mkdir(parents=True, exist_ok=True)
 
+    # Directories excluded from file listing — these are never source
+    # code and can contain tens of thousands of files (node_modules
+    # alone caused 527-file prompts in V11's frontend repair context).
+    _EXCLUDE_DIRS = frozenset({
+        "node_modules", "__pycache__", ".pytest_cache", ".git",
+        ".bizniz", ".egg-info", "dist", "build", ".next", ".nuxt",
+        ".venv", "venv",
+    })
+
+    def _walk_files(self):
+        """Walk workspace files, skipping excluded directories."""
+        for dirpath, dirnames, filenames in os.walk(self._root):
+            # Prune excluded dirs in-place so os.walk doesn't descend
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in self._EXCLUDE_DIRS
+            ]
+            for fname in filenames:
+                yield Path(dirpath) / fname
+
     def list_files(self) -> List[Path]:
-        """Return all files in the workspace."""
-        return [p for p in self._root.rglob("*") if p.is_file()]
+        """Return all files in the workspace (excludes node_modules, __pycache__, etc.)."""
+        return list(self._walk_files())
 
     def list_relative_files(self) -> List[str]:
-        """Return files relative to workspace root."""
+        """Return files relative to workspace root (excludes node_modules, __pycache__, etc.)."""
         return [
             str(p.relative_to(self._root))
-            for p in self._root.rglob("*")
-            if p.is_file()
+            for p in self._walk_files()
         ]
 
     # ------------------------------------------------------------------
