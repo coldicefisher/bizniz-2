@@ -198,6 +198,7 @@ class CodingOrchestrator:
         self._editable_install_failed = False  # skip pip install -e . after first failure
         self._test_scaffold = ""  # cached scaffold from coder for test regeneration
         self._readonly_filter_warning = ""  # set when read-only changes are filtered from repair
+        self._preflight_issues = []  # unresolved import issues with "did you mean?" hints
 
         # Override system prompts for non-Python languages
         if language != "python":
@@ -1762,6 +1763,18 @@ class CodingOrchestrator:
         # Truncate error output — keep head (summary) + tail (most relevant failures)
         truncated_error = _truncate_error(failure_output)
 
+        # Inject preflight "did you mean?" hints so the repair LLM knows
+        # the correct import paths instead of guessing the same wrong ones.
+        preflight_issues = getattr(self, "_preflight_issues", None)
+        if preflight_issues:
+            hints = "\n".join(f"  - {issue}" for issue in preflight_issues)
+            truncated_error = (
+                f"=== Import resolution hints (from preflight) ===\n"
+                f"{hints}\n\n"
+                f"=== Error output ===\n"
+                f"{truncated_error}"
+            )
+
         # If previous repair had read-only changes filtered, warn the LLM
         if self._readonly_filter_warning:
             truncated_error = self._readonly_filter_warning + "\n" + truncated_error
@@ -2778,6 +2791,10 @@ class CodingOrchestrator:
 
         if result.import_rewrites or result.stubs_created or result.issues or result.shadow_files_removed or result.packages_to_install:
             log(result.summary())
+
+        # Store unresolved issues so the repair loop can inject
+        # "did you mean?" hints into the error context.
+        self._preflight_issues = result.issues
 
         return current_files
 
