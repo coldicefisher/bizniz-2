@@ -148,6 +148,10 @@ class PythonPreflightValidator(BasePreflightValidator):
                 result.stubs_created.append(stub)
                 all_files[stub.filepath] = stub.content
             else:
+                # Enhance with "did you mean?" suggestions
+                issue.detail = self._add_import_suggestions(
+                    issue.import_name, issue.detail,
+                )
                 result.issues.append(issue)
 
         # Check for missing __init__.py files
@@ -592,3 +596,20 @@ class PythonPreflightValidator(BasePreflightValidator):
                 ))
 
         return stubs
+
+    def _add_import_suggestions(self, import_name: str, detail: str) -> str:
+        """Enhance an unresolved import error with 'did you mean?' suggestions."""
+        try:
+            from bizniz.tools.import_tools import (
+                build_workspace_index,
+                resolve_import,
+                format_resolution_hint,
+            )
+            index = build_workspace_index(self._workspace.root)
+            resolution = resolve_import(import_name, index)
+            if not resolution.resolved and resolution.suggestions:
+                hint = format_resolution_hint(resolution)
+                return f"{detail}\n{hint}"
+        except Exception:
+            pass
+        return detail
