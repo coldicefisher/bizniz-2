@@ -99,37 +99,18 @@ def _run_playwright_in_sidecar(
     on_status: Optional[Callable[[str], None]] = None,
     timeout_s: float = 600.0,
 ) -> tuple[bool, str]:
-    """Run Playwright tests against the live frontend container via a
-    sidecar joined to the compose project's network. Mirrors the
-    pytest sidecar pattern: install deps at run time, run the tests,
-    capture output.
+    """Run Playwright tests against the live frontend container via the
+    pre-built Playwright sidecar joined to the compose network.
+
+    Uses ``bizniz-test-playwright:latest`` which has @playwright/test
+    pre-installed. No runtime npm install.
     """
     project_name = _compose_project_name(compose_path)
     network = f"{project_name}_app-network"
     base_url = f"http://{service.name}:{service.port}"
 
-    # The sidecar installs @playwright/test on top of the official
-    # Playwright image (which already has browsers + system deps).
-    # Pinning version keeps the install fast and reproducible.
-    # Write a minimal playwright.config.ts that points testDir at
-    # tests/integration/ — without a config, Playwright's CLI picks
-    # an unhelpful default and reports "No tests found".
-    # Install @playwright/test inside the workspace so its test
-    # runner can find the project's tsconfig.json — without that,
-    # Node refuses to load .ts files and Playwright reports
-    # "Unknown file extension". --no-save keeps package.json clean.
-    # Plain CommonJS config — TS at config-load time isn't supported
-    # (Playwright's transform applies to test files, not config).
-    # We use a workspace-local config path since /tmp would be
-    # outside Node's resolution context.
-    install_cmd = "npm install --silent --no-save @playwright/test@1.40.0"
-    # .cjs extension forces CommonJS parsing regardless of the
-    # workspace's package.json "type" field. (Vite frontends often
-    # set "type": "module" which would break a plain .js config.)
-    # Using `printf` rather than heredoc — heredoc inside a shell
-    # `-c` arg requires EOF on its own line, but the && chaining
-    # we need puts content on the same line, swallowing the rest
-    # of the script as heredoc body. (Lost ~30 minutes to this.)
+    # Write a minimal Playwright config. .cjs forces CommonJS parsing
+    # regardless of the workspace's package.json "type" field.
     config_body = (
         'module.exports = { testDir: "tests/integration", '
         'testMatch: ["**/*.spec.cjs", "**/*.spec.js"], '
@@ -140,7 +121,7 @@ def _run_playwright_in_sidecar(
     )
     write_config = f"printf '%s' {shlex.quote(config_body)} > playwright.smoke.config.cjs"
     run_cmd = (
-        f"cd /workspace && {install_cmd} && {write_config} && "
+        f"cd /workspace && {write_config} && "
         f"FRONTEND_URL={shlex.quote(base_url)} "
         f"npx playwright test --config=playwright.smoke.config.cjs"
     )
@@ -151,7 +132,7 @@ def _run_playwright_in_sidecar(
         "-v", f"{workspace_path}:/workspace",
         "-w", "/workspace",
         "--ipc=host",
-        "mcr.microsoft.com/playwright:v1.40.0-focal",
+        PLAYWRIGHT_SIDECAR_IMAGE,
         "sh", "-c", run_cmd,
     ]
 
@@ -167,6 +148,11 @@ def _run_playwright_in_sidecar(
     return proc.returncode == 0, output
 
 
+# Pre-built sidecar images (built by docker/test-sidecars/build.sh)
+PYTEST_SIDECAR_IMAGE = "bizniz-test-pytest:latest"
+PLAYWRIGHT_SIDECAR_IMAGE = "bizniz-test-playwright:latest"
+
+
 def _run_pytest_in_sidecar(
     service: ServiceDefinition,
     workspace_path: Path,
@@ -174,29 +160,25 @@ def _run_pytest_in_sidecar(
     on_status: Optional[Callable[[str], None]] = None,
     timeout_s: float = 180.0,
 ) -> tuple[bool, str]:
-    """Run ``pytest tests/integration/`` inside a sidecar python:3.12
-    container joined to the compose project's network. Returns
+    """Run ``pytest tests/integration/`` inside the pre-built pytest
+    sidecar joined to the compose project's network. Returns
     ``(passed, output)``.
 
-    Why a sidecar instead of running pytest on the host: we need DNS
-    resolution of the compose service names (e.g. ``backend:8000``)
-    and we don't want to require pytest+httpx on the host. The
-    sidecar gets both via pip install at run time.
+    Uses ``bizniz-test-pytest:latest`` which has pytest + httpx
+    pre-installed. No runtime pip install.
     """
     project_name = _compose_project_name(compose_path)
     network = f"{project_name}_app-network"
 
     base_url = f"http://{service.name}:{service.port}"
-    install_cmd = "pip install --quiet pytest httpx"
     # --noconftest: HTTPApiTester writes self-contained tests with
     # their own httpx.Client fixture. Loading the project's
     # tests/conftest.py would require installing the service's full
-    # requirements (sqlalchemy, fastapi, etc.) in the sidecar — a
-    # ~30-60s tax for fixtures the integration tests don't use.
+    # requirements (sqlalchemy, fastapi, etc.) in the sidecar.
     # --rootdir tests/integration: keeps pytest from walking up
     # looking for parent conftest/pyproject.
     run_cmd = (
-        f"cd /workspace && {install_cmd} && "
+        f"cd /workspace && "
         f"API_BASE_URL={shlex.quote(base_url)} "
         f"pytest tests/integration/ --noconftest --rootdir tests/integration "
         f"-v --tb=short --no-header"
@@ -207,7 +189,7 @@ def _run_pytest_in_sidecar(
         "--network", network,
         "-v", f"{workspace_path}:/workspace",
         "-w", "/workspace",
-        "python:3.12-slim",
+        PYTEST_SIDECAR_IMAGE,
         "sh", "-c", run_cmd,
     ]
 

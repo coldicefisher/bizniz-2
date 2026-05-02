@@ -1,0 +1,13 @@
+# Pre-built integration test sidecar for Python backends.
+# Used by bizniz/integration/runner.py for backend integration tests.
+#
+# Build: docker build -t bizniz-test-pytest:latest -f Dockerfile.pytest .
+# Usage: docker run --rm --network <compose_network> -v <workspace>:/workspace bizniz-test-pytest:latest
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir \
+    pytest==8.3.0 \
+    httpx==0.28.1 \
+    pytest-asyncio==0.24.0
+
+WORKDIR /workspace

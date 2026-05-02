@@ -1,0 +1,10 @@
+# Pre-built integration test sidecar for frontend UI tests.
+# Used by bizniz/integration/runner.py for Playwright integration tests.
+#
+# Build: docker build -t bizniz-test-playwright:latest -f Dockerfile.playwright .
+# Usage: docker run --rm --network <compose_network> -v <workspace>:/workspace bizniz-test-playwright:latest
+FROM mcr.microsoft.com/playwright:v1.40.0-focal
+
+RUN npm install -g @playwright/test@1.40.0
+
+WORKDIR /workspace

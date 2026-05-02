@@ -829,28 +829,26 @@ class Provisioner:
             self._log(f"Provisioner: image scan failed: {e}")
             return []
 
-    # Sidecar images used by integration tests. Pre-pulled during
-    # provisioning so the first test run doesn't timeout on download.
-    _SIDECAR_IMAGES = [
-        "python:3.12-slim",                         # pytest + httpx sidecar
-        "mcr.microsoft.com/playwright:v1.40.0-focal",  # Playwright sidecar
-    ]
-
     def _prepull_sidecar_images(self, architecture: SystemArchitecture) -> None:
-        """Pre-pull Docker images used by integration test sidecars."""
+        """Verify pre-built test sidecar images exist.
+
+        These are built once by ``docker/test-sidecars/build.sh`` and
+        reused across all projects. If missing, build them automatically.
+        """
         log = self._log
         has_backend = any(s.service_type == "backend" for s in architecture.services)
         has_frontend = any(s.service_type == "frontend" for s in architecture.services)
 
-        images_to_pull = []
+        images = []
         if has_backend:
-            images_to_pull.append("python:3.12-slim")
+            images.append(("bizniz-test-pytest:latest", "Dockerfile.pytest"))
         if has_frontend:
-            images_to_pull.append("mcr.microsoft.com/playwright:v1.40.0-focal")
+            images.append(("bizniz-test-playwright:latest", "Dockerfile.playwright"))
 
-        for image in images_to_pull:
+        sidecars_dir = Path(__file__).resolve().parent.parent.parent / "docker" / "test-sidecars"
+
+        for image, dockerfile in images:
             try:
-                # Check if already cached
                 check = subprocess.run(
                     ["docker", "image", "inspect", image],
                     capture_output=True, timeout=10,
@@ -858,14 +856,19 @@ class Provisioner:
                 if check.returncode == 0:
                     continue
 
-                log(f"Provisioner: pre-pulling sidecar image {image}...")
-                subprocess.run(
-                    ["docker", "pull", image],
-                    capture_output=True, text=True, timeout=300,
-                )
-                log(f"Provisioner: pre-pulled {image}")
+                # Image not found — build it
+                log(f"Provisioner: building test sidecar {image}...")
+                if sidecars_dir.exists():
+                    subprocess.run(
+                        ["docker", "build", "-t", image, "-f",
+                         str(sidecars_dir / dockerfile), str(sidecars_dir)],
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    log(f"Provisioner: built {image}")
+                else:
+                    log(f"Provisioner: {sidecars_dir} not found — cannot build {image}")
             except Exception as e:
-                log(f"Provisioner: pre-pull of {image} failed ({e}) — integration tests may be slow on first run")
+                log(f"Provisioner: sidecar image {image} check/build failed ({e})")
 
     def _prune_orphan_images(
         self, state: ProvisionState, desired_names: set,
