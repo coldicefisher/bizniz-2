@@ -592,6 +592,28 @@ class Architect(BaseAIAgent):
                         getattr(r, "success", False) for r in m_results
                     ) if m_results else True
 
+                    # Rebuild Docker images after engineering so the
+                    # containers reflect the final code + dependencies
+                    # (not the skeleton's initial state).
+                    if milestone_succeeded and m_results:
+                        tracker.set_phase("image_rebuild")
+                        compose_path = str(project.dev_root / "docker-compose.yml")
+                        app_svc_names = [
+                            s.name for s in changed_services
+                            if s.service_type in {"backend", "frontend", "worker"}
+                        ]
+                        if app_svc_names:
+                            log(f"Architect: rebuilding images for {', '.join(app_svc_names)}...")
+                            try:
+                                import subprocess
+                                subprocess.run(
+                                    ["docker", "compose", "-f", compose_path, "build"] + app_svc_names,
+                                    capture_output=True, text=True, timeout=300,
+                                )
+                            except Exception as e:
+                                log(f"Architect: image rebuild failed ({e}) — integration may use stale images")
+                        tracker.set_phase(None)
+
                     # Integration phase: run integration tests against the
                     # live stack after engineering passes. Same logic as
                     # build() — tests are the source of truth.
@@ -603,7 +625,6 @@ class Architect(BaseAIAgent):
                         from bizniz.integration import run_integration_phase
                         from bizniz.workspace.local_workspace import LocalWorkspace as _LW
                         tracker.set_phase("integration")
-                        compose_path = str(project.dev_root / "docker-compose.yml")
                         # Build workspace map for ALL app services (not just
                         # changed ones) — integration tests verify the whole stack.
                         all_app_services = [
@@ -943,6 +964,26 @@ class Architect(BaseAIAgent):
 
             compose_path = str(project.dev_root / "docker-compose.yml")
             _captured_compose_path = compose_path
+
+            # Rebuild images after engineering so containers have the
+            # final code + dependencies (not the skeleton's initial state).
+            if service_results and any(getattr(r, "success", False) for r in service_results):
+                tracker.set_phase("image_rebuild")
+                rebuild_names = [
+                    s.name for s in app_services
+                    if any(r.service_name == s.name and r.success for r in service_results)
+                ]
+                if rebuild_names:
+                    log(f"Architect: rebuilding images for {', '.join(rebuild_names)}...")
+                    try:
+                        import subprocess as _sp
+                        _sp.run(
+                            ["docker", "compose", "-f", compose_path, "build"] + rebuild_names,
+                            capture_output=True, text=True, timeout=300,
+                        )
+                    except Exception as e:
+                        log(f"Architect: image rebuild failed ({e}) — integration may use stale images")
+                tracker.set_phase(None)
 
             # Post-build integration phase: bring the stack up, capture
             # backend contracts, dispatch HTTPApiTester for each
