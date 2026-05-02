@@ -124,7 +124,11 @@ does in step 4 above).
    with a `router` attr; React auto-mounts `src/routes/*.tsx` (excluding
    `*.test.tsx`/`*.spec.tsx`) with `default` export of `RouteEntry[]`
    or single `RouteEntry`. Both warn loudly on misshapen modules.
-3. **Non-destructive editing** — engineer's prompt has a HARD
+3. **FusionAuth for all auth** — the fastapi skeleton delegates auth
+   to FusionAuth. `get_current_user` and `require_roles` validate
+   FusionAuth-issued RS256 JWTs. The skeleton never mints tokens or
+   hashes passwords. Local User table is a sync copy for FK relationships.
+4. **Non-destructive editing** — engineer's prompt has a HARD
    CONSTRAINT against silent rewrites of skeleton-shipped files.
    Prefer adding new files in extension points.
 4. **Strict infrastructure** — architect prompt says ONLY add DB/auth/
@@ -146,6 +150,9 @@ does in step 4 above).
   the V9 silent-skip cost us most of a session.
 - Don't forget to set `allowedHosts: true` in any new Vite-based
   frontend skeleton. Default Vite blocks docker DNS hostnames.
+- Don't reintroduce local JWT minting or password hashing in the
+  fastapi skeleton. FusionAuth owns identity. The skeleton's
+  `app/core/auth.py` only validates JWTs, never creates them.
 - Don't remove the container restart from integration debug `_rerun`
   callbacks. Without it, uvicorn serves stale code and the
   debugger's fixes never take effect (V11 lesson — cost us 3
