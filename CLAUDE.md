@@ -70,8 +70,10 @@ SKELETON.md contracts, captured OpenAPI, and a per-run report.
   skeleton → Angular Material (already had it, now documented).
 - **Milestone-scoped integration**: integration tests receive
   `milestone.problem_slice`, not the full problem statement.
-- **Pending**: clean M1 run with all fixes (FusionAuth sequencing,
-  NODE_PATH, milestone scoping). Then M2 evolve test.
+- **FusionAuth sequencing fixed**: stack stays up through FusionAuth
+  agent, tears down after. No more "Connection refused."
+- **Pending**: build UX designer agent (screenshot → evaluate →
+  design directives). Then clean M1 run with full pipeline. Then M2.
 
 ## Where things live
 
