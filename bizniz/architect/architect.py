@@ -541,13 +541,18 @@ class Architect(BaseAIAgent):
                             s.image_name = ps.image_name
 
                     # Step 2b.5: validate the stack comes up healthy
+                    # Keep the stack up if FusionAuth needs configuring
                     tracker.set_phase("stack_validation")
                     compose_path = str(project.dev_root / "docker-compose.yml")
+                    has_auth = any(
+                        s.service_type == "auth" for s in evolved_arch.services
+                    )
                     stack_healthy = self._validate_and_repair_stack(
                         architecture=evolved_arch,
                         compose_path=compose_path,
                         project_root=project.root,
                         port_remap=provision_result.port_remap,
+                        keep_up=has_auth,  # don't tear down if FusionAuth needs setup
                     )
                     if not stack_healthy:
                         log(f"Architect: milestone {m_label} — stack validation failed, skipping engineering")
@@ -563,9 +568,7 @@ class Architect(BaseAIAgent):
                     tracker.set_phase(None)
 
                     # Step 2b.6: configure FusionAuth (roles, test users, contract)
-                    has_auth = any(
-                        s.service_type == "auth" for s in evolved_arch.services
-                    )
+                    # Stack is still up from validation — FusionAuth is reachable
                     if has_auth and stack_healthy:
                         tracker.set_phase("fusionauth_provision")
                         try:
@@ -608,6 +611,12 @@ class Architect(BaseAIAgent):
                         except Exception as e:
                             log(f"Architect: FusionAuth provisioning failed ({e}) — continuing")
                         tracker.set_phase(None)
+
+                    # Tear down stack after FusionAuth setup (or after validation
+                    # if no auth service). Clean state for engineering.
+                    if has_auth and stack_healthy:
+                        from bizniz.provisioner.stack_validator import teardown_stack
+                        teardown_stack(compose_path, self._on_status_message)
 
                     # Step 2c: engineer dispatch on changed services only
                     changed_services = [
@@ -1133,6 +1142,7 @@ class Architect(BaseAIAgent):
         project_root: Path,
         port_remap: Optional[Dict] = None,
         max_repair_iterations: int = 3,
+        keep_up: bool = False,
     ) -> bool:
         """Bring the stack up, health-check, and auto-repair on failure.
 
@@ -1152,6 +1162,7 @@ class Architect(BaseAIAgent):
             compose_path=compose_path,
             on_status=self._on_status_message,
             port_remap=port_remap,
+            teardown=not keep_up,
         )
 
         if validation.healthy:

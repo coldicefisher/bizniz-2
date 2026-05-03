@@ -107,14 +107,30 @@ def _capture_logs(compose_path: str, service_name: str) -> str:
         return f"(could not read logs: {e})"
 
 
+def teardown_stack(
+    compose_path: str,
+    on_status: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Tear down the compose stack."""
+    _log(on_status, "Stack: tearing down...")
+    try:
+        subprocess.run(
+            ["docker", "compose", "-f", compose_path, "down"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except Exception as e:
+        _log(on_status, f"Stack: teardown error ({e})")
+
+
 def validate_stack(
     architecture: SystemArchitecture,
     compose_path: str,
     on_status: Optional[Callable[[str], None]] = None,
     service_timeout_s: float = 60.0,
     port_remap: Optional[Dict[str, tuple]] = None,
+    teardown: bool = True,
 ) -> StackValidation:
-    """Bring the stack up, health-check every service, tear down.
+    """Bring the stack up, health-check every service, optionally tear down.
 
     Returns a StackValidation with per-service health status and
     logs for any unhealthy services.
@@ -197,15 +213,10 @@ def validate_stack(
             check_type=check_type, logs=logs,
         ))
 
-    # Tear down — clean state for engineering
-    _log(on_status, "Stack validation: tearing down...")
-    try:
-        subprocess.run(
-            ["docker", "compose", "-f", compose_path, "down"],
-            capture_output=True, text=True, timeout=120,
-        )
-    except Exception:
-        pass
+    # Tear down — clean state for engineering (unless caller needs
+    # the stack up for further provisioning like FusionAuth setup)
+    if teardown:
+        teardown_stack(compose_path, on_status)
 
     status = "HEALTHY" if all_healthy else "UNHEALTHY"
     _log(on_status, f"Stack validation: {status} ({len(results)} services checked)")
