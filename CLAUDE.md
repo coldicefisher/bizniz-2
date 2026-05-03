@@ -1,4 +1,8 @@
-# Bizniz — Claude Quickstart
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Quickstart
 
 This file orients a Claude session in the bizniz repo. Read this
 first; it tells you what to load next.
@@ -72,8 +76,15 @@ SKELETON.md contracts, captured OpenAPI, and a per-run report.
   `milestone.problem_slice`, not the full problem statement.
 - **FusionAuth sequencing fixed**: stack stays up through FusionAuth
   agent, tears down after. No more "Connection refused."
-- **Pending**: build UX designer agent (screenshot → evaluate →
-  design directives). Then clean M1 run with full pipeline. Then M2.
+- **UX Designer agent**: screenshots frontend views via Playwright
+  sidecar → sends to Gemini vision for design evaluation → dispatches
+  Coder to apply fixes → re-screenshots to verify. Pipeline placement:
+  after image rebuild, before integration tests. Uses `gemini-flash`
+  for the screenshot script and vision evaluation.
+- **Gemini vision**: GeminiClient now supports `get_text_with_images()`
+  for multimodal prompts. 19 unit + 4 functional tests.
+- **Pending**: clean M1 run with full pipeline (including UX designer).
+  Then M2.
 
 ## Where things live
 
@@ -88,6 +99,71 @@ SKELETON.md contracts, captured OpenAPI, and a per-run report.
 | Portable memory copy (this repo) | `docs/memory/` |
 | Session narratives | `docs/changes/<date>_<topic>.md` |
 | Strategy / plans | `docs/changes/2026-05-01_*.md` (pet-groomer, build-vs-evolve) |
+
+## Code architecture
+
+The `bizniz/` package is the orchestration engine. Key abstractions:
+
+- **BaseAIClient** (`core/client.py`) — abstract interface for LLM calls.
+  Implementations: `clients/chatgpt/` (OpenAI), `clients/claude/`,
+  `clients/gemini/`. All return `(text, job_id, output_messages)`.
+- **BaseAIAgent** (`core/agent.py`) — base for all agents. Holds a
+  client, an execution environment, and a workspace. Manages message
+  history and retries.
+- **BaseWorkspace** (`workspace/base_workspace.py`) — file I/O abstraction.
+  `LocalWorkspace` is the concrete impl. Each service gets its own workspace
+  rooted at `<project>/<workspace_name>/`.
+- **BaseExecutionEnvironment** (`environment/`) — code execution sandbox.
+  `DockerPytestEnvironment` and `DockerJestEnvironment` run tests in
+  containers; `PythonSandboxExecutionEnvironment` runs lightweight checks
+  on the host.
+- **tool_loop** (`tools/tool_loop.py`) — shared agentic conversation loop
+  used by coder, tester, and debugger. LLM calls discovery tools
+  (`view_file`, `list_directory`, `search_files`, `search_imports`) before
+  submitting final output.
+
+**Pipeline agents (in execution order):**
+
+1. **Planner** (`planner/`) — decomposes project into milestones
+2. **Architect** (`architect/`) — decomposes milestone into services, orchestrates full pipeline
+3. **Provisioner** (`provisioner/`) — materializes project on disk (skeletons, compose, Dockerfiles)
+4. **FusionAuth agent** (`provisioner/fusionauth_agent.py`) — configures auth roles/users
+5. **Engineer** (`engineer/`) — analyzes service → issues → dispatches orchestrator
+6. **CodingOrchestrator** (`orchestrator/`) — runs Coder→Tester→Debugger loop per issue
+7. **UX Designer** (`ux_designer/`) — screenshots frontend views, evaluates design via vision AI, dispatches fixes
+8. **HTTPApiTester** / **WebUITester** (`integration/`) — writes + runs integration tests
+9. **AgenticDebugger** (`agents/debugger/agentic.py`) — repairs integration failures with discovery tools
+
+**Config system:** `bizniz.yaml` in CWD (or parent dirs) → `BiznizConfig`
+Pydantic model (`config/bizniz_config.py`). Routes models by prefix:
+`claude-*` → Claude, `gemini-*` → Gemini, else → OpenAI. Key fields:
+`architect_model`, `engineer_model`, `planner_model`, `debugger_model`,
+`models` (escalation progression), `coder_models`, `tester_models`.
+
+## Testing
+
+```bash
+# Run all unit tests (excludes functional tests that call real APIs)
+.venv/bin/python -m pytest bizniz/ -q
+
+# Run a specific test file
+.venv/bin/python -m pytest bizniz/integration/tests/test_runner.py -q
+
+# Run a single test by name
+.venv/bin/python -m pytest bizniz/engineer/tests/test_dependency_graph.py -k "test_cycle" -q
+
+# Run functional tests (call real APIs — needs keys in .env)
+.venv/bin/python -m pytest -m functional -q
+
+# Run the standard test suite (as listed in the repo)
+.venv/bin/python -m pytest bizniz/integration/tests/ \
+  bizniz/architect/tests/ bizniz/workspace/tests/ \
+  bizniz/engineer/tests/ -q
+```
+
+Tests live alongside their module: `bizniz/<module>/tests/`. Functional
+tests (real API calls) are marked `@pytest.mark.functional` and excluded
+by default via `pyproject.toml` `addopts = "-m 'not functional'"`.
 
 ## Read these next, in order
 

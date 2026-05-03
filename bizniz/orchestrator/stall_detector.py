@@ -21,6 +21,7 @@ class StallDetector:
         self._error_signature_counts: Dict[str, int] = {}
         self._consecutive_failures: int = 0
         self._repair_history: List[str] = []
+        self._debugger_fix_hashes: List[str] = []
 
     def record_failure(self, code_hash: str, failure_output: str) -> None:
         """Record a failed repair attempt. Updates all tracking state."""
@@ -75,12 +76,64 @@ class StallDetector:
         """Return list of repair attempt summaries."""
         return list(self._repair_history)
 
-    def reset_counters(self) -> None:
-        """Reset stall counters after escalation. Keeps repair_history for deep diagnosis context."""
+    def record_diagnosis(self, diagnosis) -> None:
+        """Append a debugger diagnosis + fixes to the repair history
+        so the next debugger invocation sees what was already tried.
+
+        Also records a hash of the code_fixes for duplicate detection.
+        """
+        parts = [f"DEBUGGER DIAGNOSIS: {diagnosis.root_cause_category} "
+                 f"(confidence: {diagnosis.confidence})"]
+        if diagnosis.diagnosis:
+            parts.append(f"  Analysis: {diagnosis.diagnosis[:300]}")
+        if diagnosis.fix_plan:
+            parts.append("  Fix plan: " + "; ".join(diagnosis.fix_plan[:5]))
+        if diagnosis.code_fixes:
+            fix_summary = []
+            for cf in diagnosis.code_fixes:
+                preview = cf.new_content[:100].replace("\n", " ")
+                fix_summary.append(f"    {cf.filepath}: {preview}...")
+            parts.append("  Code fixes applied:\n" + "\n".join(fix_summary))
+
+        self._repair_history.append("\n".join(parts))
+
+        # Hash the code_fixes for duplicate detection
+        if diagnosis.code_fixes:
+            fix_sig = "|".join(
+                f"{cf.filepath}:{hashlib.sha256(cf.new_content.encode()).hexdigest()}"
+                for cf in sorted(diagnosis.code_fixes, key=lambda f: f.filepath)
+            )
+        else:
+            # No code fixes — hash the diagnosis text + fix plan
+            fix_sig = f"{diagnosis.root_cause_category}|{diagnosis.diagnosis}|{'|'.join(diagnosis.fix_plan)}"
+        self._debugger_fix_hashes.append(
+            hashlib.sha256(fix_sig.encode()).hexdigest()
+        )
+
+    def is_duplicate_fix(self) -> bool:
+        """True if the most recent debugger fix matches any prior one."""
+        if len(self._debugger_fix_hashes) < 2:
+            return False
+        latest = self._debugger_fix_hashes[-1]
+        return latest in self._debugger_fix_hashes[:-1]
+
+    def reset_counters(self, keep_error_signatures: bool = False) -> None:
+        """Reset stall counters. Keeps repair_history and debugger_fix_hashes always.
+
+        Parameters
+        ----------
+        keep_error_signatures:
+            If True, preserve error signature counts so the detector
+            fires immediately if the same error recurs. Use this after
+            the agentic debugger runs (same model, same problem — don't
+            waste 3 more iterations re-confirming). Pass False (default)
+            on model escalation where the new model deserves a clean slate.
+        """
         self._previous_code_hash = None
         self._code_hash_repeat_count = 0
-        self._error_signature_counts.clear()
         self._consecutive_failures = 0
+        if not keep_error_signatures:
+            self._error_signature_counts.clear()
 
     @staticmethod
     def _compute_error_signature(failure_output: str) -> str:

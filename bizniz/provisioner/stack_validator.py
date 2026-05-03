@@ -129,22 +129,39 @@ def validate_stack(
     service_timeout_s: float = 60.0,
     port_remap: Optional[Dict[str, tuple]] = None,
     teardown: bool = True,
+    skip_compose_up: bool = False,
 ) -> StackValidation:
     """Bring the stack up, health-check every service, optionally tear down.
 
     Returns a StackValidation with per-service health status and
     logs for any unhealthy services.
-    """
-    _log(on_status, "Stack validation: bringing up all services...")
 
-    # Bring up
-    try:
-        proc = subprocess.run(
-            ["docker", "compose", "-f", compose_path, "up", "-d"],
-            capture_output=True, text=True, timeout=240,
-        )
-        if proc.returncode != 0:
-            _log(on_status, f"Stack validation: compose up failed (rc={proc.returncode})")
+    skip_compose_up: if True, assume the stack is already running
+    (caller already did ``docker compose up``). Skip straight to
+    health checks.
+    """
+    if not skip_compose_up:
+        _log(on_status, "Stack validation: bringing up all services...")
+
+        # Bring up
+        try:
+            proc = subprocess.run(
+                ["docker", "compose", "-f", compose_path, "up", "-d"],
+                capture_output=True, text=True, timeout=240,
+            )
+            if proc.returncode != 0:
+                _log(on_status, f"Stack validation: compose up failed (rc={proc.returncode})")
+                return StackValidation(
+                    healthy=False,
+                    compose_path=compose_path,
+                    services=[ServiceHealth(
+                        name="(compose)",
+                        healthy=False,
+                        check_type="compose_up",
+                        logs=(proc.stdout or "") + (proc.stderr or ""),
+                    )],
+                )
+        except subprocess.TimeoutExpired:
             return StackValidation(
                 healthy=False,
                 compose_path=compose_path,
@@ -152,23 +169,14 @@ def validate_stack(
                     name="(compose)",
                     healthy=False,
                     check_type="compose_up",
-                    logs=(proc.stdout or "") + (proc.stderr or ""),
+                    logs="docker compose up timed out after 240s",
                 )],
             )
-    except subprocess.TimeoutExpired:
-        return StackValidation(
-            healthy=False,
-            compose_path=compose_path,
-            services=[ServiceHealth(
-                name="(compose)",
-                healthy=False,
-                check_type="compose_up",
-                logs="docker compose up timed out after 240s",
-            )],
-        )
 
-    # Wait a moment for services to initialize
-    time.sleep(3)
+        # Wait a moment for services to initialize
+        time.sleep(3)
+    else:
+        _log(on_status, "Stack validation: stack already up, checking health...")
 
     # Health check each service
     results = []

@@ -95,6 +95,7 @@ class Architect(BaseAIAgent):
         http_api_tester_factory: Optional[Callable] = None,
         integration_debugger_factory: Optional[Callable] = None,
         web_ui_tester_factory: Optional[Callable] = None,
+        ux_designer_factory: Optional[Callable] = None,
     ):
         super().__init__(
             client=client,
@@ -110,6 +111,7 @@ class Architect(BaseAIAgent):
         self._http_api_tester_factory = http_api_tester_factory  # None → integration phase skipped
         self._integration_debugger_factory = integration_debugger_factory  # None → no auto-repair on integration failure
         self._web_ui_tester_factory = web_ui_tester_factory  # None → no Playwright UI tests
+        self._ux_designer_factory = ux_designer_factory  # None → no UX review phase
 
     @property
     def _process_system_prompt(self) -> str:
@@ -533,26 +535,37 @@ class Architect(BaseAIAgent):
                     tracker.set_phase("provisioner.evolve")
                     provision_result = provisioner.evolve(evolved_arch, project_name)
 
-                    # Stamp image_name from provision back onto the arch
-                    ps_by_name = {ps.name: ps for ps in provision_result.services}
-                    for s in evolved_arch.services:
-                        ps = ps_by_name.get(s.name)
-                        if ps and ps.image_name:
-                            s.image_name = ps.image_name
-
-                    # Step 2b.5: validate the stack comes up healthy
-                    # Keep the stack up if FusionAuth needs configuring
+                    # Step 2b.5: build + bring up the stack in one shot,
+                    # then capture image names from the running containers.
+                    # This replaces both the old image stamp and the
+                    # separate stack validation compose-up.
                     tracker.set_phase("stack_validation")
                     compose_path = str(project.dev_root / "docker-compose.yml")
                     has_auth = any(
                         s.service_type == "auth" for s in evolved_arch.services
                     )
+
+                    image_map = _compose_up_and_capture_images(
+                        compose_path, on_status=self._on_status_message,
+                    )
+                    for s in evolved_arch.services:
+                        img = image_map.get(s.name)
+                        if img:
+                            s.image_name = img
+                    # Also stamp back onto provision result for downstream
+                    ps_by_name = {ps.name: ps for ps in provision_result.services}
+                    for name, img in image_map.items():
+                        ps = ps_by_name.get(name)
+                        if ps:
+                            ps.image_name = img
+
                     stack_healthy = self._validate_and_repair_stack(
                         architecture=evolved_arch,
                         compose_path=compose_path,
                         project_root=project.root,
                         port_remap=provision_result.port_remap,
                         keep_up=has_auth,  # don't tear down if FusionAuth needs setup
+                        skip_compose_up=True,  # already up from the build above
                     )
                     if not stack_healthy:
                         log(f"Architect: milestone {m_label} — stack validation failed, skipping engineering")
@@ -668,6 +681,74 @@ class Architect(BaseAIAgent):
                                 )
                             except Exception as e:
                                 log(f"Architect: image rebuild failed ({e}) — integration may use stale images")
+                        tracker.set_phase(None)
+
+                    # UX review phase: screenshot frontends, evaluate
+                    # design via vision AI, and dispatch code fixes.
+                    # Runs while stack is up, before integration tests.
+                    if (
+                        milestone_succeeded
+                        and m_results
+                        and self._ux_designer_factory is not None
+                    ):
+                        from bizniz.ux_designer import UXDesigner
+                        from bizniz.ux_designer.ux_designer import run_ux_review
+                        from bizniz.workspace.local_workspace import LocalWorkspace as _LW
+                        tracker.set_phase("ux_review")
+                        all_app_services = [
+                            s for s in evolved_arch.services
+                            if s.service_type in {"backend", "frontend", "worker"}
+                        ]
+                        all_workspaces = {
+                            s.name: _LW(root=str(project.root / s.workspace_name))
+                            for s in all_app_services
+                            if (project.root / s.workspace_name).is_dir()
+                        }
+                        try:
+                            milestone_problem = milestone.problem_slice or problem_statement
+                            log(f"Architect: milestone {m_label} — running UX review phase...")
+                            # Bring stack up for screenshots
+                            import subprocess as _sp
+                            _sp.run(
+                                ["docker", "compose", "-f", compose_path, "up", "-d"],
+                                capture_output=True, text=True, timeout=120,
+                            )
+                            from bizniz.integration.runner import _wait_http_ok
+                            for fe in [s for s in evolved_arch.services if s.service_type == "frontend" and s.port]:
+                                _wait_http_ok(f"http://localhost:{fe.port}/", deadline_s=30)
+
+                            ux_results = run_ux_review(
+                                architecture=evolved_arch,
+                                service_workspaces=all_workspaces,
+                                compose_path=compose_path,
+                                problem_statement=milestone_problem,
+                                milestone_scope=milestone.problem_slice or "",
+                                on_status=self._on_status_message,
+                                **self._ux_designer_factory(),
+                            )
+                            for ux_r in ux_results:
+                                log(
+                                    f"Architect: UX review '{ux_r['service']}' — "
+                                    f"score={ux_r.get('final_score')}/10, "
+                                    f"fixes={ux_r.get('fixes_applied', 0)}"
+                                )
+
+                            # If UX designer made changes, rebuild images
+                            if any(r.get("fixes_applied", 0) > 0 for r in ux_results):
+                                log("Architect: UX fixes applied — rebuilding frontend images...")
+                                fe_names = [s.name for s in evolved_arch.services if s.service_type == "frontend"]
+                                _sp.run(
+                                    ["docker", "compose", "-f", compose_path, "build"] + fe_names,
+                                    capture_output=True, text=True, timeout=300,
+                                )
+
+                            # Tear down stack (integration phase will bring it up again)
+                            _sp.run(
+                                ["docker", "compose", "-f", compose_path, "down"],
+                                capture_output=True, text=True, timeout=60,
+                            )
+                        except Exception as e:
+                            log(f"Architect: milestone {m_label} UX review raised ({e}) — continuing")
                         tracker.set_phase(None)
 
                     # Integration phase: run integration tests against the
@@ -1045,6 +1126,56 @@ class Architect(BaseAIAgent):
                         log(f"Architect: image rebuild failed ({e}) — integration may use stale images")
                 tracker.set_phase(None)
 
+            # UX review phase: screenshot frontends, evaluate design
+            # via vision AI, dispatch code fixes. Runs after image
+            # rebuild and before integration tests.
+            if (
+                self._ux_designer_factory is not None
+                and service_results
+                and any(getattr(r, "success", False) for r in service_results)
+            ):
+                from bizniz.ux_designer.ux_designer import run_ux_review
+                tracker.set_phase("ux_review")
+                try:
+                    log("Architect: running UX review phase...")
+                    import subprocess as _sp2
+                    _sp2.run(
+                        ["docker", "compose", "-f", compose_path, "up", "-d"],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    from bizniz.integration.runner import _wait_http_ok
+                    for fe in [s for s in architecture.services if s.service_type == "frontend" and s.port]:
+                        _wait_http_ok(f"http://localhost:{fe.port}/", deadline_s=30)
+
+                    ux_results = run_ux_review(
+                        architecture=architecture,
+                        service_workspaces=service_workspaces,
+                        compose_path=compose_path,
+                        problem_statement=problem_statement,
+                        on_status=self._on_status_message,
+                        **self._ux_designer_factory(),
+                    )
+                    for ux_r in ux_results:
+                        log(
+                            f"Architect: UX review '{ux_r['service']}' — "
+                            f"score={ux_r.get('final_score')}/10, "
+                            f"fixes={ux_r.get('fixes_applied', 0)}"
+                        )
+                    if any(r.get("fixes_applied", 0) > 0 for r in ux_results):
+                        log("Architect: UX fixes applied — rebuilding frontend images...")
+                        fe_names = [s.name for s in architecture.services if s.service_type == "frontend"]
+                        _sp2.run(
+                            ["docker", "compose", "-f", compose_path, "build"] + fe_names,
+                            capture_output=True, text=True, timeout=300,
+                        )
+                    _sp2.run(
+                        ["docker", "compose", "-f", compose_path, "down"],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                except Exception as e:
+                    log(f"Architect: UX review phase raised ({e}) — continuing")
+                tracker.set_phase(None)
+
             # Post-build integration phase: bring the stack up, capture
             # backend contracts, dispatch HTTPApiTester for each
             # backend to author + run real integration tests, fail any
@@ -1143,12 +1274,16 @@ class Architect(BaseAIAgent):
         port_remap: Optional[Dict] = None,
         max_repair_iterations: int = 3,
         keep_up: bool = False,
+        skip_compose_up: bool = False,
     ) -> bool:
         """Bring the stack up, health-check, and auto-repair on failure.
 
         Returns True if the stack is healthy (possibly after repairs).
         If unhealthy after all iterations, logs the failure and returns False
         — the caller can decide whether to abort or continue.
+
+        skip_compose_up: if True, assume stack is already running (caller
+        did ``docker compose up --build``). Skip straight to health checks.
         """
         from bizniz.provisioner.stack_validator import validate_stack
         from bizniz.integration.debug_loop import repair_integration_failure
@@ -1163,6 +1298,7 @@ class Architect(BaseAIAgent):
             on_status=self._on_status_message,
             port_remap=port_remap,
             teardown=not keep_up,
+            skip_compose_up=skip_compose_up,
         )
 
         if validation.healthy:
@@ -1595,6 +1731,63 @@ class Architect(BaseAIAgent):
                     lines.append(f"  {','.join(methods):<20s} {path}")
             lines.append("")
         return "\n".join(lines) + "\n"
+
+
+def _compose_up_and_capture_images(
+    compose_path: str,
+    on_status: Optional[Callable] = None,
+    timeout: int = 300,
+) -> Dict[str, str]:
+    """``docker compose up -d --build``, then capture image names from
+    running containers.
+
+    Returns a dict of {service_name: image_name} for every container
+    the compose project started.
+    """
+    import subprocess
+
+    def _log(msg: str) -> None:
+        if on_status:
+            on_status(msg)
+
+    _log("Stack: building and bringing up all services...")
+    try:
+        proc = subprocess.run(
+            ["docker", "compose", "-f", compose_path, "up", "-d", "--build"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if proc.returncode != 0:
+            _log(f"Stack: compose up --build failed (rc={proc.returncode})")
+    except subprocess.TimeoutExpired:
+        _log(f"Stack: compose up --build timed out after {timeout}s")
+
+    # Capture image names from running containers:
+    # docker compose ps --format json gives us service + image
+    image_map: Dict[str, str] = {}
+    try:
+        proc = subprocess.run(
+            ["docker", "compose", "-f", compose_path, "ps", "--format", "json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            import json as _json
+            # Output can be a JSON array or newline-delimited JSON objects
+            text = proc.stdout.strip()
+            if text.startswith("["):
+                containers = _json.loads(text)
+            else:
+                containers = [_json.loads(line) for line in text.splitlines() if line.strip()]
+            for c in containers:
+                svc = c.get("Service") or c.get("service", "")
+                img = c.get("Image") or c.get("image", "")
+                if svc and img:
+                    image_map[svc] = img
+    except Exception as e:
+        _log(f"Stack: failed to capture images from compose ps ({e})")
+
+    if image_map:
+        _log(f"Stack: captured {len(image_map)} image(s): {', '.join(f'{k}={v}' for k, v in image_map.items())}")
+    return image_map
 
 
 def _sort_services_by_dependency(services):

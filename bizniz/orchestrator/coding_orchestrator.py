@@ -461,7 +461,7 @@ class CodingOrchestrator:
                         log=log,
                     )
                 )
-            except AIInsufficientFunds:
+            except (AIInsufficientFunds, OrchestratorMaxIterationsError):
                 raise
             except Exception as e:
                 log(f"Orchestrator: repair failed ({type(e).__name__}: {e}), retrying...")
@@ -848,7 +848,7 @@ class CodingOrchestrator:
                                 log=log,
                             )
                         )
-                    except AIInsufficientFunds:
+                    except (AIInsufficientFunds, OrchestratorMaxIterationsError):
                         raise
                     except Exception as e:
                         log(f"Orchestrator: regression repair failed ({type(e).__name__}: {e}), retrying...")
@@ -1208,7 +1208,7 @@ class CodingOrchestrator:
                         log=log,
                     )
                 )
-            except AIInsufficientFunds:
+            except (AIInsufficientFunds, OrchestratorMaxIterationsError):
                 raise
             except Exception as e:
                 log(f"Orchestrator: repair failed ({type(e).__name__}: {e}), retrying...")
@@ -1434,7 +1434,25 @@ class CodingOrchestrator:
                     log(f"Orchestrator: agentic diagnosis — {agentic_diagnosis.root_cause_category}, "
                         f"fix_target={agentic_diagnosis.fix_target} "
                         f"(confidence: {agentic_diagnosis.confidence})")
+
+                    # Record diagnosis + fixes so the next debugger sees history
+                    self._stall_detector.record_diagnosis(agentic_diagnosis)
+
+                    # Bail if the debugger is proposing the same fix again
+                    if self._stall_detector.is_duplicate_fix():
+                        n_fixes = len(agentic_diagnosis.code_fixes)
+                        log(
+                            f"Orchestrator: debugger proposed the same fix twice "
+                            f"({n_fixes} file(s)) — bailing on this ticket"
+                        )
+                        raise OrchestratorMaxIterationsError(
+                            f"Debugger stuck: same fix proposed twice for "
+                            f"{agentic_diagnosis.root_cause_category}"
+                        )
+
                 except AIInsufficientFunds:
+                    raise
+                except OrchestratorMaxIterationsError:
                     raise
                 except Exception as e:
                     log(f"Orchestrator: agentic debugger failed ({type(e).__name__}: {e}), proceeding...")
@@ -1462,9 +1480,12 @@ class CodingOrchestrator:
                     log(f"Orchestrator: diagnosis identified missing package '{pkg}', installing...")
                     self._install_package(pkg, log)
 
-            # Escalate repair model
-            self._try_escalate_model(log, progression=self._repair_progression, agent="repair")
-            self._stall_detector.reset_counters()
+            # Escalate repair model — if the model actually changed,
+            # give it a clean error-signature slate. If it didn't (already
+            # at top tier), keep error signatures so the stall detector
+            # fires immediately on the next identical failure.
+            escalated = self._try_escalate_model(log, progression=self._repair_progression, agent="repair")
+            self._stall_detector.reset_counters(keep_error_signatures=not escalated)
 
             # If the issue was purely a dependency problem, re-run without repair
             if (diagnosis

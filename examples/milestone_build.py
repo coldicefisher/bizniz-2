@@ -317,6 +317,22 @@ def main():
             on_status_message=log,
         )
 
+    def _make_ux_designer_kwargs():
+        """Return kwargs dict for run_ux_review (vision_client + coder_factory)."""
+        from bizniz.clients.gemini.gemini_client import GeminiClient
+        vision_client = GeminiClient(model_name="gemini-flash")
+        def _coder_for_ux(workspace):
+            from bizniz.agents.coder.coder import Coder
+            return Coder(
+                client=config.make_client(),
+                environment=DockerExecutionEnvironment(),
+                workspace=workspace,
+            )
+        return {
+            "vision_client": vision_client,
+            "coder_factory": _coder_for_ux,
+        }
+
     architect = Architect(
         client=architect_client,
         environment=PythonSandboxExecutionEnvironment(),
@@ -327,6 +343,7 @@ def main():
         http_api_tester_factory=lambda workspace: _make_http_api_tester(workspace),
         integration_debugger_factory=lambda workspace: _make_integration_debugger(workspace),
         web_ui_tester_factory=lambda workspace: _make_web_ui_tester(workspace),
+        ux_designer_factory=_make_ux_designer_kwargs,
         project_parent=str(project_parent),
         on_status_message=log,
     )

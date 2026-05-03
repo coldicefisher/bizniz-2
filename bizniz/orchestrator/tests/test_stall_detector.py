@@ -121,6 +121,38 @@ def test_reset_counters_keeps_repair_history():
     assert len(sd.repair_history) == 3
 
 
+def test_reset_counters_keep_error_signatures():
+    sd = StallDetector(error_sig_threshold=3, consecutive_fail_threshold=100)
+    # Accumulate 2 error sigs (not yet at threshold of 3)
+    sd.record_failure("h1", PYTEST_OUTPUT_A)
+    sd.record_failure("h2", PYTEST_OUTPUT_A)
+    assert not sd.is_stalled
+
+    # Reset but keep error signatures
+    sd.reset_counters(keep_error_signatures=True)
+    assert sd._consecutive_failures == 0
+    assert len(sd._error_signature_counts) > 0  # preserved
+
+    # One more same-error failure should now hit threshold
+    sd.record_failure("h3", PYTEST_OUTPUT_A)
+    assert sd.is_stalled
+    assert "same error pattern repeated" in sd.stall_reason
+
+
+def test_reset_counters_clear_error_signatures():
+    sd = StallDetector(error_sig_threshold=3, consecutive_fail_threshold=100)
+    sd.record_failure("h1", PYTEST_OUTPUT_A)
+    sd.record_failure("h2", PYTEST_OUTPUT_A)
+
+    # Full reset clears error signatures
+    sd.reset_counters(keep_error_signatures=False)
+    assert sd._error_signature_counts == {}
+
+    # Need 3 fresh failures to trigger
+    sd.record_failure("h3", PYTEST_OUTPUT_A)
+    assert not sd.is_stalled
+
+
 def test_stall_reason_multiple_signals():
     # Use thresholds that will all trigger at the same time
     sd = StallDetector(code_hash_threshold=2, error_sig_threshold=3, consecutive_fail_threshold=3)
@@ -169,6 +201,78 @@ def test_compute_error_signature():
     expected_str = "|".join(test_names) + "||" + "|".join(error_types)
     expected_sig = hashlib.sha256(expected_str.encode()).hexdigest()
     assert sig == expected_sig
+
+
+def test_record_diagnosis_adds_to_history():
+    from bizniz.agents.debugger.types import AgenticDiagnosis, CodeFix
+    sd = StallDetector()
+
+    diag = AgenticDiagnosis(
+        diagnosis="Import path is wrong",
+        root_cause_category="import_error",
+        fix_target="code",
+        confidence="high",
+        fix_plan=["Fix the import in rbac_demo.py"],
+        code_fixes=[CodeFix(filepath="app/routes/rbac.py", new_content="from app.core import auth")],
+    )
+    sd.record_diagnosis(diag)
+
+    assert len(sd.repair_history) == 1
+    assert "DEBUGGER DIAGNOSIS" in sd.repair_history[0]
+    assert "import_error" in sd.repair_history[0]
+    assert "app/routes/rbac.py" in sd.repair_history[0]
+
+
+def test_is_duplicate_fix_detects_same_fix():
+    from bizniz.agents.debugger.types import AgenticDiagnosis, CodeFix
+    sd = StallDetector()
+
+    fix = [CodeFix(filepath="app/routes/rbac.py", new_content="from app.core import auth")]
+    diag1 = AgenticDiagnosis(
+        root_cause_category="import_error", confidence="high", code_fixes=fix,
+    )
+    diag2 = AgenticDiagnosis(
+        root_cause_category="import_error", confidence="high", code_fixes=fix,
+    )
+
+    sd.record_diagnosis(diag1)
+    assert sd.is_duplicate_fix() is False  # first time
+
+    sd.record_diagnosis(diag2)
+    assert sd.is_duplicate_fix() is True  # same fix proposed twice
+
+
+def test_is_duplicate_fix_allows_different_fixes():
+    from bizniz.agents.debugger.types import AgenticDiagnosis, CodeFix
+    sd = StallDetector()
+
+    diag1 = AgenticDiagnosis(
+        root_cause_category="import_error", confidence="high",
+        code_fixes=[CodeFix(filepath="app/routes/rbac.py", new_content="fix A")],
+    )
+    diag2 = AgenticDiagnosis(
+        root_cause_category="import_error", confidence="high",
+        code_fixes=[CodeFix(filepath="app/routes/rbac.py", new_content="fix B")],
+    )
+
+    sd.record_diagnosis(diag1)
+    sd.record_diagnosis(diag2)
+    assert sd.is_duplicate_fix() is False  # different content
+
+
+def test_is_duplicate_fix_no_code_fixes_hashes_diagnosis():
+    from bizniz.agents.debugger.types import AgenticDiagnosis
+    sd = StallDetector()
+
+    diag = AgenticDiagnosis(
+        root_cause_category="import_error",
+        diagnosis="same analysis",
+        fix_plan=["same plan"],
+        confidence="high",
+    )
+    sd.record_diagnosis(diag)
+    sd.record_diagnosis(diag)
+    assert sd.is_duplicate_fix() is True
 
 
 def test_summarize_failure():

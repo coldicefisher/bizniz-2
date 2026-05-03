@@ -717,6 +717,10 @@ class Engineer(BaseAIAgent):
 
         results_by_id: dict = {}
         failing_ids = {i.db_id for i in issues_topo if i.db_id is not None}
+        # Per-issue repair history that persists across phases so the
+        # debugger in Phase 3 knows what Phase 2 already tried.
+        issue_repair_histories: dict = {}   # issue_db_id → List[str]
+        issue_fix_hashes: dict = {}         # issue_db_id → List[str]
 
         # ── Phase 2: escalation chain ─────────────────────────────────────────
         chain = list(self._available_models or [])
@@ -742,7 +746,12 @@ class Engineer(BaseAIAgent):
                     max_iterations=2,
                     enable_agentic_debug=False,
                     log=log,
+                    prior_repair_history=issue_repair_histories.get(issue.db_id),
+                    prior_fix_hashes=issue_fix_hashes.get(issue.db_id),
                 )
+                # Harvest history for next phase
+                issue_repair_histories[issue.db_id] = getattr(self, '_last_repair_history', [])
+                issue_fix_hashes[issue.db_id] = getattr(self, '_last_fix_hashes', [])
                 results_by_id[issue.db_id] = result
                 if result.success:
                     failing_ids.discard(issue.db_id)
@@ -768,6 +777,8 @@ class Engineer(BaseAIAgent):
                     max_iterations=self._debugger_max_iterations,
                     enable_agentic_debug=True,
                     log=log,
+                    prior_repair_history=issue_repair_histories.get(issue.db_id),
+                    prior_fix_hashes=issue_fix_hashes.get(issue.db_id),
                 )
                 results_by_id[issue.db_id] = result
                 if result.success:
@@ -804,12 +815,19 @@ class Engineer(BaseAIAgent):
         max_iterations: int,
         enable_agentic_debug: bool,
         log: Callable[[str], None],
+        prior_repair_history: Optional[List[str]] = None,
+        prior_fix_hashes: Optional[List[str]] = None,
     ) -> OrchestratorResult:
         """
         Run one orchestrator attempt for an issue with the given model and
         knobs. Used by run_three_phase for both the escalation passes
         (max_iter=2, agentic=False) and the debug round (max_iter=N,
         agentic=True).
+
+        prior_repair_history / prior_fix_hashes:
+            Accumulated state from earlier phases for this same issue.
+            Seeded into the new orchestrator's stall detector so the
+            debugger knows what was already tried.
         """
         prompt = issue.description or ""
         if issue.test_setup_hint:
@@ -844,8 +862,29 @@ class Engineer(BaseAIAgent):
         orchestrator._max_iterations = max_iterations
         orchestrator._enable_agentic_debug = enable_agentic_debug
 
+        # Seed stall detector with history from prior phases so the
+        # debugger knows what was already tried. Deduplicate entries.
+        if prior_repair_history:
+            existing = set(orchestrator._stall_detector._repair_history)
+            for entry in prior_repair_history:
+                if entry not in existing:
+                    orchestrator._stall_detector._repair_history.append(entry)
+                    existing.add(entry)
+        if prior_fix_hashes:
+            existing_hashes = set(orchestrator._stall_detector._debugger_fix_hashes)
+            for h in prior_fix_hashes:
+                if h not in existing_hashes:
+                    orchestrator._stall_detector._debugger_fix_hashes.append(h)
+                    existing_hashes.add(h)
+
+        def _harvest_history():
+            """Pull repair history + fix hashes from orchestrator for next phase."""
+            sd = orchestrator._stall_detector
+            self._last_repair_history = list(sd._repair_history)
+            self._last_fix_hashes = list(sd._debugger_fix_hashes)
+
         try:
-            return orchestrator.run_multi(
+            result = orchestrator.run_multi(
                 prompt=prompt,
                 target_files=target_files,
                 test_files=test_files,
@@ -855,15 +894,20 @@ class Engineer(BaseAIAgent):
                 workspace_context=None,
                 dependency_edges=dependency_edges,
             )
+            _harvest_history()
+            return result
         except OrchestratorMaxIterationsError:
+            _harvest_history()
             return OrchestratorResult(
                 success=False, changes=[], test_files=[],
                 iterations=max_iterations,
                 strategy_used="three_phase",
             )
         except AIInsufficientFunds:
+            _harvest_history()
             raise
         except Exception as e:
+            _harvest_history()
             log(
                 f"Engineer: issue #{issue.db_id} crashed during "
                 f"phase attempt with '{model}' ({type(e).__name__}: {e})"

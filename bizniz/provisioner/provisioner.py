@@ -624,6 +624,11 @@ class Provisioner:
             workspace_path=str(workspace.root),
         )
 
+        # Recover image_name from DB — the image was built in a prior run
+        # but the provisioner didn't rebuild this time (unchanged/extended).
+        db_row = project.db.get_service(service.name)
+        db_image = (db_row["image_name"] if db_row and "image_name" in db_row.keys() else None)
+
         log(f"Provisioner: evolve preserved '{service.name}' ({state})")
         return ProvisionedService(
             name=service.name,
@@ -631,6 +636,7 @@ class Provisioner:
             workspace_path=str(workspace.root),
             is_infrastructure=False,
             skeleton_name=service.skeleton if service.skeleton != "none" else None,
+            image_name=db_image or service.image_name,
         )
 
     def _allocate_ports_for_new(
@@ -677,9 +683,6 @@ class Provisioner:
         for ps in provisioned_services:
             if ps.is_infrastructure or ps.workspace_path is None:
                 continue
-            action = action_by_name[ps.name]
-            if not action.rebuild_image:
-                continue
             image_tag = f"{architecture.project_slug}-{ps.name}:dev"
             docker_dir = project.get_docker_service_dir(ps.workspace_name)
             dockerfile = docker_dir / "Dockerfile"
@@ -692,9 +695,12 @@ class Provisioner:
                     log=self._on_status_message,
                 )
 
+            action = action_by_name.get(ps.name)
+            action_label = action.action if action else "rebuild"
+
             try:
                 _do_build()
-                self._record_image_built(project, ps, image_tag, action.action)
+                self._record_image_built(project, ps, image_tag, action_label)
             except Exception as e:
                 log(f"Provisioner: image build failed for '{ps.name}': {e}")
                 if self._try_ai_recovery_for_build(
@@ -704,7 +710,7 @@ class Provisioner:
                 ):
                     self._record_image_built(
                         project, ps, image_tag,
-                        f"{action.action}+ai_recovery",
+                        f"{action_label}+ai_recovery",
                     )
                 else:
                     project.db.update_service_status(ps.name, "failed")

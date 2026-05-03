@@ -124,6 +124,37 @@ class _FusionAuthClient:
     def get_application(self, app_id: str) -> dict:
         return self._request("GET", f"/api/application/{app_id}")
 
+    def create_application(self, app_id: str, name: str = "App",
+                           frontend_port: int = 5173) -> dict:
+        """Create a FusionAuth application with sensible defaults.
+
+        Mirrors the kickstart configuration: JWT enabled, refresh tokens,
+        authorization_code grant, redirect URLs for the frontend.
+        """
+        return self._request("POST", f"/api/application/{app_id}", {
+            "application": {
+                "name": name,
+                "roles": [
+                    {"name": "admin", "isSuperRole": True},
+                    {"name": "user", "isDefault": True},
+                ],
+                "oauthConfiguration": {
+                    "authorizedRedirectURLs": [
+                        f"http://localhost:{frontend_port}/auth/callback",
+                    ],
+                    "logoutURL": f"http://localhost:{frontend_port}/logout",
+                    "requireRegistration": True,
+                    "generateRefreshTokens": True,
+                    "enabledGrants": ["authorization_code", "refresh_token"],
+                },
+                "jwtConfiguration": {
+                    "enabled": True,
+                    "timeToLiveInSeconds": 3600,
+                    "refreshTokenTimeToLiveInMinutes": 43200,
+                },
+            },
+        })
+
     def create_role(self, app_id: str, role_name: str, is_default: bool = False, is_super: bool = False) -> dict:
         return self._request("POST", f"/api/application/{app_id}/role", {
             "role": {
@@ -195,9 +226,25 @@ def provision_fusionauth(
     roles = role_info.get("roles", [])
     tenancy_model = role_info.get("tenancy_model", "roles")
 
-    # Step 2: Create roles in FusionAuth
-    # The kickstart creates "admin" and "user" — we add any additional roles
+    # Step 2: Ensure the application exists. The kickstart creates it on
+    # first boot, but if the DB was recreated or the kickstart didn't run
+    # (e.g. FusionAuth container restarted without a fresh DB), we need to
+    # create it ourselves.
     existing_app = fa.get_application(application_id)
+    if "_error" in existing_app or "application" not in existing_app:
+        _log(on_status, f"FusionAuth agent: application {application_id} not found, creating...")
+        create_result = fa.create_application(
+            application_id,
+            name=project_root.name.replace("_", " ").title(),
+            frontend_port=frontend_port,
+        )
+        if "_error" in create_result:
+            _log(on_status, f"FusionAuth agent: failed to create application: {create_result}")
+        else:
+            _log(on_status, "FusionAuth agent: application created")
+        # Re-fetch to get the application object
+        existing_app = fa.get_application(application_id)
+
     existing_roles = set()
     if "application" in existing_app:
         for r in existing_app["application"].get("roles", []):

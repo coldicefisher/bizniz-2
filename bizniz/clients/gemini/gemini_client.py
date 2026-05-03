@@ -7,11 +7,13 @@ with message history management and structured JSON output.
 """
 
 import json
+import mimetypes
 import os
 import re
 import time
 import uuid
-from typing import Optional, List, Dict, Any, Tuple, Callable
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple, Callable, Union
 
 from google import genai
 from google.genai import types
@@ -235,6 +237,131 @@ class GeminiClient(BaseAIClient):
                     raise GeminiInvalidRequest(str(e))
 
                 raise GeminiClientError(f"Gemini API error: {e}")
+
+    def get_text_with_images(
+        self,
+        text_prompt: str,
+        images: List[Dict[str, Any]],
+        system_prompt: str = "",
+        schema: dict = None,
+        response_format: ResponseFormat = ResponseFormat.TEXT,
+        temperature: float = 0.0,
+        max_tokens: Optional[int] = None,
+        job_description: Optional[str] = None,
+    ) -> Tuple[str, str, List]:
+        """Call the Gemini API with text + images (vision).
+
+        Parameters
+        ----------
+        text_prompt:
+            The text portion of the user message.
+        images:
+            List of image dicts. Each must have either:
+              - ``bytes`` (raw bytes) + ``mime_type`` (e.g. "image/png")
+              - ``path`` (str or Path to an image file)
+        system_prompt:
+            Optional system instruction prepended to the request.
+        schema / response_format:
+            Same semantics as ``get_text()``.
+
+        Returns
+        -------
+        Same (text, job_id, output_messages) tuple as ``get_text()``.
+        """
+        # Build multimodal parts: text + image parts
+        parts = [types.Part.from_text(text=text_prompt)]
+        for img in images:
+            parts.append(self._image_to_part(img))
+
+        contents = [types.Content(role="user", parts=parts)]
+
+        # System instruction
+        system_content = system_prompt or ""
+        if response_format == ResponseFormat.JSON_SCHEMA and schema:
+            system_content += f"\n{self._format_schema_prompt(schema)}"
+        elif response_format == ResponseFormat.JSON:
+            system_content += (
+                "\nYou must respond with valid JSON only. "
+                "Do not include any text before or after the JSON."
+            )
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_content.strip() if system_content.strip() else None,
+            max_output_tokens=max_tokens or self.max_tokens,
+            temperature=temperature,
+        )
+        if response_format in (ResponseFormat.JSON, ResponseFormat.JSON_SCHEMA):
+            config.response_mime_type = "application/json"
+
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                _t_start = time.time()
+                response = self._client.models.generate_content(
+                    model=self._model_name,
+                    contents=contents,
+                    config=config,
+                )
+                _duration_ms = int((time.time() - _t_start) * 1000)
+                response_text = response.text or ""
+
+                # Cost tracking
+                try:
+                    from bizniz.cost import get_tracker
+                    usage = getattr(response, "usage_metadata", None)
+                    in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
+                    out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
+                    if in_tok or out_tok:
+                        get_tracker().record(
+                            agent=getattr(self, "_caller_agent", "unknown"),
+                            model=self._model_name,
+                            input_tokens=in_tok,
+                            output_tokens=out_tok,
+                            duration_ms=_duration_ms,
+                        )
+                except Exception:
+                    pass
+
+                if response_format in (ResponseFormat.JSON, ResponseFormat.JSON_SCHEMA):
+                    response_text = self._sanitize_json(response_text)
+                    response_text = self._extract_first_json(response_text)
+
+                job_id = str(uuid.uuid4())
+                output_message = {"role": "assistant", "content": response_text}
+                self._message_history.append(output_message)
+
+                return response_text, job_id, [output_message]
+
+            except Exception as e:
+                error_msg = str(e).lower()
+                if any(p in error_msg for p in ["api_key_invalid", "permission denied", "403"]):
+                    raise GeminiAuthError(str(e))
+                if any(p in error_msg for p in ["quota", "billing", "resource_exhausted", "429"]):
+                    if attempt < max_retries:
+                        time.sleep(min(5.0 * attempt, 30.0))
+                        continue
+                    raise GeminiRateLimit(str(e))
+                if any(p in error_msg for p in ["context_length", "too long", "content too large"]):
+                    raise GeminiContextLengthExceeded(str(e))
+                raise GeminiClientError(f"Gemini vision API error: {e}")
+
+    @staticmethod
+    def _image_to_part(img: Dict[str, Any]) -> types.Part:
+        """Convert an image dict to a Gemini Part.
+
+        Accepts either ``{"bytes": b"...", "mime_type": "image/png"}``
+        or ``{"path": "/path/to/file.png"}``.
+        """
+        if "bytes" in img:
+            mime = img.get("mime_type", "image/png")
+            return types.Part.from_bytes(data=img["bytes"], mime_type=mime)
+        elif "path" in img:
+            p = Path(img["path"])
+            data = p.read_bytes()
+            mime = img.get("mime_type") or mimetypes.guess_type(str(p))[0] or "image/png"
+            return types.Part.from_bytes(data=data, mime_type=mime)
+        else:
+            raise ValueError(f"Image dict must have 'bytes' or 'path' key, got: {list(img.keys())}")
 
     @staticmethod
     def _format_schema_prompt(schema: dict) -> str:

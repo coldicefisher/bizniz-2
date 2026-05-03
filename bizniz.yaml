@@ -1,28 +1,28 @@
 default_model: gemini-flash-lite
 engineer_model: gemini-flash
-architect_model: gemini-pro
+architect_model: gemini-flash-top
 # Top-tier model for the Planner. The Planner runs once per project (or
 # rarely on re-plans) and its output drives the entire build sequence,
 # so the cost is rounding-error and the quality bump is foundational.
-planner_model: gemini-pro
+planner_model: gemini-flash-top
 models:
   - gemini-flash-lite
   - gemini-flash
-  - gemini-pro
+  - gemini-flash-top
 coder_models:
   - gemini-flash-lite
   - gemini-flash
-  - gemini-pro
+  - gemini-flash-top
 tester_models:
   - gemini-flash-lite
   - gemini-flash
-  - gemini-pro
+  - gemini-flash-top
 repair_models:
   - gemini-flash
-  - gemini-pro
+  - gemini-flash-top
 # Three-phase strategy (run_three_phase): top-tier model for the agentic
 # debugging round and the per-ticket iteration cap there.
-debugger_model: gemini-pro
+debugger_model: gemini-flash-top
 debugger_max_iterations: 12
 stall_threshold: 3
 agentic_debug_threshold: 2
