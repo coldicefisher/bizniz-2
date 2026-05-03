@@ -715,7 +715,7 @@ class Architect(BaseAIAgent):
                             )
                             from bizniz.integration.runner import _wait_http_ok
                             for fe in [s for s in evolved_arch.services if s.service_type == "frontend" and s.port]:
-                                _wait_http_ok(f"http://localhost:{fe.port}/", deadline_s=30)
+                                _wait_http_ok(f"http://localhost:{fe.port}/", deadline_s=60)
 
                             ux_results = run_ux_review(
                                 architecture=evolved_arch,
@@ -1145,7 +1145,7 @@ class Architect(BaseAIAgent):
                     )
                     from bizniz.integration.runner import _wait_http_ok
                     for fe in [s for s in architecture.services if s.service_type == "frontend" and s.port]:
-                        _wait_http_ok(f"http://localhost:{fe.port}/", deadline_s=30)
+                        _wait_http_ok(f"http://localhost:{fe.port}/", deadline_s=60)
 
                     ux_results = run_ux_review(
                         architecture=architecture,

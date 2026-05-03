@@ -249,7 +249,7 @@ class UXDesigner:
         config_body = (
             'module.exports = { testDir: "tests", '
             'testMatch: ["**/ux_screenshots.spec.cjs"], '
-            'reporter: "list", timeout: 60000, '
+            'reporter: "list", timeout: 120000, '
             'fullyParallel: false, workers: 1, '
             'forbidOnly: true, '
             'use: { trace: "off", video: "off", screenshot: "off", '
@@ -275,10 +275,10 @@ class UXDesigner:
 
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120,
+                cmd, capture_output=True, text=True, timeout=180,
             )
         except subprocess.TimeoutExpired as e:
-            return False, f"screenshot script timed out\n{e.stdout or ''}{e.stderr or ''}"
+            return False, f"screenshot script timed out after 180s\n{e.stdout or ''}{e.stderr or ''}"
 
         return proc.returncode == 0, (proc.stdout or "") + (proc.stderr or "")
 
@@ -297,7 +297,8 @@ class UXDesigner:
         screenshots_dir = workspace_path / "screenshots"
         screenshots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Simple inline script that just screenshots the home page
+        # Simple inline script that screenshots the home page.
+        # Long waits: SPAs need time for Vite HMR, React hydration, etc.
         script = (
             f"const {{ chromium }} = require('playwright');\n"
             f"(async () => {{\n"
@@ -305,8 +306,8 @@ class UXDesigner:
             f"  const page = await browser.newPage();\n"
             f"  await page.setViewportSize({{ width: 1280, height: 720 }});\n"
             f"  try {{\n"
-            f"    await page.goto('{base_url}/', {{ waitUntil: 'networkidle', timeout: 15000 }});\n"
-            f"    await page.waitForTimeout(2000);\n"
+            f"    await page.goto('{base_url}/', {{ waitUntil: 'networkidle', timeout: 30000 }});\n"
+            f"    await page.waitForTimeout(5000);\n"
             f"    await page.screenshot({{ path: '/workspace/screenshots/home.png', fullPage: true }});\n"
             f"  }} catch(e) {{ console.error('Failed:', e.message); }}\n"
             f"  await browser.close();\n"
@@ -325,7 +326,7 @@ class UXDesigner:
         ]
 
         try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            subprocess.run(cmd, capture_output=True, text=True, timeout=90)
         except Exception as e:
             _log(self._on_status, f"UX Designer: fallback screenshot also failed: {e}")
             return []

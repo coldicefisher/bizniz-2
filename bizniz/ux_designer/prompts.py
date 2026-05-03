@@ -33,7 +33,10 @@ IMPORTANT:
 - Use `process.env.FRONTEND_URL` for the base URL
 - Create the screenshots directory: `const fs = require('fs'); fs.mkdirSync('/workspace/screenshots', {{ recursive: true }});`
 - Set viewport to 1280x720 for consistent screenshots
-- Add 1-second waits after navigation for SPA hydration
+- Use `waitUntil: 'networkidle'` with a 30-second timeout on every page.goto()
+- After EVERY navigation, add `await page.waitForTimeout(5000);` — SPAs need
+  time for Vite HMR, React hydration, lazy loading, and API data fetching.
+  This is critical. 1 second is NOT enough. 5 seconds minimum.
 - Do NOT assert on content — this is purely for screenshots, not testing
 - If a page doesn't load, skip it (try/catch) and move on
 - Maximum 15 screenshots to keep evaluation cost reasonable
