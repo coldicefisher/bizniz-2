@@ -59,7 +59,19 @@ SKELETON.md contracts, captured OpenAPI, and a per-run report.
 - **Case normalization**: `ServiceDefinition` normalizes service_type,
   framework, language to lowercase via Pydantic validator. Template
   lookup case-insensitive with aliases.
-- **Pending**: run Property Manager M1 end-to-end with all fixes.
+- **FusionAuth agent**: reads problem statement → extracts roles +
+  tenancy model → creates roles/test users via FusionAuth API →
+  writes AUTH_CONTRACT.md for engineers. Sequencing fix needed
+  (must run while stack is up, before teardown).
+- **Pre-built test sidecars**: `bizniz-test-pytest:latest` and
+  `bizniz-test-playwright:latest` eliminate runtime pip/npm install.
+  30-60s saved per test execution. Auto-built if missing.
+- **Design systems**: React skeleton → Tailwind CSS v4, Angular
+  skeleton → Angular Material (already had it, now documented).
+- **Milestone-scoped integration**: integration tests receive
+  `milestone.problem_slice`, not the full problem statement.
+- **Pending**: clean M1 run with all fixes (FusionAuth sequencing,
+  NODE_PATH, milestone scoping). Then M2 evolve test.
 
 ## Where things live
 
