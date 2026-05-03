@@ -94,6 +94,34 @@ def _list_relevant_source_files(workspace, max_files: int = 30) -> list[str]:
     return keep
 
 
+def _load_auth_contract(workspace, compose_path: Optional[str]) -> Optional[str]:
+    """Try to find AUTH_CONTRACT.md at the project root.
+
+    The project root is the parent of the service workspace, or
+    derivable from the compose path (infra/development/docker-compose.yml
+    → project root is two levels up).
+    """
+    candidates = []
+
+    # From workspace: go up to project root
+    ws_root = Path(workspace.root) if hasattr(workspace, "root") else None
+    if ws_root:
+        # Service workspace is <project_root>/<service_name>/
+        candidates.append(ws_root.parent / "AUTH_CONTRACT.md")
+
+    # From compose path: <project_root>/infra/development/docker-compose.yml
+    if compose_path:
+        candidates.append(Path(compose_path).parent.parent.parent / "AUTH_CONTRACT.md")
+
+    for path in candidates:
+        try:
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+    return None
+
+
 def repair_integration_failure(
     *,
     service: ServiceDefinition,
@@ -121,6 +149,19 @@ def repair_integration_failure(
     """
     last_output = failure_output
     repair_history: list[str] = []
+
+    # If an AUTH_CONTRACT.md exists at the project root, prepend it to
+    # the error context. This tells the debugger: FusionAuth is the
+    # source of truth for auth, and skeleton auth files (auth.py,
+    # routes/auth.py) MAY be modified to match the contract.
+    auth_contract = _load_auth_contract(workspace, compose_path)
+    if auth_contract:
+        last_output = (
+            f"=== AUTH CONTRACT (FusionAuth is configured — skeleton auth files "
+            f"MAY be modified to match this contract) ===\n"
+            f"{auth_contract}\n\n"
+            f"{last_output}"
+        )
 
     # Capture server-side logs on the initial failure so the debugger
     # sees both "assert 422 == 200" AND the server's traceback.
