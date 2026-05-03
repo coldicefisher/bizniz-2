@@ -21,7 +21,7 @@ Playwright tests → both run against the live stack →
 a `~/bizniz_projects/<slug>/` directory with running code, tests,
 SKELETON.md contracts, captured OpenAPI, and a per-run report.
 
-## What's in flight (as of 2026-05-02)
+## What's in flight (as of 2026-05-03)
 
 - **V11 ran**: full pipeline end-to-end including AgenticDebugger.
   Backend 5/5 engineering, 9/11 integration tests passed.
@@ -83,7 +83,26 @@ SKELETON.md contracts, captured OpenAPI, and a per-run report.
   for the screenshot script and vision evaluation.
 - **Gemini vision**: GeminiClient now supports `get_text_with_images()`
   for multimodal prompts. 19 unit + 4 functional tests.
-- **Pending**: clean M1 run with full pipeline (including UX designer).
+- **Debugger cost fixes**: duplicate fix bail (same code_fixes twice →
+  stop), error signatures persist across agentic debugger (no 3-failure
+  re-confirm), repair history persists Phase 2 → Phase 3 (deduplicated),
+  OrchestratorMaxIterationsError propagates instead of being swallowed.
+- **Image capture**: `_compose_up_and_capture_images()` runs
+  `docker compose up -d --build`, reads image names from
+  `docker compose ps --format json`, stamps onto ServiceDefinition.
+  Fixed root cause of M1 unit test failures (tests ran in generic
+  bizniz-python-runner instead of service image).
+- **FusionAuth auto-create**: agent now creates the application if
+  missing (kickstart only runs on first boot; stale DB = missing app).
+- **Config**: gemini-pro → gemini-flash-top across bizniz.yaml. Pro
+  quota hit at 250/day; flash-top (gemini-3-flash-preview) has same
+  vision support and no daily cap.
+- **M1 status**: engineering passes (backend 3/3, frontend 5/5).
+  Integration: backend 9/12 (3 FusionAuth auth failures — app ID
+  auto-create fix not yet tested), frontend 3/7 (UI tests). UX
+  designer ran but screenshots were blank + coder method bug (fixed
+  in this commit). Next: re-run M1 clean to validate all fixes.
+- **Pending**: clean M1 run with FusionAuth auto-create + coder fix.
   Then M2.
 
 ## Where things live
