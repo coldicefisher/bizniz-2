@@ -97,13 +97,24 @@ SKELETON.md contracts, captured OpenAPI, and a per-run report.
 - **Config**: gemini-pro → gemini-flash-top across bizniz.yaml. Pro
   quota hit at 250/day; flash-top (gemini-3-flash-preview) has same
   vision support and no daily cap.
+- **Auth contract in debugger**: integration debugger now loads
+  AUTH_CONTRACT.md and injects it into the debug context. Tells the
+  debugger that skeleton auth files MAY be modified to match the
+  FusionAuth contract. Previously the debugger diagnosed auth
+  mismatches correctly but couldn't fix skeleton-provided files.
+- **UX designer screenshot waits**: 5s waitForTimeout after every
+  navigation (was 1s), 30s goto timeout (was 15s), 180s subprocess
+  timeout. SPAs need time for Vite HMR + React hydration.
 - **M1 status**: engineering passes (backend 3/3, frontend 5/5).
-  Integration: backend 9/12 (3 FusionAuth auth failures — app ID
-  auto-create fix not yet tested), frontend 3/7 (UI tests). UX
-  designer ran but screenshots were blank + coder method bug (fixed
-  in this commit). Next: re-run M1 clean to validate all fixes.
-- **Pending**: clean M1 run with FusionAuth auto-create + coder fix.
-  Then M2.
+  FusionAuth auto-create works (smoke PASS, valid JWT). UX designer
+  runs and dispatches coder fixes. Integration auth failures are
+  the last blocker — auth contract context fix is deployed but not
+  yet validated (M1 currently running). Backend had 9/12 integration
+  pass in prior run, 3 auth route mismatches.
+- **Pending**: M1 is running now. If auth integration passes, run M2.
+  If not, investigate the specific auth route mismatch — the debugger
+  has the contract now, so it should be able to fix the skeleton's
+  auth routes to match FusionAuth's actual behavior.
 
 ## Where things live
 
