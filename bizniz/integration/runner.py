@@ -303,8 +303,17 @@ def run_integration_phase(
     debugger_factory: Optional[Callable] = None,
     debug_max_iterations: int = 3,
     web_ui_tester_factory: Optional[Callable] = None,
+    keep_stack_up: bool = False,
 ) -> List[ServiceResult]:
-    """Verify-phase orchestration. See module docstring."""
+    """Verify-phase orchestration. See module docstring.
+
+    ``keep_stack_up=True`` skips the final ``docker compose down``
+    so the caller can keep the stack running for subsequent work
+    (e.g. the architect calling this between engineering layers as
+    a pre-flight gate before dispatching the next layer's
+    engineers). The caller is then responsible for tearing the
+    stack down themselves.
+    """
     backends = _backends(architecture)
     if not backends:
         _log(on_status, "Integration: no HTTP backends to verify, skipping")
@@ -676,13 +685,16 @@ def run_integration_phase(
                             f"integration_failed: playwright non-zero exit. Tail:\n{fe_tail[:1500]}",
                         )
     finally:
-        _log(on_status, "Integration: tearing down stack...")
-        try:
-            subprocess.run(
-                ["docker", "compose", "-f", compose_path, "down"],
-                capture_output=True, text=True, timeout=120,
-            )
-        except Exception as e:
-            _log(on_status, f"Integration: teardown error ({e})")
+        if keep_stack_up:
+            _log(on_status, "Integration: leaving stack up (keep_stack_up=True)")
+        else:
+            _log(on_status, "Integration: tearing down stack...")
+            try:
+                subprocess.run(
+                    ["docker", "compose", "-f", compose_path, "down"],
+                    capture_output=True, text=True, timeout=120,
+                )
+            except Exception as e:
+                _log(on_status, f"Integration: teardown error ({e})")
 
     return out

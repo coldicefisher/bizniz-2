@@ -901,7 +901,8 @@ class Architect(BaseAIAgent):
 
         layers = _sort_services_by_dependency(changed_services)
         results = []
-        for layer in layers:
+        compose_path = str(project.dev_root / "docker-compose.yml")
+        for layer_idx, layer in enumerate(layers):
             if parallel and len(layer) > 1:
                 layer_results = self._dispatch_engineers_parallel(
                     layer, service_workspaces, milestone_problem,
@@ -913,7 +914,154 @@ class Architect(BaseAIAgent):
                     architecture, project, layered,
                 )
             results.extend(layer_results)
+
+            # Between layers, capture backend contracts AND gate on
+            # backend integration tests passing before dispatching
+            # the next layer's engineers (typically frontends).
+            # Without this, frontend coders build against an
+            # unverified backend contract — every drift bug makes
+            # it all the way to the final integration phase before
+            # surfacing.
+            is_final_layer = layer_idx == len(layers) - 1
+            if is_final_layer:
+                continue
+
+            layer_passed_backends = [
+                s for s in layer
+                if s.service_type == "backend" and s.port and any(
+                    r.service_name == s.name and r.success
+                    for r in layer_results
+                )
+            ]
+            if not layer_passed_backends:
+                continue
+
+            # Capture contracts so the next layer's engineers see
+            # actual endpoint shapes (already in build() — mirror
+            # here for the milestone path).
+            try:
+                from bizniz.integration.contracts import capture_backend_contracts
+                captured = capture_backend_contracts(
+                    architecture=architecture,
+                    project_root=project.root,
+                    compose_path=compose_path,
+                    on_status=self._on_status_message,
+                    only_names=[s.name for s in layer_passed_backends],
+                )
+                if not hasattr(self, "_captured_contracts") or self._captured_contracts is None:
+                    self._captured_contracts = {}
+                self._captured_contracts.update(captured)
+                log(
+                    f"Architect: between-layer contract capture — "
+                    f"{len(captured)} backend contract(s) for next layer's engineers"
+                )
+            except Exception as e:
+                log(f"Architect: between-layer contract capture failed ({e})")
+
+            # Layer-transition gate: run integration tests for the
+            # backends just built. If any fail (including post-
+            # debugger failure), stop the milestone before the
+            # next layer wastes work building against a broken
+            # contract.
+            if self._http_api_tester_factory is None:
+                continue
+
+            gate_passed = self._run_layer_gate(
+                architecture=architecture,
+                layer_backends=layer_passed_backends,
+                service_workspaces=service_workspaces,
+                service_results_so_far=results,
+                compose_path=compose_path,
+                problem_statement=milestone_problem,
+            )
+            if not gate_passed:
+                log(
+                    f"Architect: LAYER GATE FAILED after layer "
+                    f"{layer_idx + 1} — backend integration tests "
+                    f"didn't pass. Aborting before next layer "
+                    f"dispatches to avoid building against a broken "
+                    f"contract."
+                )
+                # Mark every UNDISPATCHED service as failed so the
+                # caller knows what got skipped vs what actually ran.
+                for skipped_layer in layers[layer_idx + 1:]:
+                    for s in skipped_layer:
+                        results.append(ServiceResult(
+                            service_name=s.name,
+                            workspace_name=s.workspace_name,
+                            success=False,
+                            issues_total=0,
+                            issues_passed=0,
+                            error="layer_gate_failed: prior layer's backend integration tests didn't pass",
+                        ))
+                break
+
         return results
+
+    def _run_layer_gate(
+        self,
+        architecture: SystemArchitecture,
+        layer_backends: List[ServiceDefinition],
+        service_workspaces: Dict[str, "BaseWorkspace"],  # noqa: F821
+        service_results_so_far: list,
+        compose_path: str,
+        problem_statement: str,
+    ) -> bool:
+        """Run HTTP integration tests for the just-built backend
+        layer. Returns True if all backends pass, False otherwise.
+
+        Reuses run_integration_phase under the hood with a sliced
+        architecture (only the layer's backends) and
+        ``web_ui_tester_factory=None`` so frontend tests don't run.
+        ``keep_stack_up=True`` because the next layer's dispatch
+        doesn't actually use the running stack — leaving it up is
+        harmless and saves a teardown/up cycle if the gate passes.
+        """
+        log = self._on_status_message or (lambda _msg: None)
+        from bizniz.integration.runner import run_integration_phase
+
+        # Slim architecture: only the backends being gated. The
+        # integration runner iterates architecture.services, so
+        # filtering here means it only generates and runs tests
+        # for these.
+        gated_arch = SystemArchitecture(
+            project_name=architecture.project_name,
+            project_slug=architecture.project_slug,
+            services=list(layer_backends),
+            description=architecture.description,
+        )
+
+        log(
+            f"Architect: layer gate — running integration tests on "
+            f"{len(layer_backends)} backend(s) ({', '.join(s.name for s in layer_backends)})..."
+        )
+
+        try:
+            gate_results = run_integration_phase(
+                architecture=gated_arch,
+                service_results=service_results_so_far,
+                project_root=Path(compose_path).parent.parent.parent,
+                problem_statement=problem_statement,
+                compose_path=compose_path,
+                http_api_tester_factory=self._http_api_tester_factory,
+                service_workspaces={s.name: service_workspaces[s.name] for s in layer_backends if s.name in service_workspaces},
+                on_status=self._on_status_message,
+                debugger_factory=self._integration_debugger_factory,
+                web_ui_tester_factory=None,
+                keep_stack_up=True,
+            )
+        except Exception as e:
+            log(f"Architect: layer gate raised ({type(e).__name__}: {e})")
+            return False
+
+        # Check that every gated backend passed.
+        backend_names = {s.name for s in layer_backends}
+        passed = all(
+            getattr(r, "success", False)
+            for r in gate_results
+            if r.service_name in backend_names
+        )
+        return passed
 
     def build(
         self, problem_statement: str, project_name: str,
