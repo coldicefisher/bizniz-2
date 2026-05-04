@@ -26,7 +26,9 @@ def test_known_combinations_resolve():
     assert p.skeleton == "fastapi"
     assert p.contract_format == "openapi"
     assert p.test_runner == "pytest"
-    assert p.validator == ["python", "-m", "pyright", "app/"]
+    assert p.validator == ["mypy", "--ignore-missing-imports",
+                           "--check-untyped-defs", "app/"]
+    assert p.validator_runner == "python-sidecar"
 
 
 def test_react_resolves():

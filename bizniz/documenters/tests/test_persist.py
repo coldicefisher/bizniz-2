@@ -14,16 +14,18 @@ def _write(root: Path, rel: str, content: str):
     p.write_text(content)
 
 
-def _make_service(name: str, language: str, framework: str = "fastapi"):
+def _make_service(name: str, language: str, framework: str = "fastapi",
+                  service_type: str = "backend"):
     return SimpleNamespace(
         name=name,
         language=language,
         framework=framework,
-        service_type="backend",
+        service_type=service_type,
         workspace_name=name,
     )
 
 
+@pytest.mark.functional
 def test_python_docs_persist_to_disk(tmp_path):
     project_root = tmp_path / "project"
     workspace_root = project_root / "backend"
@@ -52,6 +54,7 @@ class Foo(BaseModel):
     assert "app/main.py" in parsed["files"]
 
 
+@pytest.mark.functional
 def test_meta_sidecar_written(tmp_path):
     project_root = tmp_path / "project"
     workspace_root = project_root / "backend"
@@ -107,7 +110,7 @@ def test_typescript_docs_persist(tmp_path):
     _write(workspace_root, "tsconfig.json", '{"compilerOptions": {"jsx": "react-jsx"}}')
     _write(workspace_root, "src/api.ts", "export const x: number = 1;\n")
 
-    service = _make_service("frontend", "typescript", "react")
+    service = _make_service("frontend", "typescript", "react", service_type="frontend")
     out = write_service_docs(
         service=service,
         workspace_root=workspace_root,

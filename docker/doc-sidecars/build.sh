@@ -7,5 +7,8 @@ cd "$(dirname "$0")"
 echo "Building bizniz-doc-typescript..."
 docker build -t bizniz-doc-typescript:latest -f Dockerfile.typescript .
 
+echo "Building bizniz-doc-python..."
+docker build -t bizniz-doc-python:latest -f Dockerfile.python .
+
 echo "Done. Images:"
 docker images --format "  {{.Repository}}:{{.Tag}} ({{.Size}})" | grep bizniz-doc

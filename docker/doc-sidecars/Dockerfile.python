@@ -1,0 +1,38 @@
+# Python documenter / validator sidecar.
+# Wraps mypy + (eventually) any other Python static-analysis we add.
+# Used by bizniz/validators/runner.py for post-flight type checks
+# on Python services (FastAPI backends, workers, etc.).
+#
+# Build: docker build -t bizniz-doc-python:latest -f Dockerfile.python .
+# Usage (validator):
+#   docker run --rm -v <workspace>:/workspace:ro bizniz-doc-python:latest \
+#     mypy --ignore-missing-imports --check-untyped-defs app/
+#
+# Why mypy not pyright:
+# - mypy is pure Python (one pip install, no node binary download)
+# - Mature, predictable, our test users likely have it already
+# - Same bug class detection for our purposes (cross-file type
+#   consistency: "method X doesn't exist on this type")
+FROM python:3.12-slim
+
+WORKDIR /opt/extractor
+
+# Pin versions so a network blip doesn't change validator behavior
+# under us. Bump explicitly when needed.
+RUN pip install --no-cache-dir \
+        mypy==1.13.0 \
+        pydantic==2.10.4 \
+        sqlalchemy==2.0.36 \
+        fastapi==0.115.6 \
+    && rm -rf /root/.cache/pip
+
+COPY extract_python.py /opt/extractor/extract_python.py
+
+# /workspace is the bind mount the orchestrator provides at runtime.
+WORKDIR /workspace
+
+# Default: run the documenter on /workspace. Caller can override
+# with explicit args for the validator path:
+#   docker run ... bizniz-doc-python:latest mypy --ignore-missing-imports app/
+ENTRYPOINT []
+CMD ["python", "/opt/extractor/extract_python.py", "/workspace"]

@@ -81,8 +81,12 @@ _PROFILE_TABLE = [
         framework="fastapi",
         language="python",
         documenter=_python_documenter,
-        validator=["python", "-m", "pyright", "app/"],
-        validator_runner="python",
+        # mypy in the bizniz-doc-python sidecar. Permissive flags
+        # (we want cross-file consistency, not a 100% strict audit
+        # — the engineer doesn't have stub coverage for every dep).
+        validator=["mypy", "--ignore-missing-imports",
+                   "--check-untyped-defs", "app/"],
+        validator_runner="python-sidecar",
         contract_format="openapi",
         skeleton="fastapi",
         test_runner="pytest",

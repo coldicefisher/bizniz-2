@@ -1,19 +1,22 @@
-"""Tests for PythonAstDocumenter.
+"""Tests for PythonAstDocumenter (sidecar dispatch).
 
 Goal: prove that on a representative FastAPI service workspace, the
 documenter captures the things a downstream coder needs to know to
-write correct code without guessing. Specifically:
+write correct code without guessing.
 
-- Pydantic models with field types.
-- Functions with param types, return types, decorators.
-- Imports.
-- Skips test files and __pycache__.
-- Detects framework hints (fastapi, pydantic).
+These dispatch the actual ``bizniz-doc-python:latest`` sidecar —
+they're marked ``functional`` so they're excluded from the default
+``pytest`` run (same convention as our other sidecar-based tests).
+Run with ``pytest -m functional``.
 """
 import json
 from pathlib import Path
 
+import pytest
+
 from bizniz.documenters.python_ast import PythonAstDocumenter
+
+pytestmark = pytest.mark.functional
 
 
 def _write(root: Path, rel: str, content: str):

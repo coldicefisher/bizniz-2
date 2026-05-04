@@ -70,6 +70,8 @@ def run_validator(
 
     if prof.validator_runner == "node-sidecar":
         return _run_node_sidecar(service, prof, workspace_root, timeout_s)
+    if prof.validator_runner == "python-sidecar":
+        return _run_python_sidecar(service, prof, workspace_root, timeout_s)
     if prof.validator_runner == "python":
         return _run_python_local(service, prof, workspace_root, timeout_s)
 
@@ -95,6 +97,7 @@ def _skip(service, reason: str, detail: str) -> ValidationReport:
 
 
 _TS_SIDECAR_IMAGE = "bizniz-doc-typescript:latest"
+_PY_SIDECAR_IMAGE = "bizniz-doc-python:latest"
 
 
 def _run_node_sidecar(service, prof, workspace_root: Path, timeout_s: int) -> ValidationReport:
@@ -160,7 +163,54 @@ def _shell_quote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-# ── Python local subprocess ────────────────────────────────────────
+# ── Python via the sidecar (mypy pre-installed) ────────────────────
+
+
+def _run_python_sidecar(service, prof, workspace_root: Path, timeout_s: int) -> ValidationReport:
+    """Run a Python validator (mypy) inside the bizniz-doc-python sidecar.
+
+    The sidecar ships with mypy + common type stubs (pydantic,
+    sqlalchemy, fastapi) pre-installed. Override the entrypoint so
+    the validator runs instead of the default documenter mode.
+    """
+    if not _docker_available():
+        return _skip(service, "docker_unavailable", "")
+
+    cmd_str = " ".join(_shell_quote(arg) for arg in prof.validator)
+    sh_cmd = f"cd /workspace && {cmd_str}"
+    docker_cmd = [
+        "docker", "run", "--rm",
+        "-v", f"{workspace_root}:/workspace:ro",
+        "--entrypoint", "/bin/sh",
+        _PY_SIDECAR_IMAGE,
+        "-c", sh_cmd,
+    ]
+
+    try:
+        proc = subprocess.run(
+            docker_cmd, capture_output=True, text=True, timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as e:
+        return ValidationReport(
+            service_name=service.name,
+            runner="python-sidecar",
+            command=prof.validator,
+            passed=False,
+            stdout=(e.stdout or "")[:8000],
+            stderr=f"validator timed out after {timeout_s}s",
+        )
+
+    return ValidationReport(
+        service_name=service.name,
+        runner="python-sidecar",
+        command=prof.validator,
+        passed=proc.returncode == 0,
+        stdout=(proc.stdout or "")[:8000],
+        stderr=(proc.stderr or "")[:8000],
+    )
+
+
+# ── Python local subprocess (legacy fallback) ──────────────────────
 
 
 def _run_python_local(service, prof, workspace_root: Path, timeout_s: int) -> ValidationReport:

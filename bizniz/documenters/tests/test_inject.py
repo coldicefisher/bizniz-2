@@ -36,6 +36,7 @@ def test_detect_skips_node_modules(tmp_path):
     assert detect_language(tmp_path) == "python"
 
 
+@pytest.mark.functional
 def test_format_python_workspace(tmp_path):
     _write(tmp_path, "app/schemas/auth.py", '''
 from pydantic import BaseModel
@@ -69,10 +70,12 @@ async def login(credentials):
 
 
 def test_format_handles_no_files(tmp_path):
+    # No source files → detect_language returns None → no sidecar dispatch
     docs = extract_workspace_docs(workspace_root=tmp_path)
     assert format_for_prompt(docs) == ""
 
 
+@pytest.mark.functional
 def test_format_truncates_to_max_chars(tmp_path):
     # Generate enough files to overflow 200 chars
     for i in range(20):

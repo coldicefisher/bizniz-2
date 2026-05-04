@@ -468,10 +468,22 @@ class Architect(BaseAIAgent):
         from bizniz.project.project import Project
         from bizniz.provisioner import Provisioner
         from bizniz.workspace.local_workspace import LocalWorkspace
+        from bizniz.sidecars import ensure_sidecars_built, SidecarPreflightError
 
         def log(msg: str) -> None:
             if self._on_status_message:
                 self._on_status_message(msg)
+
+        # Sidecar preflight gate. The pipeline depends on documenter,
+        # validator, and test-runner images. If any are missing,
+        # build them upfront — never start AI/provisioner work
+        # against an incomplete infra. Raise propagates up; the
+        # caller surfaces it as a milestone failure.
+        try:
+            ensure_sidecars_built(on_status=self._on_status_message)
+        except SidecarPreflightError as e:
+            log(f"Architect: sidecar preflight FAILED — aborting build_with_plan: {e}")
+            raise
 
         tracker = get_tracker()
         provisional_slug = slugify(project_name)
