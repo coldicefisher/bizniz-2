@@ -933,6 +933,34 @@ class Architect(BaseAIAgent):
                 )
             results.extend(layer_results)
 
+            # First check: did ANY service in this layer fail
+            # engineering? If so, abort the milestone — don't
+            # dispatch later layers against a broken layer-1.
+            # (Originally "no passed backends → skip gate" silently
+            # progressed; now we hard-fail.)
+            layer_failed_services = [
+                s for s in layer
+                if not any(r.service_name == s.name and r.success for r in layer_results)
+            ]
+            if layer_failed_services:
+                log(
+                    f"Architect: layer {layer_idx + 1} had "
+                    f"{len(layer_failed_services)} engineering failure(s) "
+                    f"({', '.join(s.name for s in layer_failed_services)}) "
+                    f"— aborting milestone before dispatching subsequent layers"
+                )
+                for skipped_layer in layers[layer_idx + 1:]:
+                    for s in skipped_layer:
+                        results.append(ServiceResult(
+                            service_name=s.name,
+                            workspace_name=s.workspace_name,
+                            success=False,
+                            issues_total=0,
+                            issues_passed=0,
+                            error="layer_engineering_failed: prior layer had engineering failures",
+                        ))
+                break
+
             # Between layers, capture backend contracts AND gate on
             # backend integration tests passing before dispatching
             # the next layer's engineers (typically frontends).
@@ -952,6 +980,10 @@ class Architect(BaseAIAgent):
                 )
             ]
             if not layer_passed_backends:
+                # No HTTP backends in this layer (e.g., all workers,
+                # or the layer is purely infrastructure-adjacent).
+                # Nothing to integration-test; let the next layer
+                # dispatch.
                 continue
 
             # Capture contracts so the next layer's engineers see

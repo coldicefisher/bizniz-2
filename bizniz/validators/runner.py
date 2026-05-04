@@ -201,15 +201,33 @@ def _run_python_local(service, prof, workspace_root: Path, timeout_s: int) -> Va
     except FileNotFoundError as e:
         return _skip(service, "validator_module_missing", str(e))
 
+    # Detect "module not installed" failures and soft-skip rather
+    # than reporting them as type errors. Hitting "No module named
+    # pyright" doesn't mean the user's code is broken — it means
+    # the dev tool isn't on the runner's PATH. The architect should
+    # NOT mark the service failed in that case.
+    stderr = proc.stderr or ""
+    stdout = proc.stdout or ""
+    combined = stderr + "\n" + stdout
+    if proc.returncode != 0 and (
+        "No module named" in combined
+        or "ModuleNotFoundError" in combined
+    ):
+        return _skip(
+            service, "validator_module_missing",
+            stderr.strip()[:300] or stdout.strip()[:300],
+        )
+
     # pyright exits non-zero on type errors; mypy similarly. We trust
-    # exit code as the pass/fail signal.
+    # exit code as the pass/fail signal once we've ruled out missing-
+    # tool noise.
     return ValidationReport(
         service_name=service.name,
         runner="python",
         command=full_cmd,
         passed=proc.returncode == 0,
-        stdout=(proc.stdout or "")[:8000],
-        stderr=(proc.stderr or "")[:8000],
+        stdout=stdout[:8000],
+        stderr=stderr[:8000],
     )
 
 
