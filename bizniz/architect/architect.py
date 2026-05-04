@@ -1801,11 +1801,12 @@ class Architect(BaseAIAgent):
         # debuggers/refactorers) can read the same artifact without
         # re-extracting. Soft-fails — engineering completed
         # regardless of whether docs persisted.
+        validator_error: Optional[str] = None
         if project is not None and successes > 0:
+            from pathlib import Path as _Path
+            ws_root = _Path(workspace.root) if hasattr(workspace, "root") else None
             try:
                 from bizniz.documenters.persist import write_service_docs
-                from pathlib import Path as _Path
-                ws_root = _Path(workspace.root) if hasattr(workspace, "root") else None
                 if ws_root and ws_root.is_dir():
                     write_service_docs(
                         service=service,
@@ -1820,13 +1821,46 @@ class Architect(BaseAIAgent):
                         f"'{service.name}' ({type(e).__name__}: {e})"
                     )
 
-        return ServiceResult(
+            # Phase 6 post-flight: run the language's type checker
+            # on the whole service. Catches cross-file consistency
+            # bugs (the LoginPage/authStore class) at engineer time,
+            # before integration tests run. Surfaces errors via the
+            # service result; doesn't auto-regenerate yet.
+            if ws_root and ws_root.is_dir():
+                try:
+                    from bizniz.validators import run_validator
+                    report = run_validator(service, ws_root)
+                    if self._on_status_message:
+                        self._on_status_message(
+                            f"Architect: post-flight {service.name} — "
+                            f"{report.summary}"
+                        )
+                    if not report.passed and not report.skipped_reason:
+                        # Truncate the error tail so the result blob
+                        # stays readable in DB/logs.
+                        err_tail = "\n".join(
+                            (report.stderr or report.stdout).splitlines()[-25:]
+                        )[:3000]
+                        validator_error = (
+                            f"post_flight_validation_failed: "
+                            f"{' '.join(report.command)}\n{err_tail}"
+                        )
+                except Exception as e:
+                    if self._on_status_message:
+                        self._on_status_message(
+                            f"Architect: post-flight skipped for "
+                            f"'{service.name}' ({type(e).__name__}: {e})"
+                        )
+
+        result = ServiceResult(
             service_name=service.name,
             workspace_name=service.workspace_name,
-            success=successes == total and total > 0,
+            success=successes == total and total > 0 and validator_error is None,
             issues_total=total,
             issues_passed=successes,
+            error=validator_error,
         )
+        return result
 
     def _build_service_prompt(
         self,
