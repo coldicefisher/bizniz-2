@@ -198,6 +198,7 @@ class Architect(BaseAIAgent):
         existing_architecture: SystemArchitecture,
         problem_statement: str,
         project_name: str,
+        project_root: Optional[Path] = None,
     ) -> SystemArchitecture:
         """
         Re-decompose a project for one milestone, preserving services that
@@ -243,6 +244,21 @@ class Architect(BaseAIAgent):
             f"    - {sc}" for sc in (milestone.success_criteria or [])
         ) or "    (none specified)"
 
+        # Read what's actually been built and documented on disk so
+        # the architect sees concrete extension points (existing
+        # routes, schemas, store members) instead of having to
+        # imagine them. Empty string when this is M1 (no docs yet)
+        # or no project_root provided.
+        workspace_state_block = ""
+        if project_root is not None:
+            try:
+                from bizniz.architect.workspace_reader import (
+                    format_existing_workspace_state,
+                )
+                workspace_state_block = format_existing_workspace_state(project_root)
+            except Exception as e:
+                log(f"Architect: workspace state read failed ({type(e).__name__}: {e})")
+
         log(
             f"Architect: evolving '{project_name}' for milestone "
             f"'{milestone.name}'..."
@@ -258,6 +274,7 @@ class Architect(BaseAIAgent):
             milestone_problem_slice=milestone.problem_slice,
             use_cases_block=use_cases_block,
             success_criteria_block=success_block,
+            workspace_state_block=workspace_state_block,
         )
 
         raw = self._call_ai_for_evolve(user_prompt, EvolveArchitectSchema)
@@ -527,6 +544,7 @@ class Architect(BaseAIAgent):
                         existing_architecture=current_architecture,
                         problem_statement=problem_statement,
                         project_name=project_name,
+                        project_root=project.root,
                     )
                     new_count = sum(1 for s in evolved_arch.services if s.evolve_state == "new")
                     ext_count = sum(1 for s in evolved_arch.services if s.evolve_state == "extended")

@@ -22,6 +22,7 @@ OVERALL PROBLEM STATEMENT (already partially built):
 EXISTING ARCHITECTURE (services already in the project):
 {existing_services}
 
+{workspace_state_block}
 MILESTONE TO DELIVER:
   Name:           {milestone_name}
   Effort:         {milestone_effort}
@@ -108,12 +109,14 @@ def build_evolve_prompt(
     milestone_problem_slice: str,
     use_cases_block: str,
     success_criteria_block: str,
+    workspace_state_block: str = "",
 ) -> str:
     return EVOLVE_PROMPT_TEMPLATE.format(
         project_name=project_name,
         project_slug=project_slug,
         problem_statement=problem_statement,
         existing_services=existing_services,
+        workspace_state_block=workspace_state_block,
         milestone_name=milestone_name,
         milestone_effort=milestone_effort or "(unspecified)",
         milestone_problem_slice=milestone_problem_slice,
