@@ -302,20 +302,98 @@ def provision_fusionauth(
         else:
             _log(on_status, f"FusionAuth agent: smoke test FAIL — {login_result}")
 
-    # Step 5: Write AUTH_CONTRACT.md
-    role_names = [r["name"] for r in roles]
-    contract = _build_contract(
-        fusionauth_url=fusionauth_url,
-        application_id=application_id,
-        roles=roles,
-        test_users=test_users,
-        tenancy_model=tenancy_model,
-        frontend_port=frontend_port,
-        smoke_passed=smoke_passed,
+    # Step 5: Build the typed AuthContract, validate it against
+    # live FusionAuth, then write AUTH_CONTRACT.md + JSON sidecar.
+    # We fail loudly if validation doesn't pass so downstream
+    # tests/engineers don't trust a contract that lies.
+    from bizniz.auth import (
+        AuthContract,
+        ContractRole,
+        ContractTestUser,
+        ContractEndpoint,
+        JwtClaimContract,
+        RuntimeContract,
+        FusionAuthOrchestrator,
     )
+
+    role_names = [r["name"] for r in roles]
+    auth_contract = AuthContract(
+        project_name=project_root.name,
+        application_id=application_id,
+        application_name=project_root.name,
+        fusionauth_url=fusionauth_url,
+        fusionauth_public_url=fusionauth_url,  # provisioner uses internal URL
+        tenancy_model=tenancy_model,
+        roles=[
+            ContractRole(
+                name=r["name"],
+                description=r.get("description", ""),
+                is_default=bool(r.get("is_default", False)),
+            )
+            for r in roles
+        ],
+        test_users=[
+            ContractTestUser(
+                email=u["email"],
+                password=u["password"],
+                roles=list(u.get("roles", [])),
+            )
+            for u in test_users
+        ],
+        skeleton_endpoints=[
+            ContractEndpoint("POST", "/api/v1/auth/register",
+                             "Register new user (proxies to FusionAuth)"),
+            ContractEndpoint("POST", "/api/v1/auth/login",
+                             "Login and receive JWT"),
+            ContractEndpoint("POST", "/api/v1/auth/refresh",
+                             "Refresh access token"),
+            ContractEndpoint("GET", "/api/v1/auth/me",
+                             "Current user profile",
+                             auth_required=True),
+            ContractEndpoint("POST", "/api/v1/auth/verify-email",
+                             "Verify email address"),
+        ],
+        fusionauth_endpoints=[
+            ContractEndpoint("POST", "/api/login", "FusionAuth login"),
+            ContractEndpoint("POST", "/api/user/registration",
+                             "Create user + register on application"),
+            ContractEndpoint("GET", "/oauth2/userinfo",
+                             "Decode access token, return claims"),
+        ],
+        runtime=RuntimeContract(
+            jwks_url=f"{fusionauth_url}/.well-known/jwks.json",
+            issuer=fusionauth_url,
+            audience=application_id,
+            algorithm="RS256",
+            jwt_claims=JwtClaimContract(),
+        ),
+        frontend_port=frontend_port,
+    )
+
+    orch = FusionAuthOrchestrator(
+        base_url=fusionauth_url,
+        api_key=fusionauth_api_key,
+        on_status=on_status,
+    )
+    validation = auth_contract.validate(orch)
+    if validation.ok:
+        _log(on_status,
+             f"FusionAuth agent: contract validated "
+             f"({len(validation.checks)} checks passed)")
+    else:
+        for check in validation.failed_checks:
+            _log(on_status,
+                 f"FusionAuth agent: contract check FAILED — "
+                 f"{check.name}: {check.detail}")
+        _log(on_status,
+             f"FusionAuth agent: WROTE INVALID CONTRACT "
+             f"({len(validation.failed_checks)} of {len(validation.checks)} "
+             f"checks failed). Downstream tests will use this contract — "
+             f"investigate FusionAuth state.")
+
+    auth_contract.write_to(project_root)
     contract_path = project_root / "AUTH_CONTRACT.md"
-    contract_path.write_text(contract, encoding="utf-8")
-    _log(on_status, f"FusionAuth agent: wrote {contract_path}")
+    _log(on_status, f"FusionAuth agent: wrote {contract_path} (+ docs/auth/contract.json)")
 
     return {
         "roles": roles,
