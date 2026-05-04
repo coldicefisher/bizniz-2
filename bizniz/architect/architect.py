@@ -1914,6 +1914,47 @@ class Architect(BaseAIAgent):
                             f"'{service.name}' ({type(e).__name__}: {e})"
                         )
 
+            # Code reviewer: structural integrity checks the type
+            # checker can't catch. Today: route duplication +
+            # doubled-prefix detection (the M1 /auth/auth/login bug).
+            # Future: SOLID violations, dead code, semantic
+            # duplication (AI-assisted). Runs deterministically;
+            # no AI calls.
+            if ws_root and ws_root.is_dir() and (service.language or "").lower() == "python":
+                try:
+                    from bizniz.reviewers import review_routes
+                    review = review_routes(ws_root)
+                    if self._on_status_message:
+                        if review.ok:
+                            self._on_status_message(
+                                f"Architect: route review {service.name} — "
+                                f"OK ({review.routes_seen} routes, "
+                                f"{review.files_scanned} files)"
+                            )
+                        else:
+                            self._on_status_message(
+                                f"Architect: route review {service.name} — "
+                                f"{len(review.issues)} ISSUE(S)"
+                            )
+                    if not review.ok:
+                        # Stack on top of any validator_error already set.
+                        review_msg = review.message()[:3000]
+                        if validator_error:
+                            validator_error = (
+                                f"{validator_error}\n\n"
+                                f"=== ALSO ===\n{review_msg}"
+                            )
+                        else:
+                            validator_error = (
+                                f"post_flight_review_failed:\n{review_msg}"
+                            )
+                except Exception as e:
+                    if self._on_status_message:
+                        self._on_status_message(
+                            f"Architect: route review skipped for "
+                            f"'{service.name}' ({type(e).__name__}: {e})"
+                        )
+
         result = ServiceResult(
             service_name=service.name,
             workspace_name=service.workspace_name,
