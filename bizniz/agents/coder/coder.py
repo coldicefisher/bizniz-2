@@ -443,18 +443,42 @@ class Coder(BaseAIAgent):
         if test_files:
             test_desc = "\n".join(f"- {tf} (modify)" for tf in test_files)
 
-        user_prompt = GENERATE_MULTI_USER_PROMPT_TEMPLATE.format(
-            issue_description=issue_description,
-            target_files_description=target_desc,
-            test_files_description=test_desc,
-        )
-
         # Detect language from target files
         has_ts = any(
             tf["filepath"].endswith((".ts", ".tsx"))
             for tf in target_files
         )
         lang = "typescript" if has_ts else "python"
+
+        # Extract the workspace's existing exports (within-service
+        # contract) and inject as ground truth. Without this, coders
+        # writing different files in the same service produce
+        # internally-inconsistent code (LoginPage assumes a
+        # state.login() that authStore doesn't expose, etc).
+        workspace_context = ""
+        try:
+            from bizniz.documenters.inject import (
+                extract_workspace_docs,
+                format_for_prompt,
+            )
+            from pathlib import Path as _Path
+            ws_root = _Path(self._workspace.root) if hasattr(self._workspace, "root") else None
+            if ws_root and ws_root.is_dir():
+                docs = extract_workspace_docs(
+                    workspace_root=ws_root, language_hint=lang,
+                )
+                workspace_context = format_for_prompt(docs, max_chars=8000)
+        except Exception as _e:
+            # Soft failure — coder runs without context, integration
+            # tests still catch regressions. Surface in logs only.
+            log(f"Coder: workspace context extraction skipped ({type(_e).__name__}: {_e})")
+
+        user_prompt = GENERATE_MULTI_USER_PROMPT_TEMPLATE.format(
+            issue_description=issue_description,
+            target_files_description=target_desc,
+            test_files_description=test_desc,
+            workspace_context=workspace_context,
+        )
 
         system_prompt = get_generate_multi_system_prompt(lang).format(
             evaluation_environment=self._environment.describe(),

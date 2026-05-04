@@ -86,11 +86,16 @@ SOURCE FILES (implement these — they already exist as stubs):
 TEST FILES (write pytest tests for the source files — stubs already exist):
 {test_files_description}
 
+{workspace_context}
 INSTRUCTIONS:
 1. View each source stub file to see its skeleton (class names, imports, signatures).
-2. View any dependency files imported by the stubs for context (1-3 calls max).
-3. IMPLEMENT the source code, then WRITE tests that verify your actual implementation.
-4. Submit with action "submit_code". Your changes array MUST include complete code for
+2. Use the WORKSPACE CONTEXT above as ground truth for what's already exported in this
+   service. If you import a symbol from another file, that symbol MUST appear in the
+   context — never assume a method exists if it isn't listed. If you need a symbol that
+   isn't there, you must define it yourself, not rely on it being elsewhere.
+3. View any dependency files imported by the stubs for additional context (1-3 calls max).
+4. IMPLEMENT the source code, then WRITE tests that verify your actual implementation.
+5. Submit with action "submit_code". Your changes array MUST include complete code for
    every source file AND every test file listed above. Use action "modify" for all files.
    Do NOT create any new files — put all helpers inline.
 
