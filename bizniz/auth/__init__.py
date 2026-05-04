@@ -25,6 +25,16 @@ from bizniz.auth.types import (
     FusionAuthError,
 )
 from bizniz.auth.fusionauth_orchestrator import FusionAuthOrchestrator
+from bizniz.auth.contract import (
+    AuthContract,
+    ContractRole,
+    ContractTestUser,
+    ContractEndpoint,
+    JwtClaimContract,
+    RuntimeContract,
+    ValidationCheck,
+    ContractValidationResult,
+)
 
 __all__ = [
     "ApplicationId",
@@ -37,4 +47,12 @@ __all__ = [
     "ReconcileReport",
     "FusionAuthError",
     "FusionAuthOrchestrator",
+    "AuthContract",
+    "ContractRole",
+    "ContractTestUser",
+    "ContractEndpoint",
+    "JwtClaimContract",
+    "RuntimeContract",
+    "ValidationCheck",
+    "ContractValidationResult",
 ]
