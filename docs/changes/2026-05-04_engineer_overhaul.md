@@ -131,20 +131,24 @@ silent miscoupling on new service types we haven't profiled.
 
 ## Phases (priority order)
 
-| Phase | Work | Leverage |
+| Phase | Work | Status |
 |---|---|---|
-| 0 | This plan doc + branch + commit current session work | — |
-| 1 | TypeScript + Python documenters → `docs/<service>/code/` | High — solves today's bug |
-| 2 | Inject deps' interfaces into coder prompt (within-service) | High — bug class disappears |
-| 3 | Layer-transition gate: backend integration tests must pass before frontend dispatch | High — prevents building against broken backend |
-| 4 | Reshape `docs/` to service-first layout (migrate existing artifacts) | Medium — discoverability |
-| 5 | Service-type profile registry; migrate hardcoded behavior to profile lookups | Medium — scales beyond fastapi+react |
-| 6 | Engineer pre-flight (validate deps + docs) + post-flight (run validator, regenerate on fail) | High — catches type errors before integration |
-| 7 | Architect reads workspace state in evolve mode | Medium — only matters M2+ |
+| 0 | This plan doc + branch + commit current session work | ✅ done |
+| 1 | TypeScript + Python documenters → `docs/<service>/code/` | ✅ done |
+| 2 | Inject deps' interfaces into coder prompt (within-service) | ✅ done |
+| 3 | Layer-transition gate: backend integration tests must pass before frontend dispatch | ✅ done |
+| 4 | Persist documenter output to `<project>/docs/<service>/code/api.json` after each engineer service completion + service-first directory layout | in progress |
+| 5 | Service-type profile registry: `(service_type, framework) → {documenter, validator, contract_format, skeleton, test_runner}` | pending |
+| 6 | Engineer pre-flight (validate deps + docs) + post-flight (run profile.validator — `tsc --noEmit` / `pyright` / `dotnet build` — regenerate on type error) | pending |
+| 7 | Architect reads workspace state from `<project>/docs/<service>/` in evolve mode | pending |
 
-Phases 1–3 are the leverage. Each ships independently, gets
-validated against M1, and we don't move on until it converges.
-Phases 4–7 are the scaling layer.
+Phase 4 expanded scope: it includes writing documenter output to
+disk so Phase 6 and Phase 7 can read it. Without persistence the
+in-process extraction from Phase 2 doesn't help downstream agents.
+
+Phase 5 ordered before Phase 6 so Phase 6's validator dispatch
+reads from the registry from the start instead of hardcoding then
+refactoring.
 
 ## Validation strategy
 

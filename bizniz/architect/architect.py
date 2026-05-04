@@ -1795,6 +1795,31 @@ class Architect(BaseAIAgent):
 
         successes = sum(1 for r in results if getattr(r, 'success', False))
         total = len(results)
+
+        # Persist documenter output so downstream agents (Phase 6
+        # post-flight, Phase 7 evolve-mode architect, future
+        # debuggers/refactorers) can read the same artifact without
+        # re-extracting. Soft-fails — engineering completed
+        # regardless of whether docs persisted.
+        if project is not None and successes > 0:
+            try:
+                from bizniz.documenters.persist import write_service_docs
+                from pathlib import Path as _Path
+                ws_root = _Path(workspace.root) if hasattr(workspace, "root") else None
+                if ws_root and ws_root.is_dir():
+                    write_service_docs(
+                        service=service,
+                        workspace_root=ws_root,
+                        project_root=_Path(project.root),
+                        on_status=self._on_status_message,
+                    )
+            except Exception as e:
+                if self._on_status_message:
+                    self._on_status_message(
+                        f"Architect: doc persistence skipped for "
+                        f"'{service.name}' ({type(e).__name__}: {e})"
+                    )
+
         return ServiceResult(
             service_name=service.name,
             workspace_name=service.workspace_name,

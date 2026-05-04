@@ -20,9 +20,12 @@ from bizniz.documenters.typescript_ast import (
     TypeScriptAstDocumenter,
     DocumenterError,
 )
+from bizniz.documenters.persist import write_service_docs, docs_dir_for
 
 __all__ = [
     "PythonAstDocumenter",
     "TypeScriptAstDocumenter",
     "DocumenterError",
+    "write_service_docs",
+    "docs_dir_for",
 ]
