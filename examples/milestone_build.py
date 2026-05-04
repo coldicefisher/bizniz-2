@@ -301,9 +301,13 @@ def main():
             on_status_message=log,
         )
 
-    def _make_integration_debugger(workspace):
+    def _make_integration_debugger(workspace, model_override: str = None):
+        # model_override is set per-tier when the architect is using
+        # the debugger escalation chain (see Architect's
+        # _build_debugger_escalation_specs). Falls back to the
+        # config default for legacy single-tier callers.
         return AgenticDebugger(
-            client=config.make_client(model=config.debugger_model),
+            client=config.make_client(model=model_override or config.debugger_model),
             workspace=workspace,
             environment=PythonSandboxExecutionEnvironment(),
             on_status_message=log,
@@ -341,7 +345,8 @@ def main():
             config, ws, on_status_message=on_status_message, image_name=image_name, language=language,
         ),
         http_api_tester_factory=lambda workspace: _make_http_api_tester(workspace),
-        integration_debugger_factory=lambda workspace: _make_integration_debugger(workspace),
+        integration_debugger_factory=_make_integration_debugger,
+        integration_debugger_escalation_tiers=config.debugger_escalation,
         web_ui_tester_factory=lambda workspace: _make_web_ui_tester(workspace),
         ux_designer_factory=_make_ux_designer_kwargs,
         project_parent=str(project_parent),

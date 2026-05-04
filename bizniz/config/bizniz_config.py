@@ -22,6 +22,25 @@ def _is_gemini_model(model_name: str) -> bool:
     return any(model_name.startswith(p) for p in GEMINI_MODEL_PREFIXES)
 
 
+class DebuggerTier(BaseModel):
+    """One tier of the AgenticDebugger escalation chain.
+
+    The chain runs sequentially: cheap-and-many at the bottom,
+    expensive-and-few at the top. Each tier gets ``repair_attempts``
+    independent debug sessions; each session may use up to
+    ``max_turns`` agent steps (tool calls + diagnose) before being
+    forced to commit.
+
+    Sticky repair log: every attempt at every tier reads the full
+    history of prior attempts (across QuickDebugger,
+    AgenticDebugger, and every prior tier in this chain) so the
+    debugger never repeats a fix the previous tier already tried.
+    """
+    model: str
+    max_turns: int = 12
+    repair_attempts: int = 2
+
+
 class BiznizConfig(BaseModel):
     default_model: str = "gpt-4o-mini"
     engineer_model: str = "gpt-4o"
@@ -42,6 +61,14 @@ class BiznizConfig(BaseModel):
     #                              (full context + discovery tools + run_command + run_tests)
     #   debugger_max_iterations  — per-ticket cap for the agentic debugger
     debugger_model: str = "gemini-pro"
+    # Escalation chain for the AgenticDebugger. Run cheap-and-many
+    # first (flash-top with 2 attempts), escalate to pro on failure.
+    # Each tier sees the full prior repair log so it doesn't repeat
+    # fixes the previous tier already tried.
+    debugger_escalation: List[DebuggerTier] = [
+        DebuggerTier(model="gemini-flash-top", max_turns=12, repair_attempts=2),
+        DebuggerTier(model="gemini-pro", max_turns=8, repair_attempts=1),
+    ]
     # Model used by HTTPApiTester and WebUITester for generating
     # integration tests. Test generation is once-per-service-per-run
     # so a top-tier model is justified for hallucination resistance.

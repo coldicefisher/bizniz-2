@@ -96,6 +96,7 @@ class Architect(BaseAIAgent):
         integration_debugger_factory: Optional[Callable] = None,
         web_ui_tester_factory: Optional[Callable] = None,
         ux_designer_factory: Optional[Callable] = None,
+        integration_debugger_escalation_tiers: Optional[list] = None,
     ):
         super().__init__(
             client=client,
@@ -112,6 +113,11 @@ class Architect(BaseAIAgent):
         self._integration_debugger_factory = integration_debugger_factory  # None → no auto-repair on integration failure
         self._web_ui_tester_factory = web_ui_tester_factory  # None → no Playwright UI tests
         self._ux_designer_factory = ux_designer_factory  # None → no UX review phase
+        # Escalation tiers — list of DebuggerTier from config. Used
+        # by _run_layer_gate to construct a per-tier
+        # DebuggerTierSpec list. Falls back to single-tier (legacy)
+        # when None or empty.
+        self._integration_debugger_escalation_tiers = integration_debugger_escalation_tiers or []
 
     @property
     def _process_system_prompt(self) -> str:
@@ -1060,6 +1066,43 @@ class Architect(BaseAIAgent):
 
         return results
 
+    def _build_debugger_escalation_specs(self):
+        """Build per-tier DebuggerTierSpec objects from the
+        ``integration_debugger_escalation_tiers`` config. Each spec
+        wraps the existing debugger factory with a ``model_override``
+        argument so each tier instantiates a debugger using its own
+        model.
+
+        Returns ``None`` when no tiers are configured (caller falls
+        back to single-tier legacy via debugger_factory + max_iterations).
+        """
+        if not self._integration_debugger_escalation_tiers:
+            return None
+        if self._integration_debugger_factory is None:
+            return None
+
+        from bizniz.integration.debug_loop import DebuggerTierSpec
+
+        specs = []
+        base_factory = self._integration_debugger_factory
+        for tier in self._integration_debugger_escalation_tiers:
+            def _tier_factory(workspace, _base=base_factory, _model=tier.model):
+                """Per-tier factory: takes ws, returns a debugger
+                bound to this tier's model. Falls back to the base
+                factory's pre-encoded model if it doesn't accept a
+                model_override kwarg (back-compat with old factories)."""
+                try:
+                    return _base(workspace, model_override=_model)
+                except TypeError:
+                    return _base(workspace)
+            specs.append(DebuggerTierSpec(
+                factory=_tier_factory,
+                model_label=tier.model,
+                max_turns=tier.max_turns,
+                repair_attempts=tier.repair_attempts,
+            ))
+        return specs
+
     def _run_layer_gate(
         self,
         architecture: SystemArchitecture,
@@ -1098,6 +1141,21 @@ class Architect(BaseAIAgent):
             f"{len(layer_backends)} backend(s) ({', '.join(s.name for s in layer_backends)})..."
         )
 
+        # Build the debugger escalation chain: one DebuggerTierSpec
+        # per configured tier. Each tier reuses the existing
+        # debugger factory but overrides the model via the optional
+        # `model_override` kwarg. Soft-skips tiers whose factory
+        # doesn't accept that kwarg (back-compat with old factories).
+        debugger_escalation_specs = self._build_debugger_escalation_specs()
+        if debugger_escalation_specs:
+            log(
+                f"Architect: layer gate — debugger escalation chain: "
+                + " → ".join(
+                    f"{s.model_label}({s.repair_attempts}×{s.max_turns})"
+                    for s in debugger_escalation_specs
+                )
+            )
+
         try:
             gate_results = run_integration_phase(
                 architecture=gated_arch,
@@ -1109,6 +1167,7 @@ class Architect(BaseAIAgent):
                 service_workspaces={s.name: service_workspaces[s.name] for s in layer_backends if s.name in service_workspaces},
                 on_status=self._on_status_message,
                 debugger_factory=self._integration_debugger_factory,
+                debugger_escalation=debugger_escalation_specs,
                 web_ui_tester_factory=None,
                 keep_stack_up=True,
             )

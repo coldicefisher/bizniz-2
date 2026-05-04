@@ -221,12 +221,11 @@ if __name__ == "__main__":
             on_status_message=log,
         )
 
-    def _make_integration_debugger(workspace):
-        # Defaults: 15 inner tool-call turns × 3 outer repair
-        # iterations = up to 45 debugger interactions per failing
-        # service.
+    def _make_integration_debugger(workspace, model_override: str = None):
+        # Per-tier model override comes from the architect's
+        # debugger escalation chain. Falls back to config default.
         return AgenticDebugger(
-            client=config.make_client(model=config.debugger_model),
+            client=config.make_client(model=model_override or config.debugger_model),
             workspace=workspace,
             environment=PythonSandboxExecutionEnvironment(),
             on_status_message=log,
@@ -264,7 +263,8 @@ if __name__ == "__main__":
             config, ws, on_status_message=on_status_message, image_name=image_name, language=language,
         ),
         http_api_tester_factory=lambda workspace: _make_http_api_tester(workspace),
-        integration_debugger_factory=lambda workspace: _make_integration_debugger(workspace),
+        integration_debugger_factory=_make_integration_debugger,
+        integration_debugger_escalation_tiers=config.debugger_escalation,
         web_ui_tester_factory=lambda workspace: _make_web_ui_tester(workspace),
         ux_designer_factory=_make_ux_designer_kwargs,
         project_parent=str(project_parent),

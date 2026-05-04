@@ -304,6 +304,7 @@ def run_integration_phase(
     debug_max_iterations: int = 3,
     web_ui_tester_factory: Optional[Callable] = None,
     keep_stack_up: bool = False,
+    debugger_escalation: Optional[List] = None,  # List[DebuggerTierSpec]
 ) -> List[ServiceResult]:
     """Verify-phase orchestration. See module docstring.
 
@@ -416,6 +417,7 @@ def run_integration_phase(
                             capture_logs=_capture_startup_logs,
                             compose_path=compose_path,
                             problem_statement=problem_statement,
+                            escalation=debugger_escalation,
                         )
 
                         if repaired:
@@ -553,6 +555,7 @@ def run_integration_phase(
                         capture_logs=_capture_backend_logs,
                         compose_path=compose_path,
                         problem_statement=problem_statement,
+                        escalation=debugger_escalation,
                     )
 
                     if repaired:
@@ -668,6 +671,7 @@ def run_integration_phase(
                             capture_logs=_capture_frontend_logs,
                             compose_path=compose_path,
                             problem_statement=problem_statement,
+                            escalation=debugger_escalation,
                         )
 
                         if repaired_fe:
