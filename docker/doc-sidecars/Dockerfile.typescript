@@ -1,0 +1,26 @@
+# TypeScript documenter sidecar.
+# Walks a frontend service workspace and emits a structured JSON
+# contract (exports, imports, interfaces, types, zustand stores)
+# using the real TypeScript compiler API via ts-morph.
+#
+# Build: docker build -t bizniz-doc-typescript:latest -f Dockerfile.typescript .
+# Usage: docker run --rm -v <workspace>:/workspace bizniz-doc-typescript:latest [service_name]
+FROM node:20-alpine
+
+WORKDIR /opt/extractor
+
+# Install ts-morph + typescript at the image layer so each extract is
+# instant (no npx download). Pinning to versions known to work with
+# our skeletons.
+RUN npm install --no-audit --no-fund --no-progress \
+        ts-morph@22.0.0 typescript@5.4.5 \
+    && npm cache clean --force
+
+COPY extract.js /opt/extractor/extract.js
+
+# /workspace is the bind mount the orchestrator provides at runtime.
+WORKDIR /workspace
+
+# First positional arg = workspace path inside container (default /workspace),
+# second = service name to embed in the JSON output.
+ENTRYPOINT ["node", "/opt/extractor/extract.js"]
