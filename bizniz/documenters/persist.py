@@ -33,11 +33,8 @@ from pathlib import Path
 from typing import Optional
 
 from bizniz.architect.types import ServiceDefinition
-from bizniz.documenters.python_ast import PythonAstDocumenter
-from bizniz.documenters.typescript_ast import (
-    TypeScriptAstDocumenter,
-    DocumenterError,
-)
+from bizniz.documenters.typescript_ast import DocumenterError
+from bizniz.profiles import documenter_for
 
 
 def docs_dir_for(project_root: Path, service_name: str) -> Path:
@@ -69,27 +66,19 @@ def write_service_docs(
         if on_status:
             on_status(msg)
 
-    lang = (service.language or "").lower()
-    documenter = None
-
-    if lang == "python":
-        documenter = PythonAstDocumenter(
-            workspace_root=Path(workspace_root),
-            service_name=service.name,
-        )
-    elif lang in ("typescript", "javascript"):
-        documenter = TypeScriptAstDocumenter(
-            workspace_root=Path(workspace_root),
-            service_name=service.name,
-        )
-    # C#, Go, etc. fall through; will be added as profiles in Phase 5.
-
-    if documenter is None:
+    documenter_cls = documenter_for(service)
+    if documenter_cls is None:
         _log(
-            f"Documenter: no extractor for language '{lang}' on service "
+            f"Documenter: no extractor profile for "
+            f"({service.service_type!r}, {service.framework!r}) on service "
             f"'{service.name}' — skipping doc persistence"
         )
         return None
+
+    documenter = documenter_cls(
+        workspace_root=Path(workspace_root),
+        service_name=service.name,
+    )
 
     out_dir = docs_dir_for(project_root, service.name)
     try:
@@ -109,7 +98,7 @@ def write_service_docs(
     meta_path = out_dir / "extract_meta.json"
     meta_path.write_text(json.dumps({
         "service": service.name,
-        "language": lang,
+        "language": (service.language or "").lower(),
         "framework": service.framework,
         "extractor": type(documenter).__name__,
         "extracted_at": datetime.now(timezone.utc).isoformat(),
