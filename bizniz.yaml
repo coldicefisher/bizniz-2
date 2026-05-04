@@ -22,7 +22,17 @@ repair_models:
   - gemini-flash-top
 # Three-phase strategy (run_three_phase): top-tier model for the agentic
 # debugging round and the per-ticket iteration cap there.
+# Flash-top here (not pro): the debugger benefits more from improved
+# tools/context (full request body schemas, hallucination guards,
+# contract guards) than from raw model strength. Pro debugger ran
+# 32 calls and still didn't connect a one-line contract bug; the
+# leverage is structural, not parametric. Tester stays on pro.
 debugger_model: gemini-flash-top
+# Top-tier model for integration test generation. Hallucinations here
+# get amplified by the debugger into real code corruption (e.g. fake
+# /grooming routes appearing in a property-manager app), so we pay
+# for the better model.
+integration_tester_model: gemini-pro
 debugger_max_iterations: 12
 stall_threshold: 3
 agentic_debug_threshold: 2

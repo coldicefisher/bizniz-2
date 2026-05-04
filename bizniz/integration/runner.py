@@ -63,6 +63,22 @@ def _wait_http_ok(url: str, deadline_s: float) -> bool:
     return False
 
 
+def _load_auth_contract_for_compose(compose_path: str) -> Optional[str]:
+    """Read AUTH_CONTRACT.md from the project root if present.
+
+    Project root is two levels up from infra/development/docker-compose.yml.
+    Mirrors `bizniz.integration.debug_loop._load_auth_contract` so testers
+    and debugger see the same contract.
+    """
+    try:
+        candidate = Path(compose_path).parent.parent.parent / "AUTH_CONTRACT.md"
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return None
+
+
 def _backends(arch: SystemArchitecture) -> List[ServiceDefinition]:
     return [
         s for s in arch.services
@@ -333,6 +349,13 @@ def run_integration_phase(
             pass
         return service_results
 
+    # Load AUTH_CONTRACT.md once. Both the HTTP and WebUI testers need
+    # to know about test users + auth endpoints so they can drive real
+    # auth flows instead of skipping protected surface area.
+    auth_contract = _load_auth_contract_for_compose(compose_path)
+    if auth_contract:
+        _log(on_status, "Integration: AUTH_CONTRACT.md found — testers will drive real auth flows")
+
     try:
         for backend in backends:
             ws = service_workspaces.get(backend.name)
@@ -383,6 +406,7 @@ def run_integration_phase(
                             max_iterations=debug_max_iterations,
                             capture_logs=_capture_startup_logs,
                             compose_path=compose_path,
+                            problem_statement=problem_statement,
                         )
 
                         if repaired:
@@ -442,6 +466,7 @@ def run_integration_phase(
                     problem_statement=problem_statement,
                     service=backend,
                     openapi_doc=contract,
+                    auth_contract=auth_contract,
                 )
             except Exception as e:
                 _log(on_status, f"Integration: test generation failed for '{backend.name}': {e}")
@@ -518,6 +543,7 @@ def run_integration_phase(
                         max_iterations=debug_max_iterations,
                         capture_logs=_capture_backend_logs,
                         compose_path=compose_path,
+                        problem_statement=problem_statement,
                     )
 
                     if repaired:
@@ -563,6 +589,7 @@ def run_integration_phase(
                         problem_statement=problem_statement,
                         service=frontend,
                         backend_contracts=contracts,
+                        auth_contract=auth_contract,
                     )
                 except Exception as e:
                     _log(on_status, f"Integration: UI test generation failed for '{frontend.name}': {e}")
@@ -631,6 +658,7 @@ def run_integration_phase(
                             max_iterations=debug_max_iterations,
                             capture_logs=_capture_frontend_logs,
                             compose_path=compose_path,
+                            problem_statement=problem_statement,
                         )
 
                         if repaired_fe:

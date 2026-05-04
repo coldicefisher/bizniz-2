@@ -17,6 +17,8 @@ from typing import Optional
 from bizniz.core.agent import BaseAIAgent
 from bizniz.architect.types import ServiceDefinition
 from bizniz.integration.web_ui_prompts import WEB_UI_TESTER_SYSTEM_PROMPT
+from bizniz.integration.hallucination_guard import validate_test_grounding
+from bizniz.integration.contract_guard import validate_form_field_contract
 
 
 class WebUITester(BaseAIAgent):
@@ -34,6 +36,7 @@ class WebUITester(BaseAIAgent):
         service: ServiceDefinition,
         backend_contracts: Optional[dict] = None,
         target_filepath: str = "tests/integration/ui.spec.cjs",
+        auth_contract: Optional[str] = None,
     ) -> str:
         """Returns a complete TypeScript file as a string, ready to
         write to ``target_filepath`` in the service workspace.
@@ -42,18 +45,75 @@ class WebUITester(BaseAIAgent):
         for any backend services that have been captured. Lets the
         UI tester write tests that know what API calls SHOULD happen
         when the user interacts with the page.
+
+        ``auth_contract`` is the verbatim text of the project's
+        AUTH_CONTRACT.md when one exists. When provided, the tester
+        MUST drive real login flows in the UI — no skipping, no
+        mocking, no DOM-presence-only checks for auth.
         """
         prompt = self._build_prompt(
             problem_statement=problem_statement,
             service=service,
             backend_contracts=backend_contracts or {},
             target_filepath=target_filepath,
+            auth_contract=auth_contract,
         )
         self.add_messages_to_history([{"role": "user", "content": prompt}])
         text, _, _ = self._ai_client.get_text(
             messages=self.message_history,
         )
-        return self._strip_code_block(text or "")
+        source = self._strip_code_block(text or "")
+
+        # Combined validation: hallucination + contract-shape. Run
+        # them as a single loop so a contract-guard retry can't
+        # silently re-introduce hallucinations (which it did — we saw
+        # the AI add `grooming services` back into the test names
+        # while fixing form fields). Both must pass on the same
+        # output before we ship.
+        extra = self._allowlist_from_context(service, backend_contracts or {})
+        if auth_contract:
+            from bizniz.integration.hallucination_guard import _tokenize as _tok
+            extra = extra | _tok(auth_contract)
+
+        def _validate(src: str) -> tuple[bool, str]:
+            h = validate_test_grounding(problem_statement, src, extra_allowed=extra)
+            if not h.ok:
+                return False, h.message()
+            c = validate_form_field_contract(src, backend_contracts or {})
+            if not c.ok:
+                return False, c.message()
+            return True, ""
+
+        ok, corrective = _validate(source)
+        if not ok:
+            self.add_messages_to_history([
+                {"role": "assistant", "content": source},
+                {"role": "user", "content": corrective},
+            ])
+            text2, _, _ = self._ai_client.get_text(messages=self.message_history)
+            source = self._strip_code_block(text2 or source)
+            ok2, corrective2 = _validate(source)
+            if not ok2:
+                raise ValueError(
+                    f"WebUITester output failed validation after one "
+                    f"corrective retry. Refusing to write a contaminated "
+                    f"test file. Reason: {corrective2[:400]}"
+                )
+
+        return source
+
+    @staticmethod
+    def _allowlist_from_context(service: ServiceDefinition, backend_contracts: dict) -> set:
+        allowed = set()
+        if service.name:
+            allowed.add(service.name.lower())
+        for svc_name, doc in (backend_contracts or {}).items():
+            allowed.add(str(svc_name).lower())
+            for path in (doc.get("paths") or {}).keys():
+                for part in str(path).split("/"):
+                    if part and not part.startswith("{") and not part.endswith("}"):
+                        allowed.add(part.lower())
+        return allowed
 
     @staticmethod
     def _build_prompt(
@@ -61,14 +121,47 @@ class WebUITester(BaseAIAgent):
         service: ServiceDefinition,
         backend_contracts: dict,
         target_filepath: str,
+        auth_contract: Optional[str] = None,
     ) -> str:
-        # Slim contracts to just paths+methods (full schemas would
-        # bloat the prompt and the UI tester doesn't need them —
-        # network assertions are coarse-grained).
+        # Slim contracts down but KEEP request body schemas — the UI
+        # tester drives forms that submit to these endpoints, so
+        # field-name drift (`username` vs `email`) silently invents
+        # bugs. Earlier this stripped to paths only; that masked the
+        # contract from the AI and the tests submitted wrong fields.
         slim_contracts = {}
         for svc_name, doc in backend_contracts.items():
-            paths = doc.get("paths", {})
-            slim_contracts[svc_name] = sorted(paths.keys())
+            slim_paths = {}
+            for path, ops in (doc.get("paths") or {}).items():
+                if not isinstance(ops, dict):
+                    continue
+                slim_ops = {}
+                for method, op in ops.items():
+                    if not isinstance(op, dict):
+                        continue
+                    rb = op.get("requestBody") or {}
+                    rb_schema = (
+                        rb.get("content", {}).get("application/json", {}).get("schema")
+                    )
+                    slim_ops[method] = {
+                        "summary": op.get("summary"),
+                        "requestBody": rb_schema,
+                    }
+                if slim_ops:
+                    slim_paths[path] = slim_ops
+            slim_contracts[svc_name] = slim_paths
+
+        if auth_contract:
+            auth_section = (
+                "AUTH CONTRACT (the project has FusionAuth-backed authentication; "
+                "you MUST drive the real login UI flow, NOT fake authentication "
+                "in test code):\n\n"
+                f"{auth_contract}\n"
+            )
+        else:
+            auth_section = (
+                "AUTH CONTRACT: none. This frontend has no authentication. "
+                "Do not invent login flows."
+            )
 
         return (
             f"PROBLEM STATEMENT:\n{problem_statement}\n\n"
@@ -78,6 +171,7 @@ class WebUITester(BaseAIAgent):
             f"- language: {service.language}\n"
             f"- port: {service.port}\n"
             f"- description: {service.description}\n\n"
+            f"{auth_section}\n\n"
             f"BACKEND ENDPOINTS (the frontend should be calling these):\n"
             f"{json.dumps(slim_contracts, indent=2)}\n\n"
             f"Write the Playwright integration test file. Target path: "

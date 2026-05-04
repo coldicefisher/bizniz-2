@@ -295,7 +295,7 @@ def main():
 
     def _make_http_api_tester(workspace):
         return HTTPApiTester(
-            client=config.make_engineer_client(),
+            client=config.make_integration_tester_client(),
             environment=PythonSandboxExecutionEnvironment(),
             workspace=workspace,
             on_status_message=log,
@@ -311,7 +311,7 @@ def main():
 
     def _make_web_ui_tester(workspace):
         return WebUITester(
-            client=config.make_engineer_client(),
+            client=config.make_integration_tester_client(),
             environment=PythonSandboxExecutionEnvironment(),
             workspace=workspace,
             on_status_message=log,

@@ -130,4 +130,6 @@ def test_system_prompt_present():
     sp = tester._process_system_prompt
     assert "Playwright" in sp
     assert "console.error" in sp or "console errors" in sp.lower()
-    assert "is not defined" in sp  # the V9-style failure mode is named explicitly
+    # V9-era "is not defined" Jest-leak pattern is now covered by the broader
+    # ReferenceError class. Either form is acceptable.
+    assert "ReferenceError" in sp or "is not defined" in sp

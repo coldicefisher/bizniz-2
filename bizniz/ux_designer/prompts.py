@@ -20,26 +20,134 @@ The milestone scope for the current build:
 
 {routes_section}
 
-Generate a CommonJS (.cjs) Playwright script that:
-1. Visits every known route/view in the application
-2. Waits for the page to fully render (networkidle or domcontentloaded)
-3. Takes a full-page screenshot of each view, saved to /workspace/screenshots/<view_name>.png
-4. If there are forms, fill them with sample data and screenshot the filled state
-5. If there are modals or dropdowns, open them and screenshot
-6. Names screenshots descriptively: home.png, services-list.png, booking-form.png, etc.
+{auth_contract_section}
 
-IMPORTANT:
-- Use `const {{ test, expect }} = require('@playwright/test');` (CommonJS)
-- Use `process.env.FRONTEND_URL` for the base URL
-- Create the screenshots directory: `const fs = require('fs'); fs.mkdirSync('/workspace/screenshots', {{ recursive: true }});`
-- Set viewport to 1280x720 for consistent screenshots
-- Use `waitUntil: 'networkidle'` with a 30-second timeout on every page.goto()
-- After EVERY navigation, add `await page.waitForTimeout(5000);` — SPAs need
-  time for Vite HMR, React hydration, lazy loading, and API data fetching.
-  This is critical. 1 second is NOT enough. 5 seconds minimum.
-- Do NOT assert on content — this is purely for screenshots, not testing
-- If a page doesn't load, skip it (try/catch) and move on
-- Maximum 15 screenshots to keep evaluation cost reasonable
+GOAL: capture a screenshot of EVERY user-visible view so a designer can
+evaluate the UI. Each route is its own independent test so that one stuck
+or broken page does NOT prevent the others from being captured.
+
+STRUCTURE — emit one `test('screenshot <name>', ...)` block per route:
+
+    const {{ test }} = require('@playwright/test');
+    const fs = require('fs');
+    const BASE = process.env.FRONTEND_URL;
+
+    test.beforeAll(() => {{
+      fs.mkdirSync('/workspace/screenshots', {{ recursive: true }});
+    }});
+
+    async function captureRoute(page, route, filename) {{
+      await page.setViewportSize({{ width: 1280, height: 720 }});
+      await page.goto(`${{BASE}}${{route}}`, {{ waitUntil: 'domcontentloaded', timeout: 30000 }});
+      await page.waitForLoadState('networkidle', {{ timeout: 30000 }}).catch(() => {{}});
+      await page.waitForFunction(() => {{
+        const root = document.querySelector('#root, #app, main') || document.body;
+        if (!root) return false;
+        const text = (root.innerText || '').trim();
+        const interactive = root.querySelectorAll(
+          'button, a, input, textarea, select, h1, h2, h3, [role]'
+        ).length;
+        return text.length > 20 || interactive > 0;
+      }}, {{ timeout: 30000, polling: 1000 }});
+      await page.screenshot({{ path: `/workspace/screenshots/${{filename}}.png`, fullPage: true }});
+    }}
+
+    test('screenshot home', async ({{ page }}) => {{ await captureRoute(page, '/', 'home'); }});
+    test('screenshot login', async ({{ page }}) => {{ await captureRoute(page, '/login', 'login'); }});
+    // ...one test per route...
+
+AUTHENTICATION (when an AUTH CONTRACT is provided above):
+Many routes are protected and redirect to `/login` when unauthenticated.
+Sign in ONCE in `test.beforeAll`, save `storageState`, then
+`test.use({{ storageState }})`. CRITICAL RULES:
+
+1. ALWAYS write the storageState file at the end of beforeAll, even if
+   login failed. Use a `finally` block. Otherwise tests cascade with
+   ENOENT and zero screenshots are captured.
+2. Use POSITION-BASED locators (NOT guessed name="email" / name="password"
+   attributes — frontends often don't set those). Fall through a small
+   list of common shapes.
+3. {login_source_section}
+
+Pattern (use this verbatim, only changing the credentials and route names):
+
+    const STATE_PATH = '/workspace/.ux-auth-state.json';
+
+    test.beforeAll(async ({{ browser }}) => {{
+      const ctx = await browser.newContext();
+      const page = await ctx.newPage();
+      try {{
+        await page.goto(`${{BASE}}/login`, {{ waitUntil: 'domcontentloaded', timeout: 30000 }});
+
+        // Position-based: first text/email input, first password input, first submit.
+        // This is MUCH more robust than guessing name attributes.
+        const userInput = page.locator(
+          'input[type="email"], input[type="text"], input[name="email"], input[name="username"]'
+        ).first();
+        const passInput = page.locator('input[type="password"]').first();
+        await userInput.fill('<TEST_EMAIL_OR_USERNAME>');
+        await passInput.fill('<TEST_PASSWORD>');
+
+        const submit = page.locator('button[type="submit"], button:has-text("Login"), button:has-text("Sign in")').first();
+        await Promise.all([
+          page.waitForURL((url) => !url.pathname.endsWith('/login'), {{ timeout: 15000 }}).catch(() => {{}}),
+          submit.click(),
+        ]);
+      }} catch (e) {{
+        console.error('UI login failed:', e.message);
+
+        // Fallback: API login + inject token into localStorage.
+        const apiBase = process.env.BACKEND_URL;
+        if (apiBase) {{
+          try {{
+            const resp = await page.request.post(`${{apiBase}}/api/v1/auth/login`, {{
+              data: {{ email: '<TEST_EMAIL_OR_USERNAME>', username: '<TEST_EMAIL_OR_USERNAME>', password: '<TEST_PASSWORD>' }},
+            }});
+            if (resp.ok()) {{
+              const body = await resp.json();
+              const token = body.access_token || body.accessToken || body.token || body.jwt;
+              await page.goto(BASE);
+              await page.evaluate((t) => {{
+                if (!t) return;
+                localStorage.setItem('access_token', t);
+                localStorage.setItem('accessToken', t);
+                localStorage.setItem('token', t);
+              }}, token);
+            }}
+          }} catch (e2) {{
+            console.error('API login also failed:', e2.message);
+          }}
+        }}
+      }} finally {{
+        // ALWAYS save state — even an unauthenticated state file prevents
+        // every subsequent test from failing with ENOENT.
+        await ctx.storageState({{ path: STATE_PATH }});
+        await ctx.close();
+      }}
+    }});
+
+    // Apply auth state to every test in this file.
+    test.use({{ storageState: STATE_PATH }});
+
+If NO auth contract is provided, omit the auth setup entirely and just
+screenshot whatever public routes are visible.
+
+REQUIREMENTS:
+- One `test()` block per route — NEVER combine multiple routes into one test.
+  Playwright runs each test in a fresh page/context, so a hang on one
+  route does not poison the others.
+- Use `waitUntil: 'domcontentloaded'` (NOT 'networkidle') on `page.goto`
+  — long-polling endpoints can prevent networkidle from firing.
+- ALWAYS wait for real content with `waitForFunction` before screenshotting.
+  Do NOT use a fixed `waitForTimeout` — it either over-waits or captures blank.
+- For forms, add a SEPARATE test that visits the route, fills sample data,
+  then screenshots (`form-name-filled.png`).
+- For modals/dropdowns, add a SEPARATE test that opens them.
+- Name screenshots descriptively: `home.png`, `properties-list.png`,
+  `payments-history.png`, `maintenance-form-filled.png`.
+- Cap total tests at 15 to keep evaluation cost reasonable.
+- Use `process.env.FRONTEND_URL` for the base URL.
+- Use CommonJS: `const {{ test }} = require('@playwright/test');`.
 
 Output ONLY the script code, no markdown fences, no explanation.
 """

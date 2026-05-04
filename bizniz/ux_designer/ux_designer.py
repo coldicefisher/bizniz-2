@@ -78,6 +78,8 @@ class UXDesigner:
         milestone_scope: str = "",
         design_system: str = "Tailwind CSS",
         routes: Optional[List[str]] = None,
+        auth_contract: Optional[str] = None,
+        backend_url: Optional[str] = None,
     ) -> Dict:
         """Run the full UX review cycle for one frontend service.
 
@@ -105,6 +107,8 @@ class UXDesigner:
                 problem_statement=problem_statement,
                 milestone_scope=milestone_scope,
                 routes=routes,
+                auth_contract=auth_contract,
+                backend_url=backend_url,
             )
             result["screenshots_taken"] = len(screenshots)
 
@@ -179,6 +183,8 @@ class UXDesigner:
         problem_statement: str,
         milestone_scope: str = "",
         routes: Optional[List[str]] = None,
+        auth_contract: Optional[str] = None,
+        backend_url: Optional[str] = None,
     ) -> List[Dict]:
         """Generate a Playwright script and run it to capture screenshots.
 
@@ -192,11 +198,26 @@ class UXDesigner:
             # Try to discover routes from workspace files
             routes_section = self._discover_routes(workspace, service)
 
+        if auth_contract:
+            auth_contract_section = (
+                "AUTH CONTRACT — sign in before screenshotting protected routes:\n\n"
+                f"{auth_contract}\n"
+            )
+            login_source_section = self._login_source_hint(workspace)
+        else:
+            auth_contract_section = (
+                "No auth contract — assume routes are public; do NOT generate "
+                "any auth setup code."
+            )
+            login_source_section = "(no auth contract — skip auth setup entirely)"
+
         script_prompt = SCREENSHOT_SCRIPT_PROMPT.format(
             framework=service.framework,
             problem_statement=problem_statement,
             milestone_scope=milestone_scope or "(full application)",
             routes_section=routes_section,
+            auth_contract_section=auth_contract_section,
+            login_source_section=login_source_section,
         )
 
         script_text, _, _ = self._vision.get_text(
@@ -217,6 +238,14 @@ class UXDesigner:
         script_path.write_text(script_text)
 
         screenshots_dir = workspace_root / "screenshots"
+        # Clear any leftover screenshots from prior runs so collected
+        # results reflect only what this run captured.
+        if screenshots_dir.exists():
+            for old in screenshots_dir.glob("*.png"):
+                try:
+                    old.unlink()
+                except Exception:
+                    pass
         screenshots_dir.mkdir(parents=True, exist_ok=True)
 
         # Run via Playwright sidecar
@@ -224,6 +253,7 @@ class UXDesigner:
             service=service,
             workspace_path=workspace_root,
             compose_path=compose_path,
+            backend_url=backend_url,
         )
 
         if not success:
@@ -239,6 +269,7 @@ class UXDesigner:
         service: ServiceDefinition,
         workspace_path: Path,
         compose_path: str,
+        backend_url: Optional[str] = None,
     ) -> tuple[bool, str]:
         """Run the screenshot Playwright script in the sidecar."""
         from bizniz.integration.runner import _compose_project_name
@@ -249,16 +280,26 @@ class UXDesigner:
         config_body = (
             'module.exports = { testDir: "tests", '
             'testMatch: ["**/ux_screenshots.spec.cjs"], '
-            'reporter: "list", timeout: 120000, '
-            'fullyParallel: false, workers: 1, '
+            'reporter: "list", timeout: 45000, '
+            'fullyParallel: true, workers: 4, '
             'forbidOnly: true, '
             'use: { trace: "off", video: "off", screenshot: "off", '
             'viewport: { width: 1280, height: 720 } } };'
         )
         write_config = f"printf '%s' {shlex.quote(config_body)} > playwright.ux.config.cjs"
+        # Pre-create an empty/anonymous storageState so `test.use({storageState})`
+        # can always load it. beforeAll overwrites with the authenticated state.
+        # Without this, a slow/failed login means every test ENOENTs.
+        empty_state = '{"cookies":[],"origins":[]}'
+        write_state = (
+            f"printf '%s' {shlex.quote(empty_state)} > .ux-auth-state.json"
+        )
+        env_exports = f"FRONTEND_URL={shlex.quote(base_url)} "
+        if backend_url:
+            env_exports += f"BACKEND_URL={shlex.quote(backend_url)} "
         run_cmd = (
-            f"cd /workspace && {write_config} && "
-            f"FRONTEND_URL={shlex.quote(base_url)} "
+            f"cd /workspace && {write_config} && {write_state} && "
+            f"{env_exports}"
             f"npx playwright test --config=playwright.ux.config.cjs"
         )
 
@@ -275,10 +316,10 @@ class UXDesigner:
 
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=180,
+                cmd, capture_output=True, text=True, timeout=300,
             )
         except subprocess.TimeoutExpired as e:
-            return False, f"screenshot script timed out after 180s\n{e.stdout or ''}{e.stderr or ''}"
+            return False, f"screenshot script timed out after 300s\n{e.stdout or ''}{e.stderr or ''}"
 
         return proc.returncode == 0, (proc.stdout or "") + (proc.stderr or "")
 
@@ -297,8 +338,9 @@ class UXDesigner:
         screenshots_dir = workspace_path / "screenshots"
         screenshots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Simple inline script that screenshots the home page.
-        # Long waits: SPAs need time for Vite HMR, React hydration, etc.
+        # Inline script: navigate, poll for real content, screenshot.
+        # waitForFunction polls every 1s for up to 60s, so we never screenshot a
+        # blank page and never over-wait once the SPA has hydrated.
         script = (
             f"const {{ chromium }} = require('playwright');\n"
             f"(async () => {{\n"
@@ -306,8 +348,17 @@ class UXDesigner:
             f"  const page = await browser.newPage();\n"
             f"  await page.setViewportSize({{ width: 1280, height: 720 }});\n"
             f"  try {{\n"
-            f"    await page.goto('{base_url}/', {{ waitUntil: 'networkidle', timeout: 30000 }});\n"
-            f"    await page.waitForTimeout(5000);\n"
+            f"    await page.goto('{base_url}/', {{ waitUntil: 'domcontentloaded', timeout: 30000 }});\n"
+            f"    await page.waitForLoadState('networkidle', {{ timeout: 30000 }}).catch(() => {{}});\n"
+            f"    await page.waitForFunction(() => {{\n"
+            f"      const root = document.querySelector('#root, #app, main') || document.body;\n"
+            f"      if (!root) return false;\n"
+            f"      const text = (root.innerText || '').trim();\n"
+            f"      const interactive = root.querySelectorAll(\n"
+            f"        'button, a, input, textarea, select, h1, h2, h3, [role]'\n"
+            f"      ).length;\n"
+            f"      return text.length > 20 || interactive > 0;\n"
+            f"    }}, {{ timeout: 30000, polling: 1000 }});\n"
             f"    await page.screenshot({{ path: '/workspace/screenshots/home.png', fullPage: true }});\n"
             f"  }} catch(e) {{ console.error('Failed:', e.message); }}\n"
             f"  await browser.close();\n"
@@ -326,7 +377,7 @@ class UXDesigner:
         ]
 
         try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+            subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         except Exception as e:
             _log(self._on_status, f"UX Designer: fallback screenshot also failed: {e}")
             return []
@@ -445,6 +496,39 @@ class UXDesigner:
             return 0
 
     @staticmethod
+    def _login_source_hint(workspace: "BaseWorkspace") -> str:
+        """Find the login page source and embed it so the AI uses real selectors.
+
+        Without this, the AI guesses common attribute names (name="email",
+        name="password") which often don't match the actual form.
+        """
+        workspace_root = Path(workspace.root)
+        candidates = [
+            "src/pages/LoginPage.tsx",
+            "src/pages/Login.tsx",
+            "src/routes/login.tsx",
+            "src/views/Login.vue",
+            "src/components/auth/LoginPage.tsx",
+            "src/app/login/page.tsx",
+        ]
+        for rel in candidates:
+            p = workspace_root / rel
+            if p.exists():
+                try:
+                    body = p.read_text(encoding="utf-8")[:3000]
+                    return (
+                        f"Login form source ({rel}) — use these EXACT field "
+                        f"shapes when filling the login form (placeholder, type, "
+                        f"name, etc.):\n\n```tsx\n{body}\n```"
+                    )
+                except Exception:
+                    continue
+        return (
+            "Login source not found at common paths — fall back to position-based "
+            "locators (first text/email input, first password input)."
+        )
+
+    @staticmethod
     def _discover_routes(workspace: "BaseWorkspace", service: ServiceDefinition) -> str:
         """Try to discover routes from the frontend workspace."""
         workspace_root = Path(workspace.root)
@@ -515,6 +599,18 @@ def run_ux_review(
         acceptable_score=acceptable_score,
     )
 
+    # Derive auth contract + backend URL once. Both are optional — apps
+    # without auth or backend simply don't get them.
+    auth_contract = _load_auth_contract_for_compose(compose_path)
+    if auth_contract:
+        _log(on_status, "UX Designer: AUTH_CONTRACT.md found — auth login will be attempted")
+
+    backend = next(
+        (s for s in architecture.services if s.service_type == "backend" and s.port),
+        None,
+    )
+    backend_url = f"http://{backend.name}:{backend.port}" if backend else None
+
     results = []
     for frontend in frontends:
         ws = service_workspaces.get(frontend.name)
@@ -532,10 +628,26 @@ def run_ux_review(
             problem_statement=problem_statement,
             milestone_scope=milestone_scope,
             design_system=design_system,
+            auth_contract=auth_contract,
+            backend_url=backend_url,
         )
         results.append(review)
 
     return results
+
+
+def _load_auth_contract_for_compose(compose_path: str) -> Optional[str]:
+    """Read AUTH_CONTRACT.md from the project root if present.
+
+    Project root is two levels up from infra/development/docker-compose.yml.
+    """
+    try:
+        candidate = Path(compose_path).parent.parent.parent / "AUTH_CONTRACT.md"
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return None
 
 
 def _detect_design_system(service: ServiceDefinition) -> str:

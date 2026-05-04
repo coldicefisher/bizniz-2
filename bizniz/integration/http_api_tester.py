@@ -17,6 +17,7 @@ from typing import Optional
 from bizniz.core.agent import BaseAIAgent
 from bizniz.architect.types import ServiceDefinition
 from bizniz.integration.prompts import HTTP_API_TESTER_SYSTEM_PROMPT
+from bizniz.integration.hallucination_guard import validate_test_grounding
 
 
 class HTTPApiTester(BaseAIAgent):
@@ -33,21 +34,81 @@ class HTTPApiTester(BaseAIAgent):
         service: ServiceDefinition,
         openapi_doc: dict,
         target_filepath: str = "tests/integration/test_api.py",
+        auth_contract: Optional[str] = None,
     ) -> str:
         """Returns a complete Python file as a string, ready to write
         to ``target_filepath`` in the service workspace.
+
+        ``auth_contract`` is the verbatim text of the project's
+        AUTH_CONTRACT.md when one exists. When provided, the tester
+        MUST drive real auth flows and test protected endpoints with
+        real tokens — no skipping, no mocking.
         """
         prompt = self._build_prompt(
             problem_statement=problem_statement,
             service=service,
             openapi_doc=openapi_doc,
             target_filepath=target_filepath,
+            auth_contract=auth_contract,
         )
         self.add_messages_to_history([{"role": "user", "content": prompt}])
         text, _, _ = self._ai_client.get_text(
             messages=self.message_history,
         )
-        return self._strip_code_block(text or "")
+        source = self._strip_code_block(text or "")
+
+        # Hallucination guard: detect domain confabulation (e.g. AI
+        # writing tests for "grooming services" in a property-manager
+        # project). On detection, re-prompt with a corrective message
+        # AND re-validate. If hallucination persists across the retry,
+        # fail loudly — better to error out than ship contaminated
+        # tests that the debugger then makes real by creating
+        # matching source files (we've seen exactly this corruption).
+        extra = self._allowlist_from_context(service, openapi_doc)
+        # Tokens from the auth contract are legitimate — the test users'
+        # email TLDs (e.g. `landlord@test.local`) shouldn't be flagged
+        # just because "local" doesn't appear in the problem statement.
+        if auth_contract:
+            from bizniz.integration.hallucination_guard import _tokenize as _tok
+            extra = extra | _tok(auth_contract)
+        report = validate_test_grounding(problem_statement, source, extra_allowed=extra)
+        if not report.ok:
+            corrective = report.message()
+            self.add_messages_to_history([
+                {"role": "assistant", "content": source},
+                {"role": "user", "content": corrective},
+            ])
+            text2, _, _ = self._ai_client.get_text(messages=self.message_history)
+            source = self._strip_code_block(text2 or source)
+            # Re-validate. If still hallucinating, raise — the runner
+            # converts this into a tester-error per-service, which is
+            # surfaceable, instead of silently writing a bad file that
+            # the debugger then implements.
+            report2 = validate_test_grounding(problem_statement, source, extra_allowed=extra)
+            if not report2.ok:
+                raise ValueError(
+                    f"HTTPApiTester output kept hallucinating domain "
+                    f"after one corrective retry. Suspicious tokens: "
+                    f"{report2.suspicious[:8]}. Refusing to write a "
+                    f"contaminated test file."
+                )
+
+        return source
+
+    @staticmethod
+    def _allowlist_from_context(service: ServiceDefinition, openapi_doc: dict) -> set:
+        allowed = set()
+        if service.name:
+            allowed.add(service.name.lower())
+        # Tokens from OpenAPI paths (e.g. /api/v1/properties → properties)
+        for path in (openapi_doc.get("paths") or {}).keys():
+            for part in str(path).split("/"):
+                if part and not part.startswith("{") and not part.endswith("}"):
+                    allowed.add(part.lower())
+        # Schema names too — these are domain-relevant
+        for schema_name in (openapi_doc.get("components", {}).get("schemas", {}) or {}).keys():
+            allowed.add(str(schema_name).lower())
+        return allowed
 
     @staticmethod
     def _build_prompt(
@@ -55,6 +116,7 @@ class HTTPApiTester(BaseAIAgent):
         service: ServiceDefinition,
         openapi_doc: dict,
         target_filepath: str,
+        auth_contract: Optional[str] = None,
     ) -> str:
         # Trim the openapi doc — full schemas can balloon prompt cost.
         # Keep paths + methods + summaries + parameter/body schemas;
@@ -79,6 +141,19 @@ class HTTPApiTester(BaseAIAgent):
 
         components = openapi_doc.get("components", {}).get("schemas", {})
 
+        if auth_contract:
+            auth_section = (
+                f"AUTH CONTRACT (the project has FusionAuth-backed authentication; "
+                f"you MUST exercise auth end-to-end — no skipping protected "
+                f"endpoints, no mocking, no faking tokens):\n\n"
+                f"{auth_contract}\n"
+            )
+        else:
+            auth_section = (
+                "AUTH CONTRACT: none. This service has no authentication. "
+                "Do not invent auth headers."
+            )
+
         return (
             f"PROBLEM STATEMENT:\n{problem_statement}\n\n"
             f"SERVICE:\n"
@@ -88,6 +163,7 @@ class HTTPApiTester(BaseAIAgent):
             f"- language: {service.language}\n"
             f"- port: {service.port}\n"
             f"- description: {service.description}\n\n"
+            f"{auth_section}\n\n"
             f"OPENAPI PATHS (slimmed):\n"
             f"{json.dumps(slim_paths, indent=2)}\n\n"
             f"OPENAPI SCHEMAS (request/response shapes):\n"

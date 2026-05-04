@@ -271,7 +271,12 @@ def provision_fusionauth(
         name = role["name"]
         if name == "admin":
             continue  # kickstart already creates admin
-        email = f"{name}@test.local"
+        # Use @example.com (a reserved real TLD per RFC 2606) instead of
+        # @test.local. Strict email validators like pydantic's EmailStr
+        # reject `.local` outright as a special-use TLD, which silently
+        # blocks every contract-user login test downstream. example.com
+        # is safe, always reserved, and accepted by every validator.
+        email = f"{name}@example.com"
         password = "TestPass123!"
         result = fa.register_user(
             application_id, email, password,

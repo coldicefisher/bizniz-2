@@ -215,7 +215,7 @@ if __name__ == "__main__":
 
     def _make_http_api_tester(workspace):
         return HTTPApiTester(
-            client=config.make_engineer_client(),
+            client=config.make_integration_tester_client(),
             environment=PythonSandboxExecutionEnvironment(),
             workspace=workspace,
             on_status_message=log,
@@ -234,7 +234,7 @@ if __name__ == "__main__":
 
     def _make_web_ui_tester(workspace):
         return WebUITester(
-            client=config.make_engineer_client(),
+            client=config.make_integration_tester_client(),
             environment=PythonSandboxExecutionEnvironment(),
             workspace=workspace,
             on_status_message=log,

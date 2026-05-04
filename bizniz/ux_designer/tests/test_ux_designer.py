@@ -243,17 +243,18 @@ def test_review_skips_when_no_screenshots(
 def test_review_stops_when_score_acceptable(
     mock_subprocess, mock_vision_client, frontend_service, sample_png_bytes, tmp_path,
 ):
-    # Make subprocess succeed and write a screenshot
-    mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
     # Use a real workspace path
     ws = MagicMock()
     ws.root = str(tmp_path)
 
-    # Pre-create a screenshot file
+    # Mock subprocess to "write" a screenshot the way the real script would,
+    # so the post-clear collect step finds it.
     ss_dir = tmp_path / "screenshots"
-    ss_dir.mkdir(parents=True, exist_ok=True)
-    (ss_dir / "home.png").write_bytes(sample_png_bytes)
+    def _fake_run(*a, **kw):
+        ss_dir.mkdir(parents=True, exist_ok=True)
+        (ss_dir / "home.png").write_bytes(sample_png_bytes)
+        return MagicMock(returncode=0, stdout="ok", stderr="")
+    mock_subprocess.run.side_effect = _fake_run
 
     # Score of 7 >= acceptable (6)
     designer = UXDesigner(vision_client=mock_vision_client, acceptable_score=6)

@@ -26,8 +26,12 @@ Your job is product-shaped, not engineering-shaped:
 
 Rules of thumb:
 
-  - First milestone is usually auth + the simplest core entity (e.g.
-    "auth + view my profile" or "sign up + create one record").
+  - If the problem statement implies authentication (logins, users,
+    roles, accounts, "their" data, anything private) the FIRST milestone
+    MUST be auth + the simplest authenticated read (e.g. "sign up, log
+    in, view my profile" or "log in and create one record"). Every
+    subsequent milestone assumes it can rely on a working auth flow and
+    real users — integration tests will exercise auth end-to-end.
   - Don't include "build infrastructure" as a milestone — the Architect
     handles infrastructure when it picks services.
   - Don't include "write tests" — testing is implied at every level.

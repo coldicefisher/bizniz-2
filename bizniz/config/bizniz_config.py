@@ -42,6 +42,10 @@ class BiznizConfig(BaseModel):
     #                              (full context + discovery tools + run_command + run_tests)
     #   debugger_max_iterations  — per-ticket cap for the agentic debugger
     debugger_model: str = "gemini-pro"
+    # Model used by HTTPApiTester and WebUITester for generating
+    # integration tests. Test generation is once-per-service-per-run
+    # so a top-tier model is justified for hallucination resistance.
+    integration_tester_model: str = "gemini-pro"
     debugger_max_iterations: int = 12
     # Escalation thresholds (consecutive failures before escalating model)
     stall_threshold: int = 3
@@ -100,6 +104,13 @@ class BiznizConfig(BaseModel):
     def make_planner_client(self) -> BaseAIClient:
         """Create a client configured with the planner model (top tier)."""
         return self.make_client(model=self.planner_model)
+
+    def make_integration_tester_client(self) -> BaseAIClient:
+        """Client for HTTPApiTester / WebUITester. Top tier — these
+        generate the integration tests that gate every milestone, so
+        hallucinations have outsized cost (debugger amplifies them
+        into real code corruption)."""
+        return self.make_client(model=self.integration_tester_model)
 
     def make_model_progression(self) -> ModelProgression:
         return ModelProgression(models=self.models)

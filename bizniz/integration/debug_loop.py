@@ -94,6 +94,50 @@ def _list_relevant_source_files(workspace, max_files: int = 30) -> list[str]:
     return keep
 
 
+def _is_hallucinated_new_file(
+    filepath: str,
+    new_content: str,
+    workspace,
+    problem_statement: str,
+) -> bool:
+    """Return True if the debugger is touching a file whose path
+    contains a domain noun absent from the problem statement (e.g.
+    ``app/api/routes/grooming.py`` in a property-manager project).
+
+    We reject BOTH creation and modification of such files. A naive
+    "only block new files" check let prior corruption persist through
+    re-runs — the file existed from a previous bad run, so subsequent
+    debugger fixes were allowed to keep editing it.
+    """
+    from bizniz.integration.hallucination_guard import _tokenize, _GENERIC_VOCAB
+    from pathlib import Path as _Path
+    import re as _re
+
+    # Walk EVERY directory part + filename stem of the path. Any of
+    # them having a domain-suspicious word is grounds to reject.
+    p = _Path(filepath)
+    candidates = list(p.parts[:-1]) + [p.stem]
+
+    problem_tokens = _tokenize(problem_statement)
+    allowed = problem_tokens | _GENERIC_VOCAB
+
+    for cand in candidates:
+        # Split CamelCase, snake_case, kebab-case, and dotted paths so
+        # all of these get checked piece-by-piece:
+        #   GroomingPage     → grooming, page
+        #   appointments_router → appointments, router
+        #   user-profile     → user, profile
+        #   vite.config      → vite, config
+        for piece in _re.split(r"[._-]|(?<=[a-z])(?=[A-Z])", cand):
+            piece = piece.lower()
+            if len(piece) < 5:
+                continue  # skip short tokens (avoid noise from "src", "app", "vite")
+            if piece in allowed:
+                continue
+            return True
+    return False
+
+
 def _load_auth_contract(workspace, compose_path: Optional[str]) -> Optional[str]:
     """Try to find AUTH_CONTRACT.md at the project root.
 
@@ -134,6 +178,7 @@ def repair_integration_failure(
     max_iterations: int = 3,
     capture_logs: Optional[Callable[[], str]] = None,
     compose_path: Optional[str] = None,
+    problem_statement: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Run the agentic debug loop. Returns ``(passed, final_output)``.
 
@@ -237,8 +282,22 @@ def repair_integration_failure(
                 f"Fix plan: {chr(10).join('  - ' + s for s in diagnosis.fix_plan)}\n"
             )
 
-        # Apply fixes
+        # Apply fixes — but reject any new file whose path is rooted
+        # in a domain absent from the problem statement. This is the
+        # last line of defense against the debugger creating
+        # `grooming.py` to satisfy a hallucinated test (we've seen
+        # exactly this corruption on property-management projects).
         for fix in diagnosis.code_fixes:
+            if problem_statement and _is_hallucinated_new_file(
+                fix.filepath, fix.new_content, workspace, problem_statement,
+            ):
+                _log(
+                    on_status,
+                    f"Integration debug: REJECTED fix to {fix.filepath} — "
+                    f"path/content references a domain not in the problem "
+                    f"statement (likely amplifying a hallucinated test)."
+                )
+                continue
             try:
                 workspace.write_file(path=fix.filepath, content=fix.new_content)
                 _log(on_status, f"Integration debug: applied fix to {fix.filepath}")

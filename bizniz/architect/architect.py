@@ -1710,9 +1710,12 @@ class Architect(BaseAIAgent):
         contracts = getattr(self, "_captured_contracts", None) or {}
         if not contracts:
             return ""
+        import json as _json
         lines = [
             "Backend contracts (already built and verified — call these "
-            "endpoints, do not guess shapes):\n"
+            "endpoints with the EXACT request/response shapes shown. Do "
+            "NOT guess field names; the integration tests will run "
+            "against these contracts and catch any drift):\n"
         ]
         for svc_name, doc in contracts.items():
             if svc_name == current_service.name:
@@ -1726,11 +1729,83 @@ class Architect(BaseAIAgent):
             for path, ops in sorted(paths.items()):
                 if not isinstance(ops, dict):
                     continue
-                methods = sorted(m.upper() for m in ops.keys() if isinstance(ops.get(m), dict))
-                if methods:
-                    lines.append(f"  {','.join(methods):<20s} {path}")
+                for method, op in sorted(ops.items()):
+                    if not isinstance(op, dict):
+                        continue
+                    line = f"  {method.upper():<6s} {path}"
+                    summary = op.get("summary") or op.get("description")
+                    if summary:
+                        line += f"  — {summary}"
+                    lines.append(line)
+                    # Request body shape (this is the field-name source
+                    # of truth — emitting it stops `username` vs
+                    # `email` style drift at the engineer step).
+                    rb = op.get("requestBody") or {}
+                    rb_schema = (
+                        rb.get("content", {}).get("application/json", {}).get("schema")
+                    )
+                    if rb_schema:
+                        resolved = _resolve_schema_ref(rb_schema, doc)
+                        lines.append(
+                            f"    requestBody: {_json.dumps(resolved, separators=(',', ':'))[:600]}"
+                        )
+                    # 2xx response shape so the frontend knows what
+                    # to expect back.
+                    for code, resp in (op.get("responses") or {}).items():
+                        if not str(code).startswith("2"):
+                            continue
+                        if not isinstance(resp, dict):
+                            continue
+                        resp_schema = (
+                            resp.get("content", {}).get("application/json", {}).get("schema")
+                        )
+                        if resp_schema:
+                            resolved = _resolve_schema_ref(resp_schema, doc)
+                            lines.append(
+                                f"    response[{code}]: {_json.dumps(resolved, separators=(',', ':'))[:600]}"
+                            )
+                            break
             lines.append("")
         return "\n".join(lines) + "\n"
+
+
+def _resolve_schema_ref(schema: dict, doc: dict, depth: int = 0) -> dict:
+    """Inline ``$ref`` references so the rendered contract doesn't
+    require the reader to chase #/components/schemas indirection.
+
+    Bounded recursion — schemas can be self-referential (e.g. tree
+    nodes), so we cap depth and leave the ref string in place beyond
+    that. Deep enough to make typical request/response shapes flat,
+    shallow enough to avoid infinite expansion.
+    """
+    if not isinstance(schema, dict) or depth > 4:
+        return schema
+    if "$ref" in schema and isinstance(schema["$ref"], str):
+        ref = schema["$ref"]
+        # Only handle local refs of the form "#/components/schemas/Name"
+        if ref.startswith("#/"):
+            parts = ref[2:].split("/")
+            target: object = doc
+            for p in parts:
+                if isinstance(target, dict) and p in target:
+                    target = target[p]
+                else:
+                    return schema  # broken ref — leave it
+            if isinstance(target, dict):
+                return _resolve_schema_ref(target, doc, depth + 1)
+        return schema
+    out: dict = {}
+    for k, v in schema.items():
+        if isinstance(v, dict):
+            out[k] = _resolve_schema_ref(v, doc, depth + 1)
+        elif isinstance(v, list):
+            out[k] = [
+                _resolve_schema_ref(item, doc, depth + 1) if isinstance(item, dict) else item
+                for item in v
+            ]
+        else:
+            out[k] = v
+    return out
 
 
 def _compose_up_and_capture_images(
