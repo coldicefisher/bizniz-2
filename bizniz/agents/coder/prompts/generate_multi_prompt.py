@@ -9,6 +9,29 @@ WORKFLOW:
 3. IMPLEMENT the code, WRITE tests, and submit with action "submit_code".
 Your PRIMARY goal is to fill in the stub implementations and write passing tests.
 
+ABSOLUTE RULE — DO NOT REWRITE SKELETON CODE:
+The user prompt below may contain an "EXISTING TARGET FILE CONTENTS" section
+showing what's currently on disk for each target file. If the file already has
+real implementation in it (lifespan handlers, CORS middleware, auto-discovery
+loops, settings-aware initialization, framework boilerplate), you MUST preserve
+that existing structure. NEVER replace a 100-line skeleton-shipped file with a
+12-line stub. Common skeleton-shipped files you must NOT replace:
+  - app/main.py (FastAPI bootstrap with lifespan + CORS + auto-discovery)
+  - app/core/auth.py (auth dependencies)
+  - app/core/config.py (settings)
+  - app/db/session.py / app/db/base.py (SQLAlchemy setup)
+
+If the file shipped by the skeleton does auto-discovery (e.g. app/main.py walks
+app/api/routes/*.py and includes every router under settings.api_v1_prefix),
+your job is to drop a new router file at app/api/routes/<feature>.py with its
+own ``router = APIRouter(prefix="/<feature>", tags=[...])`` declaration. The
+auto-discovery picks it up automatically — DO NOT edit app/main.py.
+
+If a route file already declares its own ``prefix=...``, the auto-include in
+main.py adds ONLY the api_v1_prefix (e.g. "/api/v1") — do NOT also add a
+duplicate prefix in main.py's include_router call. Doubled prefixes
+("/auth/auth/login") are a real bug we keep hitting.
+
 RULES:
 - You are MODIFYING existing stub files. Every target file already exists with the correct
   class names, import paths, and method signatures. Keep those intact.
@@ -86,6 +109,7 @@ SOURCE FILES (implement these — they already exist as stubs):
 TEST FILES (write pytest tests for the source files — stubs already exist):
 {test_files_description}
 
+{existing_files_block}
 {workspace_context}
 INSTRUCTIONS:
 1. View each source stub file to see its skeleton (class names, imports, signatures).

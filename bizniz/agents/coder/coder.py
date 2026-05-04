@@ -443,6 +443,13 @@ class Coder(BaseAIAgent):
         if test_files:
             test_desc = "\n".join(f"- {tf} (modify)" for tf in test_files)
 
+        # Inject the CURRENT CONTENTS of any target file that already
+        # exists. The skeleton ships meaningful code in files like
+        # app/main.py (lifespan, CORS, auto-discovery, settings-aware
+        # init); without seeing the existing content, the coder
+        # rewrites these as 12-line stubs and breaks the contract.
+        existing_files_block = self._format_existing_target_files(target_files)
+
         # Detect language from target files
         has_ts = any(
             tf["filepath"].endswith((".ts", ".tsx"))
@@ -478,6 +485,7 @@ class Coder(BaseAIAgent):
             target_files_description=target_desc,
             test_files_description=test_desc,
             workspace_context=workspace_context,
+            existing_files_block=existing_files_block,
         )
 
         system_prompt = get_generate_multi_system_prompt(lang).format(
@@ -819,6 +827,88 @@ class Coder(BaseAIAgent):
         raise CoderBadAIResponseError(
             f"AI failed to produce multi-file repair after {attempts} attempts. "
             f"Last error: {last_error}"
+        )
+
+    def _format_existing_target_files(self, target_files: List[dict]) -> str:
+        """Read each target_file that already exists on disk and embed
+        its current contents in the user prompt. Without this the
+        coder writes the file from scratch — losing skeleton-shipped
+        code (lifespan, CORS, auto-discovery) and replacing it with
+        a stub. The fix: SHOW the coder the file as it stands, with
+        a hard rule against wholesale rewrites.
+
+        Returns an empty string if no target file currently exists
+        (e.g. brand-new files), or the formatted block.
+        """
+        from pathlib import Path as _Path
+
+        chunks: List[str] = []
+        ws_root = (
+            _Path(self._workspace.root)
+            if hasattr(self._workspace, "root")
+            else None
+        )
+        if ws_root is None:
+            return ""
+
+        # Cap how much we paste per file so a 1000-line ts file
+        # doesn't blow the prompt budget. 200 lines is plenty for
+        # the coder to understand structure.
+        MAX_LINES_PER_FILE = 200
+        MAX_TOTAL_CHARS = 12000
+        used_chars = 0
+
+        for tf in target_files:
+            rel = tf.get("filepath")
+            if not rel:
+                continue
+            full = ws_root / rel
+            if not full.is_file():
+                continue
+            try:
+                content = full.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            lines = content.splitlines()
+            truncated = ""
+            if len(lines) > MAX_LINES_PER_FILE:
+                content = "\n".join(lines[:MAX_LINES_PER_FILE])
+                truncated = (
+                    f"\n... [truncated; full file is {len(lines)} lines, "
+                    f"{MAX_LINES_PER_FILE} shown]"
+                )
+            chunk = (
+                f"\n--- BEGIN existing {rel} "
+                f"({len(lines)} lines) ---\n"
+                f"{content}{truncated}\n"
+                f"--- END existing {rel} ---\n"
+            )
+            if used_chars + len(chunk) > MAX_TOTAL_CHARS:
+                chunks.append(
+                    f"\n[further target files truncated for prompt size]"
+                )
+                break
+            chunks.append(chunk)
+            used_chars += len(chunk)
+
+        if not chunks:
+            return ""
+
+        return (
+            "EXISTING TARGET FILE CONTENTS — these files ALREADY have "
+            "code on disk. The skeleton ships real implementations in "
+            "many of them (lifespan handlers, CORS, auto-discovery, "
+            "settings, etc.). HARD RULE:\n"
+            "  - DO NOT replace existing content with a stub.\n"
+            "  - DO NOT remove imports, decorators, or functions you "
+            "didn't intend to remove.\n"
+            "  - PREFER additive changes. If a file does auto-discovery "
+            "(e.g. app/main.py walks app/api/routes/*.py and includes "
+            "every router), drop your new router file in the discovered "
+            "directory — DO NOT edit the auto-discovery file itself.\n"
+            "  - When in doubt, ECHO the existing content back unchanged "
+            "and add to it; never delete what you don't understand.\n"
+            + "".join(chunks)
         )
 
     def _parse_changes(self, json_response: dict, known_files: Optional[set] = None) -> List[FileChange]:
