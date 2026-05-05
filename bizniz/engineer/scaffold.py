@@ -9,6 +9,8 @@ The coder then MODIFIES these stubs instead of creating from scratch,
 eliminating the entire class of import-chain and missing-file failures.
 """
 
+import ast
+import re
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 
@@ -20,6 +22,51 @@ from bizniz.engineer.types import (
     EngineeringIssue,
 )
 from bizniz.workspace.base_workspace import BaseWorkspace
+
+
+_FUNC_NAME_RE = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(")
+
+
+def _signature_function_name(signature: str) -> str:
+    """Extract the function name from an AI-generated signature string.
+
+    The architecture plan emits free-text signatures like
+    ``async def get_landlord_dashboard(user: User = Depends(...)) -> dict``.
+    We need just the name to write a syntactically inert stub. If parsing
+    fails (rare — the AI sometimes returns malformed signatures) we fall
+    back to a generic name so the file still imports cleanly.
+    """
+    m = _FUNC_NAME_RE.match(signature.strip())
+    return m.group(1) if m else "stub_method"
+
+
+def _is_async_signature(signature: str) -> bool:
+    return signature.strip().startswith("async ")
+
+
+def _inert_method_lines(method, indent: str = "") -> List[str]:
+    """Render a method as a syntactically inert stub.
+
+    We deliberately discard the AI's full signature (parameters, type
+    annotations, default values) because those expressions can reference
+    names the stub doesn't import — e.g. ``Depends(require_roles(...))``
+    crashes module-load with NameError. Instead we use ``*args, **kwargs``
+    and stash the planned signature in the docstring so the Coder still
+    sees it as the contract to implement.
+    """
+    name = _signature_function_name(method.signature)
+    prefix = "async def" if _is_async_signature(method.signature) else "def"
+    desc = (method.description or "Stub.").strip().replace('"""', "'''")
+    sig = method.signature.strip().replace('"""', "'''")
+    return [
+        f"{indent}{prefix} {name}(*args, **kwargs):",
+        f'{indent}    """',
+        f"{indent}    {desc}",
+        f"{indent}    ",
+        f"{indent}    Planned signature: {sig}",
+        f'{indent}    """',
+        f"{indent}    raise NotImplementedError",
+    ]
 
 
 def scaffold_from_plan(
@@ -41,17 +88,36 @@ def scaffold_from_plan(
 
     import_map: Dict[str, str] = {}
 
+    # Only scaffold files an issue actually addresses. The architecture
+    # plan describes the service's EVENTUAL shape (across all milestones),
+    # so plan.modules / plan.domain_models often list paths that no
+    # current-milestone issue is implementing. Scaffolding those creates
+    # broken stubs the autodiscovery picks up at module-load time —
+    # e.g. a stub `landlord.py` whose signature uses `Depends(...)`
+    # without importing it crashes the whole test suite.
+    #
+    # The rule: scaffold ONLY filepaths that appear in some issue's
+    # target_files. Everything else is a future-milestone concern and
+    # shouldn't exist on disk yet.
+    issue_target_files = {
+        tf.filepath for issue in issues for tf in issue.target_files
+    }
+
     # 1. Create namespace directories with __init__.py
     for ns in plan.namespaces:
         _ensure_package_dirs(workspace, ns.namespace_path)
 
-    # 2. Scaffold domain model files
+    # 2. Scaffold domain model files (only those referenced by issues)
     for model in plan.domain_models:
+        if model.filepath not in issue_target_files:
+            continue
         content = _generate_domain_model_stub(model, plan)
         _write_stub(workspace, model.filepath, content, import_map)
 
-    # 3. Scaffold module files
+    # 3. Scaffold module files (only those referenced by issues)
     for module in plan.modules:
+        if module.filepath not in issue_target_files:
+            continue
         content = _generate_module_stub(module, plan)
         _write_stub(workspace, module.filepath, content, import_map)
 
@@ -71,6 +137,20 @@ def scaffold_from_plan(
         for tf in issue.target_files:
             if tf.filepath in import_map and tf.action == "create":
                 tf.action = "modify"
+
+    # 7. Pre-flight every Python stub we just wrote: parse it as Python
+    # and confirm it's syntactically valid. This catches the class of
+    # bug where the AI's signature in the architecture plan can't be
+    # written as valid Python (e.g. unclosed parens, malformed type
+    # annotations). For broken stubs we rewrite the file with an
+    # absolute-minimum content that still imports cleanly, so a later
+    # bad stub doesn't crash the autodiscovery and brick the test suite.
+    broken = _preflight_stubs(workspace, import_map, log)
+    if broken:
+        log(
+            f"Scaffold: pre-flight neutralized {len(broken)} broken stub(s): "
+            f"{', '.join(broken)}"
+        )
 
     log(
         f"Scaffold: created {len(import_map)} stub file(s) "
@@ -179,9 +259,8 @@ def _generate_domain_model_stub(
     if model.methods:
         lines.append("")
         for method in model.methods:
-            lines.append(f"    {method.signature}:")
-            lines.append(f'        """{method.description}"""')
-            lines.append("        raise NotImplementedError")
+            lines.extend(_inert_method_lines(method, indent="    "))
+            lines.append("")
 
     lines.append("")
     return "\n".join(lines)
@@ -212,9 +291,7 @@ def _generate_module_stub(
         if module.methods:
             for method in module.methods:
                 lines.append("")
-                lines.append(f"    {method.signature}:")
-                lines.append(f'        """{method.description}"""')
-                lines.append("        raise NotImplementedError")
+                lines.extend(_inert_method_lines(method, indent="    "))
         else:
             lines.append("    pass")
     else:
@@ -222,9 +299,7 @@ def _generate_module_stub(
         if module.methods:
             for method in module.methods:
                 lines.append("")
-                lines.append(f"{method.signature}:")
-                lines.append(f'    """{method.description}"""')
-                lines.append("    raise NotImplementedError")
+                lines.extend(_inert_method_lines(method, indent=""))
         else:
             lines.append("")
             lines.append("# TODO: implement")
@@ -320,3 +395,39 @@ def _slugify(title: str) -> str:
     import re
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", title.lower()).strip("_")
     return slug[:60]
+
+
+def _preflight_stubs(
+    workspace: BaseWorkspace,
+    import_map: Dict[str, str],
+    log: Callable[[str], None],
+) -> List[str]:
+    """Parse every Python stub we wrote with ``ast.parse`` to confirm it's
+    syntactically valid. If parse fails, the stub would crash module-load
+    when FastAPI's autodiscovery imports it — which torches the entire
+    test suite for unrelated issues. Replace any unparseable stub with a
+    minimal "module exists but does nothing" body so the bad stub
+    quarantines the damage to a single file.
+
+    Returns the list of relative paths we had to rewrite.
+    """
+    rewritten: List[str] = []
+    for rel, content in import_map.items():
+        if not rel.endswith(".py"):
+            continue
+        try:
+            ast.parse(content)
+        except SyntaxError as e:
+            log(
+                f"Scaffold: stub '{rel}' failed AST parse "
+                f"({e.msg} at line {e.lineno}) — rewriting as inert"
+            )
+            module_path = _filepath_to_module(rel)
+            inert = (
+                f'"""{module_path} -- inert stub (original was malformed; '
+                f'will be replaced when an issue addresses this file)."""\n'
+            )
+            workspace.write_file(rel, inert)
+            import_map[rel] = inert
+            rewritten.append(rel)
+    return rewritten

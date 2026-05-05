@@ -40,6 +40,22 @@ Design the project's architecture. Define:
    - Method signatures (just signatures, not implementations)
    - A brief docstring
 
+   ATTRIBUTE COMPLETENESS — CRITICAL:
+   For each domain entity, you MUST include EVERY concrete
+   attribute the problem statement associates with that entity.
+   If the spec says "products have name, price, sku, weight" then
+   the Product model MUST include name, price, sku, AND weight.
+   Do not silently drop attributes because a subset feels "good
+   enough" — the milestone explicitly listed them, so they're in
+   scope. If an attribute is genuinely out-of-scope for THIS
+   milestone (e.g. "photos" while the milestone is text-only data
+   entry), say so explicitly in the field's description and mark
+   it with a TODO comment, but do not omit it without explanation.
+
+   Required vs optional: every attribute mentioned without a
+   qualifier is REQUIRED. Attributes that the spec marks with
+   words like "optionally", "may", "if provided" are optional.
+
 4. MODULES: Implementation classes/functions. Define:
    - Filepath, class name (if applicable), and namespace
    - Method signatures with descriptions
@@ -116,6 +132,17 @@ Design the project as a TypeScript project. Define:
    - Fields with TypeScript types
    - Method signatures (just signatures, not implementations)
    - A brief description
+
+   ATTRIBUTE COMPLETENESS — CRITICAL:
+   For each domain entity, you MUST include EVERY concrete
+   attribute the problem statement associates with that entity.
+   If the spec says "products have name, price, sku, weight" then
+   the Product interface MUST include name, price, sku, AND
+   weight. Do not silently drop attributes because a subset feels
+   "good enough" — the milestone explicitly listed them, so
+   they're in scope. If an attribute is genuinely out-of-scope
+   for THIS milestone, state so explicitly in the field's
+   description, but do not omit it without explanation.
 
 4. MODULES: Implementation classes/functions. Define:
    - Filepath (must end in .ts or .tsx), class/function name, and namespace

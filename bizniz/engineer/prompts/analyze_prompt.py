@@ -27,6 +27,19 @@ Produce a JSON response with:
       Choose the cheapest model that can reliably solve the task. Use cheaper models for simple tasks (data classes, enums, basic CRUD). Use more capable models for complex tasks (multi-module, complex algorithms). Only pick from the list above.
     - "test_setup_hint": how to set up tests for this issue. CRITICAL for endpoint/route issues.
 
+RULES FOR EXTRACTING SPEC DETAIL — ATTRIBUTE COMPLETENESS:
+- The problem statement is the source of truth. Every concrete noun
+  the spec associates with a domain entity (attributes, fields,
+  configurable properties) MUST end up in the corresponding model
+  or schema. Do not silently drop attributes because a subset feels
+  enough — the spec listed them, so they're in scope.
+  Example: "products have name, price, sku, weight" → all four
+  fields appear; not just name and price.
+- If an attribute is plausibly out-of-scope for the CURRENT
+  milestone (e.g. file uploads, while milestone is text-only),
+  call it out explicitly in the issue description with a TODO
+  rather than silently omitting it.
+
 RULES FOR ISSUES — SINGLE RESPONSIBILITY IS MANDATORY:
 - Each issue MUST have exactly ONE focused responsibility.
 - Each issue should touch 1-2 target files max (plus __init__.py if needed).
@@ -93,6 +106,19 @@ Produce a JSON response with:
       AVAILABLE MODELS (ordered cheapest to most capable): {available_models}
       Choose the cheapest model that can reliably solve the task. Use cheaper models for simple tasks (interfaces, enums, basic CRUD). Use more capable models for complex tasks (multi-module, complex algorithms). Only pick from the list above.
     - "test_setup_hint": how to set up tests for this issue. CRITICAL for endpoint/route issues.
+
+RULES FOR EXTRACTING SPEC DETAIL — ATTRIBUTE COMPLETENESS:
+- The problem statement is the source of truth. Every concrete noun
+  the spec associates with a domain entity (attributes, fields,
+  configurable properties) MUST end up in the corresponding model
+  or schema. Do not silently drop attributes because a subset feels
+  enough — the spec listed them, so they're in scope.
+  Example: "products have name, price, sku, weight" → all four
+  fields appear; not just name and price.
+- If an attribute is plausibly out-of-scope for the CURRENT
+  milestone (e.g. file uploads, while milestone is text-only),
+  call it out explicitly in the issue description with a TODO
+  rather than silently omitting it.
 
 RULES FOR ISSUES — SINGLE RESPONSIBILITY IS MANDATORY:
 - Each issue MUST have exactly ONE focused responsibility.

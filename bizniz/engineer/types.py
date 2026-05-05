@@ -107,6 +107,12 @@ class EngineeringIssue(BaseModel):
     depends_on_titles: List[str] = []
     suggested_model: Optional[str] = None
     test_setup_hint: Optional[str] = None
+    # Production-grade enrichment from IssueEnrichmentAgent. Optional
+    # because it's a separate phase after the Engineer's analyze pass;
+    # if enrichment failed or was skipped, downstream still works on
+    # the raw issue. Uses ``Any`` to keep the import surface clean —
+    # the actual type is ``bizniz.agents.issue_enrichment.EnrichedIssue``.
+    enriched: Optional[object] = None
 
 
 class DependencyLayer(BaseModel):

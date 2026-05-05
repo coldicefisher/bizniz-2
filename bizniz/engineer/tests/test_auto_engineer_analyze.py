@@ -63,9 +63,11 @@ def test_analyze_includes_architecture_plan(engineer):
 
 
 def test_analyze_calls_ai_multiple_times(engineer, mock_client):
-    """analyze() makes 3 AI calls: analysis, architecture plan, refined analysis."""
+    """analyze() makes 4 AI calls: analysis, architecture plan,
+    refined analysis, and 1 issue enrichment call (the test fixture
+    has a single issue)."""
     engineer.analyze(PROBLEM)
-    assert mock_client.get_text.call_count == 3
+    assert mock_client.get_text.call_count == 4
 
 
 def test_analyze_creates_package_structure(engineer, mock_workspace):

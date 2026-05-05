@@ -143,8 +143,9 @@ REQUIREMENTS:
 - For forms, add a SEPARATE test that visits the route, fills sample data,
   then screenshots (`form-name-filled.png`).
 - For modals/dropdowns, add a SEPARATE test that opens them.
-- Name screenshots descriptively: `home.png`, `properties-list.png`,
-  `payments-history.png`, `maintenance-form-filled.png`.
+- Name screenshots descriptively using nouns from the problem statement:
+  `home.png`, `<entity>-list.png`, `<entity>-form-filled.png`, etc.
+  Do NOT use names from unrelated domains.
 - Cap total tests at 15 to keep evaluation cost reasonable.
 - Use `process.env.FRONTEND_URL` for the base URL.
 - Use CommonJS: `const {{ test }} = require('@playwright/test');`.

@@ -154,8 +154,7 @@ _SKELETONS: Dict[str, SkeletonInfo] = {
         description=(
             "Redis Streams worker for the saas bundle. Registers job handlers, "
             "acquires processing locks (with WS broadcast), runs long-running "
-            "tasks, releases locks. Demo job: regenerate_article. Part of the "
-            "saas bundle."
+            "tasks, releases locks. Part of the saas bundle."
         ),
     ),
     "saas-frontend": SkeletonInfo(

@@ -30,11 +30,19 @@ def _setup_engineer_with_plan(tmp_path, mock_env, orchestrator_result, governanc
 
     client = MagicMock(spec=BaseAIClient)
 
-    # Calls: analysis, plan, refined analysis, then governance if drift
+    # Calls in order: analysis, plan, refined-analysis, then issue
+    # enrichment (one per issue — VALID_ANALYSIS_RESPONSE has 1
+    # issue), then governance if drift.
+    enrichment_response = {
+        "original_issue_title": "Implement task storage",
+        "original_issue_description": "Create a module to store and retrieve tasks.",
+        "confidence": "low",
+    }
     responses = [
         make_ai_response(VALID_ANALYSIS_RESPONSE),  # analyze
         make_ai_response(VALID_PLAN_RESPONSE),       # plan
         make_ai_response(VALID_ANALYSIS_RESPONSE),   # refined
+        make_ai_response(enrichment_response),       # enrichment (1 issue)
     ]
     if governance_response:
         responses.append(make_ai_response(governance_response))  # governance
@@ -79,8 +87,10 @@ class TestGovernanceLoopIntegration:
         issue = analysis.issues[0]
         eng.dispatch(issue.db_id)
 
-        # Only 3 AI calls (analyze, plan, refined) — no governance call
-        assert client.get_text.call_count == 3
+        # 4 AI calls: analyze, plan, refined-analyze, + 1 issue
+        # enrichment call (VALID_ANALYSIS_RESPONSE has 1 issue).
+        # No governance call.
+        assert client.get_text.call_count == 4
 
     def test_governance_called_on_drift(self, mock_env, tmp_path):
         """Dispatch should call governance review when drift is detected."""
@@ -108,8 +118,9 @@ class TestGovernanceLoopIntegration:
         issue = analysis.issues[0]
         eng.dispatch(issue.db_id)
 
-        # 4 AI calls: analyze, plan, refined, governance
-        assert client.get_text.call_count == 4
+        # 5 AI calls: analyze, plan, refined-analyze, governance, plus
+        # 1 issue enrichment call (VALID_ANALYSIS_RESPONSE has 1 issue).
+        assert client.get_text.call_count == 5
 
     def test_governance_approve_closes_issue(self, mock_env, tmp_path):
         """Approved drift should still close the issue."""
@@ -209,5 +220,6 @@ class TestGovernanceLoopIntegration:
         issue = analysis.issues[0]
         eng.dispatch(issue.db_id)
 
-        # Only 3 AI calls — governance not triggered
-        assert client.get_text.call_count == 3
+        # 4 AI calls: analyze, plan, refined-analyze, + 1 enrichment.
+        # Governance not triggered because drift_files is empty.
+        assert client.get_text.call_count == 4

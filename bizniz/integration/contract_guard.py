@@ -114,7 +114,53 @@ def _collect_from_schema(schema, fields: Set[str], doc: dict, depth: int = 0) ->
 
 
 def _name_attrs_in_test(source: str) -> List[str]:
-    return [m.group(1).lower() for m in _NAME_ATTR_RE.finditer(source)]
+    """Extract `name="X"` field names that the test will actually submit.
+
+    Skips selectors that appear inside a ``.or(...)`` fallback chain —
+    those are MULTI-STRATEGY ALTERNATIVES, not the field being filled.
+    Playwright's ``locator(...).or(locator(...))`` picks the first one
+    that matches at runtime, so only the primary selector represents a
+    real submission target. Flagging the alternatives produced false
+    positives for resilient login forms (e.g. an `email`-primary
+    selector with `username`/`login` fallbacks).
+
+    A selector is considered "in a .or() chain" if it appears between
+    a ``.or(`` token and the matching close-paren on the same logical
+    line. We use a regex over the raw source — quick and good enough
+    for the structured Playwright code these tests generate.
+    """
+    # Build a mask of byte positions inside .or(...) calls. Any name
+    # match inside the mask is a fallback and skipped.
+    or_ranges: List[tuple] = []
+    i = 0
+    while True:
+        idx = source.find(".or(", i)
+        if idx == -1:
+            break
+        # Find the matching close paren
+        depth = 1
+        j = idx + 4
+        while j < len(source) and depth > 0:
+            ch = source[j]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            j += 1
+        or_ranges.append((idx, j))
+        i = j
+
+    def _in_or_chain(pos: int) -> bool:
+        for start, end in or_ranges:
+            if start <= pos < end:
+                return True
+        return False
+
+    return [
+        m.group(1).lower()
+        for m in _NAME_ATTR_RE.finditer(source)
+        if not _in_or_chain(m.start())
+    ]
 
 
 def _suggest_similar(name: str, candidates: Set[str]) -> List[str]:

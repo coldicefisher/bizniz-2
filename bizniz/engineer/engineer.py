@@ -147,6 +147,119 @@ class Engineer(BaseAIAgent):
         from bizniz.auth.context import load_auth_context_for_prompt
         return load_auth_context_for_prompt(self._workspace)
 
+    def _enrich_issues(
+        self,
+        issues,
+        *,
+        problem_statement: str,
+        auth_context: str,
+        log,
+    ) -> None:
+        """Enrich each Engineer-emitted issue in-place with production-
+        grade specifications. The IssueEnrichmentAgent reads the issue +
+        problem statement + auth contract + workspace files and emits a
+        structured EnrichedIssue. Soft-fails per-issue so one bad
+        enrichment doesn't take out engineering for the service.
+        """
+        if not issues:
+            return
+
+        from bizniz.agents.issue_enrichment import IssueEnrichmentAgent
+
+        # Use the same AI client the Engineer uses. A cheap fast model
+        # (gemini-flash-lite-preview) is the typical choice — enrichment
+        # is bounded-context and benefits more from speed than reasoning
+        # depth. Keep this on the Engineer's client by default; callers
+        # who want a different model can override via config later.
+        agent = IssueEnrichmentAgent(
+            client=self._client,
+            on_status=self._on_status_message,
+        )
+
+        # Workspace file list, capped so the prompt stays bounded.
+        try:
+            ws_files = list(self._workspace.list_relative_files())[:200]
+        except Exception:
+            ws_files = []
+
+        # Backend OpenAPI contract (only present for frontend services
+        # after the contracts capture phase). For backend services this
+        # will be None — the agent handles that cleanly.
+        backend_openapi = None
+        try:
+            from pathlib import Path
+            ws_root = Path(self._workspace.root) if hasattr(self._workspace, "root") else None
+            if ws_root:
+                project_root = ws_root.parent
+                contract_path = project_root / "contracts" / "backend.openapi.json"
+                if contract_path.is_file():
+                    import json as _json
+                    backend_openapi = _json.loads(contract_path.read_text())
+        except Exception:
+            backend_openapi = None
+
+        log(f"Engineer: enriching {len(issues)} issue(s) for production-grade spec...")
+        for idx, issue in enumerate(issues, start=1):
+            try:
+                raw = {
+                    "title": issue.title,
+                    "description": issue.description,
+                    "target_files": [
+                        {"filepath": tf.filepath, "action": tf.action}
+                        for tf in issue.target_files
+                    ],
+                    "test_files": list(issue.test_files),
+                    "depends_on": list(issue.depends_on_titles),
+                }
+                enriched = agent.enrich(
+                    issue=raw,
+                    problem_statement=problem_statement,
+                    workspace_files=ws_files,
+                    auth_context=auth_context,
+                    backend_openapi=backend_openapi,
+                )
+                issue.enriched = enriched
+                if not enriched.is_empty():
+                    # Append the enrichment section to the issue's
+                    # description so it flows naturally through the
+                    # existing Coder dispatch path (orchestrator reads
+                    # description from DB → builds Coder's prompt).
+                    # Persist back to the workspace DB.
+                    enrichment_section = enriched.to_coder_prompt_section()
+                    issue.description = issue.description.rstrip() + "\n\n" + enrichment_section
+                    if issue.db_id is not None:
+                        try:
+                            self._workspace.db.update_issue_description(
+                                issue.db_id, issue.description,
+                            )
+                        except Exception as e:
+                            log(
+                                f"Engineer: failed to persist enrichment "
+                                f"for issue {issue.db_id} "
+                                f"({type(e).__name__}: {e}) — "
+                                f"in-memory only"
+                            )
+                    log(
+                        f"Engineer: [{idx}/{len(issues)}] "
+                        f"'{issue.title}' enriched "
+                        f"(req={len(enriched.required_fields)}, "
+                        f"opt={len(enriched.optional_fields)}, "
+                        f"errors={len(enriched.error_cases)}, "
+                        f"confidence={enriched.confidence})"
+                    )
+                else:
+                    log(
+                        f"Engineer: [{idx}/{len(issues)}] "
+                        f"'{issue.title}' enrichment empty "
+                        f"(confidence={enriched.confidence})"
+                    )
+            except Exception as e:
+                log(
+                    f"Engineer: enrichment failed for issue "
+                    f"'{issue.title}' ({type(e).__name__}: {e}) — "
+                    f"skipping for this ticket"
+                )
+
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def analyze(self, problem_statement: str) -> EngineeringAnalysis:
@@ -230,6 +343,24 @@ class Engineer(BaseAIAgent):
 
         # Step 3b: Validate and backfill test_setup_hint for integration issues
         self._backfill_test_setup_hints(analysis.issues, plan, log)
+
+        # Step 3c: Issue enrichment — turn each Engineer-emitted issue
+        # into a production-grade specification (required/optional fields,
+        # validation rules, auth requirements, error cases, etc.) before
+        # the Coder picks it up. Single AI call per issue; soft-fails so
+        # a flaky enrichment never blocks engineering.
+        try:
+            self._enrich_issues(
+                issues=analysis.issues,
+                problem_statement=problem_statement,
+                auth_context=auth_context,
+                log=log,
+            )
+        except Exception as e:
+            log(
+                f"Engineer: issue enrichment skipped "
+                f"({type(e).__name__}: {e}) — continuing with raw issues"
+            )
 
         # Step 4: Create the workspace package structure
         if self._language == "typescript":

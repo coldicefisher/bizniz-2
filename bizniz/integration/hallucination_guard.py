@@ -123,8 +123,32 @@ _GENERIC_VOCAB: Set[str] = {
     "tobedefined", "containtext", "havecount", "tohavetext", "tohaveurl",
     "domcontentloaded", "networkidle", "waitfor", "waitforurl",
     "waitforselector", "waitforload", "waitfortimeout", "waitforfunction",
+    "waitforloadstate",
     "describe", "context", "spec", "specs", "expect", "expected",
     "mocha", "jest", "vitest", "chai",
+    "gotoready", "gotoandready",
+    # HTML element + attribute names (these are universal markup, not
+    # domain nouns — appear in any frontend test that interacts with
+    # form elements). Without these, multi-strategy locators that
+    # mention 'select', 'textarea', 'data-testid', etc. trip the guard.
+    "select", "textarea", "checkbox", "radio", "fieldset", "legend",
+    "option", "optgroup", "datalist", "output", "progress", "meter",
+    "details", "summary", "dialog", "menu", "menuitem", "nav",
+    "main", "article", "section", "aside", "figure", "figcaption",
+    "iframe", "canvas", "svg", "picture", "source", "video", "audio",
+    "table", "thead", "tbody", "tfoot", "caption", "col", "colgroup",
+    "ariaselected", "arialabel", "ariarole", "ariahidden", "tabindex",
+    "placeholder", "autofocus", "autocomplete", "spellcheck", "readonly",
+    "disabled", "required", "checked", "selected", "multiple", "novalidate",
+    # Test-id markers — used by every modern test framework regardless
+    # of domain. data-testid, testid, dataTestid, etc.
+    "testid", "dataset", "datatestid", "datatest",
+    # Common Playwright locator helpers
+    "getbylabel", "getbyrole", "getbytestid", "getbytext", "getbyplaceholder",
+    "getbyaltttext", "getbytitle", "byrole",
+    # Common React/UI ecosystem libraries (cosmetic, not domain)
+    "materialui", "mui", "antd", "chakra", "tailwind", "bootstrap",
+    "shadcn", "radix", "headlessui",
     # Generic web/HTTP terms that aren't domain-specific
     "homepage", "landingpage", "dashboard", "navbar", "topbar", "sidebar",
     "footer", "header", "logout", "signin", "signout", "signup",
