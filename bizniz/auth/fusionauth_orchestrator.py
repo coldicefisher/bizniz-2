@@ -484,6 +484,241 @@ class FusionAuthOrchestrator:
             ok_statuses=[200, 201, 202, 409],
         )
 
+    # ── Tenant / signing key / JWKS inspection ──────────────────────
+    #
+    # These methods expose FusionAuth-side configuration so the FA
+    # debugger (and AuthContract.validate) can detect mismatches that
+    # surface only as runtime auth failures. The motivating case: the
+    # default tenant uses HS256, JWKS exposes no public keys, and any
+    # backend doing ``jwt.decode(token, ..., algorithms=["RS256"])``
+    # fails with "Signature verification failed" — but every other
+    # check (login, claims) passes because they don't need JWKS. The
+    # debugger had nothing to inspect FA config with, so it couldn't
+    # diagnose. These methods plug that hole.
+
+    def get_tenant(self, tenant_id: str) -> Optional[dict]:
+        """Fetch a tenant's full config. Returns None if not found."""
+        try:
+            return self.request("GET", f"/api/tenant/{tenant_id}")
+        except FusionAuthError as e:
+            if e.status_code == 404:
+                return None
+            raise
+
+    def patch_tenant(self, tenant_id: str, patch: dict) -> dict:
+        """Apply a partial update to a tenant. Caller must include
+        ``name`` in the patch body — FA's PATCH validation rejects
+        any tenant body without it.
+        """
+        return self.request(
+            "PATCH", f"/api/tenant/{tenant_id}",
+            body={"tenant": patch},
+        )
+
+    def get_jwks(self) -> dict:
+        """Fetch FA's JWKS. Returns the raw response.
+
+        Empty ``keys`` list usually means the tenant is signing with
+        HS256 (no public key) — switch the tenant's
+        ``accessTokenKeyId`` to an RS256 key generated via
+        ``generate_signing_key()``.
+        """
+        try:
+            resp = requests.get(
+                f"{self.base_url}/.well-known/jwks.json",
+                timeout=self.timeout_s,
+            )
+        except requests.RequestException as e:
+            raise FusionAuthError(f"JWKS unreachable: {e}") from e
+        if resp.status_code != 200:
+            raise FusionAuthError(
+                f"JWKS returned {resp.status_code}",
+                status_code=resp.status_code,
+                response_body=resp.text[:500],
+            )
+        return resp.json() or {}
+
+    def list_signing_keys(self) -> List[dict]:
+        """List every key configured in FusionAuth.
+
+        Includes both symmetric (HS256) and asymmetric (RS256, ES256)
+        keys. Useful for diagnosing "why is JWKS empty" — if there
+        are no RS256 keys, JWKS will be empty by definition.
+        """
+        try:
+            result = self.request("GET", "/api/key")
+        except FusionAuthError:
+            return []
+        return list(result.get("keys") or [])
+
+    def get_signing_key(self, key_id: str) -> Optional[dict]:
+        """Fetch a single key by ID."""
+        try:
+            result = self.request("GET", f"/api/key/{key_id}")
+        except FusionAuthError as e:
+            if e.status_code == 404:
+                return None
+            raise
+        return (result or {}).get("key")
+
+    def generate_signing_key(
+        self,
+        key_id: str,
+        *,
+        algorithm: str = "RS256",
+        length: int = 2048,
+        name: str = "Access Token Signing Key",
+    ) -> str:
+        """Idempotent: ensure a key exists at this ID with the given algo.
+
+        FusionAuth's POST ``/api/key/generate/<id>`` 200s on success
+        and 409s if a key already exists at that ID. We treat 409 as
+        success (the key is there). Returns the key_id.
+        """
+        existing = self.get_signing_key(key_id)
+        if existing is not None:
+            return key_id
+        self._log(
+            f"FusionAuth: generating {algorithm} key {name!r} ({length} bits) at {key_id}"
+        )
+        self.request(
+            "POST", f"/api/key/generate/{key_id}",
+            body={"key": {
+                "algorithm": algorithm,
+                "name": name,
+                "length": length,
+            }},
+            ok_statuses=[200, 201, 409],
+        )
+        return key_id
+
+    def set_tenant_signing_key(
+        self,
+        tenant_id: str,
+        key_id: str,
+        *,
+        also_id_token: bool = True,
+    ) -> None:
+        """Bind ``key_id`` as the tenant's accessTokenSigningKey.
+
+        ``also_id_token`` (default True) sets the same key for
+        idTokenKeyId — typical for FA + JWKS setups where both
+        access and ID tokens use RS256 with the same kid. The
+        tenant's existing name is fetched and re-included because
+        FA's PATCH validation rejects bodies missing tenant.name.
+        """
+        tenant = self.get_tenant(tenant_id)
+        tenant_name = "Default"
+        if tenant and tenant.get("tenant"):
+            tenant_name = tenant["tenant"].get("name", "Default")
+
+        jwt_config = {"accessTokenKeyId": key_id}
+        if also_id_token:
+            jwt_config["idTokenKeyId"] = key_id
+
+        self._log(
+            f"FusionAuth: binding key {key_id} as tenant {tenant_id} "
+            f"accessTokenKeyId{' + idTokenKeyId' if also_id_token else ''}"
+        )
+        self.patch_tenant(tenant_id, {
+            "name": tenant_name,
+            "jwtConfiguration": jwt_config,
+        })
+
+    def diagnose_jwt_setup(
+        self,
+        *,
+        tenant_id: str,
+        app_id: ApplicationId,
+        test_email: Optional[str] = None,
+        test_password: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """End-to-end check of the RS256 + JWKS path.
+
+        Returns a structured report covering:
+          - JWKS reachability + key count
+          - Tenant's configured signing key id + the key's algorithm
+          - Whether a real login mints a JWT whose ``kid`` is in JWKS
+            (only run when ``test_email``/``test_password`` provided)
+
+        Soft-fails — populates ``errors`` instead of raising. The FA
+        debugger reads this report and, when ``ok=False``, runs the
+        appropriate typed fix.
+        """
+        report: Dict[str, Any] = {
+            "ok": True,
+            "errors": [],
+            "jwks_keys": 0,
+            "jwks_kids": [],
+            "tenant_access_token_key_id": None,
+            "signing_key_algorithm": None,
+            "login_token_kid": None,
+            "kid_in_jwks": None,
+        }
+
+        # 1. JWKS
+        try:
+            jwks = self.get_jwks()
+            keys = jwks.get("keys") or []
+            report["jwks_keys"] = len(keys)
+            report["jwks_kids"] = [k.get("kid") for k in keys if k.get("kid")]
+            if not keys:
+                report["ok"] = False
+                report["errors"].append(
+                    "JWKS endpoint returned 0 keys — tenant likely uses HS256. "
+                    "Generate an RS256 key and bind it via set_tenant_signing_key()."
+                )
+        except FusionAuthError as e:
+            report["ok"] = False
+            report["errors"].append(f"JWKS fetch failed: {e}")
+
+        # 2. Tenant config
+        tenant = self.get_tenant(tenant_id)
+        if tenant and tenant.get("tenant"):
+            jwt_config = tenant["tenant"].get("jwtConfiguration") or {}
+            key_id = jwt_config.get("accessTokenKeyId")
+            report["tenant_access_token_key_id"] = key_id
+            if key_id:
+                key = self.get_signing_key(key_id)
+                if key:
+                    report["signing_key_algorithm"] = key.get("algorithm")
+                else:
+                    report["ok"] = False
+                    report["errors"].append(
+                        f"Tenant references signing key {key_id} but key not found"
+                    )
+        else:
+            report["ok"] = False
+            report["errors"].append(f"Tenant {tenant_id} not found")
+
+        # 3. Live login round-trip (if credentials provided)
+        if test_email and test_password:
+            try:
+                token = self.get_token(app_id, test_email, test_password)
+                import base64 as _b64
+                import json as _json
+                parts = token.split(".")
+                if len(parts) != 3:
+                    raise ValueError("not a JWT")
+                hdr_b64 = parts[0] + "=" * (-len(parts[0]) % 4)
+                hdr = _json.loads(_b64.urlsafe_b64decode(hdr_b64.encode()))
+                kid = hdr.get("kid")
+                report["login_token_kid"] = kid
+                report["kid_in_jwks"] = kid in (report["jwks_kids"] or [])
+                if kid and not report["kid_in_jwks"]:
+                    report["ok"] = False
+                    report["errors"].append(
+                        f"Login token signed with kid={kid!r} which is "
+                        f"not in JWKS {report['jwks_kids']!r}"
+                    )
+            except Exception as e:
+                report["ok"] = False
+                report["errors"].append(
+                    f"Diagnostic login failed: {type(e).__name__}: {e}"
+                )
+
+        return report
+
     # ── Auth ────────────────────────────────────────────────────────
 
     def get_token(self, app_id: ApplicationId, email: str, password: str) -> str:

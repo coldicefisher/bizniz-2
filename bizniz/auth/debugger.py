@@ -169,6 +169,31 @@ def _apply_typed_fixes(
             except FusionAuthError as e:
                 _log(on_status, f"FA debugger: ensure_application failed — {e}")
 
+        # jwks_has_keys  → tenant is signing with HS256, no public
+        # key for JWKS to expose. Generate an RS256 keypair and bind
+        # it as the tenant's accessTokenKeyId. The skeleton's
+        # validation expects RS256 — without this fix every backend
+        # request with a JWT 401s on signature verification.
+        elif name == "jwks_has_keys":
+            _log(on_status,
+                 "FA debugger: generating RSA-2048 signing key + binding to default tenant")
+            try:
+                # Use the same stable key ID the provisioner template
+                # uses, so re-runs are idempotent.
+                from bizniz.provisioner.templates.fusionauth import FusionAuthTemplate
+                key_id = FusionAuthTemplate.ACCESS_TOKEN_KEY_ID
+                tenant_id = FusionAuthTemplate.DEFAULT_TENANT_ID
+                orchestrator.generate_signing_key(
+                    key_id=key_id, algorithm="RS256", length=2048,
+                    name="Access Token Signing Key",
+                )
+                orchestrator.set_tenant_signing_key(
+                    tenant_id=tenant_id, key_id=key_id, also_id_token=True,
+                )
+                actions += 1
+            except Exception as e:
+                _log(on_status, f"FA debugger: jwks_has_keys fix failed — {e}")
+
     return actions
 
 

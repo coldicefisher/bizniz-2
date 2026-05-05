@@ -268,12 +268,31 @@ class AuthContract:
                     f"JWT decode failed: {type(e).__name__}: {e}",
                 ))
 
-        # 4. JWKS reachable (sanity for the runtime contract)
+        # 4. JWKS reachable AND has keys. The "0 keys" case means the
+        # tenant is signing tokens with HS256 (no public key for JWKS
+        # to expose) — backend's RS256 + JWKS validation will fail
+        # silently in production. We surface this as TWO checks so
+        # the FA debugger's typed-fix can target jwks_has_keys
+        # specifically (generate RSA key + bind to tenant).
         if self.runtime and self.runtime.jwks_url:
             try:
                 r = requests.get(self.runtime.jwks_url, timeout=5.0)
-                if r.status_code == 200 and "keys" in (r.json() or {}):
+                if r.status_code == 200:
+                    body = r.json() or {}
+                    keys = body.get("keys") or []
                     checks.append(ValidationCheck("jwks_reachable", True))
+                    if keys:
+                        checks.append(ValidationCheck(
+                            "jwks_has_keys", True,
+                            f"{len(keys)} key(s)",
+                        ))
+                    else:
+                        checks.append(ValidationCheck(
+                            "jwks_has_keys", False,
+                            "JWKS exposes 0 keys — tenant is using HS256, "
+                            "or no RS256 key is bound as accessTokenKeyId. "
+                            "Backend RS256 verification will fail on every JWT.",
+                        ))
                 else:
                     checks.append(ValidationCheck(
                         "jwks_reachable", False,
