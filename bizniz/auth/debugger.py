@@ -233,17 +233,15 @@ def repair_fusionauth_state(
             _log(on_status,
                  f"FA debugger: applied {fix_count} typed fix action(s)")
 
-        # Step 4 (last iteration only): if still failing, restart FA
-        # so kickstart can re-apply on a clean DB state. This is the
-        # heavy hammer — only used as a last resort because it's slow
-        # and resets any in-flight FA-side changes.
+        # Step 4 (last iteration only): if still failing, restart FA.
+        # Kickstart re-application only happens on a fresh DB volume,
+        # not on container restart, so this is mostly a "kick FA in
+        # case something is wedged" hammer. We don't overwrite the
+        # provisioner's kickstart on disk — provisioner owns that
+        # artifact (it carries the api_key + application_id .env
+        # depends on).
         if iteration == max_iterations and last_result.failed_checks:
             _log(on_status, "FA debugger: last-resort restart of fusionauth")
-            kickstart_dir = project_root / "infra" / "development" / "fusionauth" / "kickstart"
-            kickstart_dir.mkdir(parents=True, exist_ok=True)
-            (kickstart_dir / "kickstart.json").write_text(
-                json.dumps(render_kickstart(auth_spec), indent=2)
-            )
             _restart_fusionauth(compose_path, on_status=on_status)
             _wait_until_ready(orchestrator, deadline_s=60.0, on_status=on_status)
             try:

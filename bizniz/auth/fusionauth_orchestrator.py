@@ -730,9 +730,17 @@ class FusionAuthOrchestrator:
         from bizniz.auth.kickstart import _deterministic_uuid
 
         # Build map of name → app_id for cross-references (groups, users).
+        # When ``primary_app_id`` is provided (the typical case — provisioner
+        # already created an application via its kickstart and passed the
+        # ID here), every spec.application maps to that ONE application.
+        # Without this, materialize would create a second app per spec name
+        # and the skeleton's JWT validation (audience=primary_app_id) would
+        # reject every token issued under the spec-derived app.
+        # Multi-app projects (publisher-aggregator) need explicit work — for
+        # now spec.applications collapses to the single primary app.
         app_id_by_name: Dict[str, ApplicationId] = {}
         for app in spec.applications:
-            app_id = _deterministic_uuid("application", app.name)
+            app_id = primary_app_id or _deterministic_uuid("application", app.name)
             app_id_by_name[app.name] = app_id
 
             action = ReconcileAction(

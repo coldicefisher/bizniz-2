@@ -228,25 +228,24 @@ def provision_fusionauth(
 
     if spec_driven:
         # ── Path 1: spec-driven ─────────────────────────────────────
-        from bizniz.auth.kickstart import render_kickstart
-
-        # Persist intent (spec.json) and render kickstart.json from it.
-        # Kickstart only takes effect on a fresh FusionAuth boot, but we
-        # write it every milestone so a future teardown+rebuild from
-        # any milestone forward gets the right initial state.
+        #
+        # Persist intent (spec.json) for the engineer/coder/debugger
+        # context loader. We deliberately do NOT overwrite the
+        # provisioner-rendered kickstart.json — the provisioner owns
+        # the bootstrap config (api_key, application_id, admin user)
+        # because those values are what gets written into .env and
+        # what the skeleton's JWT validation uses as audience. Writing
+        # a second kickstart with a name-derived application_id created
+        # a split-brain where materialize talked to one app and the
+        # skeleton validated tokens against another. Spec changes flow
+        # through orchestrator.materialize() (live FA reconciliation)
+        # and through the provisioner's kickstart (regenerated when
+        # the project is rebuilt from scratch).
         spec_dir = project_root / "docs" / "auth"
         spec_dir.mkdir(parents=True, exist_ok=True)
         (spec_dir / "spec.json").write_text(auth_spec.model_dump_json(indent=2))
-
-        kickstart_dir = project_root / "infra" / "development" / "fusionauth" / "kickstart"
-        kickstart_dir.mkdir(parents=True, exist_ok=True)
-        kickstart_data = render_kickstart(auth_spec)
-        import json as _json
-        (kickstart_dir / "kickstart.json").write_text(
-            _json.dumps(kickstart_data, indent=2)
-        )
         _log(on_status,
-             f"FusionAuth agent: rendered kickstart.json from spec "
+             f"FusionAuth agent: wrote spec.json "
              f"({len(auth_spec.applications)} app(s), "
              f"{len(auth_spec.roles)} role(s), "
              f"{len(auth_spec.test_users)} test user(s))")
