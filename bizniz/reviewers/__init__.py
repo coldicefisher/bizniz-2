@@ -25,5 +25,19 @@ from bizniz.reviewers.route_review import (
     RouteIssue,
     review_routes,
 )
+from bizniz.reviewers.hallucination_review import (
+    HallucinationReport,
+    SuspiciousFile,
+    collect_changed_files,
+    review_for_hallucinations,
+)
 
-__all__ = ["RouteReview", "RouteIssue", "review_routes"]
+__all__ = [
+    "RouteReview",
+    "RouteIssue",
+    "review_routes",
+    "HallucinationReport",
+    "SuspiciousFile",
+    "collect_changed_files",
+    "review_for_hallucinations",
+]

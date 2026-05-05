@@ -2185,6 +2185,69 @@ class Architect(BaseAIAgent):
                             f"'{service.name}' ({type(e).__name__}: {e})"
                         )
 
+            # Hallucination review (AI-driven, single LLM call). Replaces
+            # the old hardcoded path-token guard. Sees the full set of
+            # files the engineer just produced + the problem statement,
+            # and flags drift like grooming-routes-in-property-manager.
+            # Soft-skips on AI errors (we don't want a flaky reviewer to
+            # block an otherwise-good engineering pass).
+            if ws_root and ws_root.is_dir():
+                try:
+                    from bizniz.reviewers import (
+                        collect_changed_files,
+                        review_for_hallucinations,
+                    )
+                    files = collect_changed_files(ws_root)
+                    h_report = review_for_hallucinations(
+                        problem_statement=problem_statement,
+                        changed_files=files,
+                        ai_client=self._client,
+                        on_status=self._on_status_message,
+                    )
+                    if self._on_status_message:
+                        if h_report.skipped_reason:
+                            self._on_status_message(
+                                f"Architect: hallucination review {service.name} — "
+                                f"skipped ({h_report.skipped_reason})"
+                            )
+                        elif h_report.clean:
+                            self._on_status_message(
+                                f"Architect: hallucination review {service.name} — "
+                                f"clean ({len(files)} file(s))"
+                            )
+                        else:
+                            self._on_status_message(
+                                f"Architect: hallucination review {service.name} — "
+                                f"{len(h_report.suspicious_files)} flagged "
+                                f"({len(h_report.blockers)} blocker(s))"
+                            )
+                            for s in h_report.suspicious_files:
+                                self._on_status_message(
+                                    f"Architect: hallucination [{s.severity}] "
+                                    f"{s.filepath}: {s.reason}"
+                                )
+                    if h_report.has_blockers:
+                        msg_lines = [
+                            f"hallucination_review_blocked: "
+                            f"{len(h_report.blockers)} blocker(s)",
+                        ]
+                        for s in h_report.blockers[:5]:
+                            msg_lines.append(f"  ✗ {s.filepath}: {s.reason}")
+                        review_msg = "\n".join(msg_lines)
+                        if validator_error:
+                            validator_error = (
+                                f"{validator_error}\n\n"
+                                f"=== ALSO ===\n{review_msg}"
+                            )
+                        else:
+                            validator_error = review_msg
+                except Exception as e:
+                    if self._on_status_message:
+                        self._on_status_message(
+                            f"Architect: hallucination review skipped for "
+                            f"'{service.name}' ({type(e).__name__}: {e})"
+                        )
+
         result = ServiceResult(
             service_name=service.name,
             workspace_name=service.workspace_name,
