@@ -328,8 +328,12 @@ def repair_integration_failure(
             try:
                 debugger = tier.factory(workspace)
                 # Cap the agent's per-call turn budget per the tier config.
-                if hasattr(debugger, "_max_iterations"):
-                    debugger._max_iterations = tier.max_turns
+                # AgenticDebugger reads ``_max_turns`` in its turn loop;
+                # writing to any other name silently leaves the constructor
+                # default of 15 in place, which is how an earlier version
+                # of this code let pro tier blow past its 8-turn cap.
+                if hasattr(debugger, "_max_turns"):
+                    debugger._max_turns = tier.max_turns
                 # Arm the debugger with container inspection if we have
                 # a compose path. This lets it pull more logs or exec
                 # commands inside the running container on demand.

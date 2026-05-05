@@ -27,10 +27,12 @@ repair_models:
 # chain below.
 debugger_model: gemini-flash-top
 debugger_escalation:
-  # First tier: many cheap turns to handle the common case.
+  # First tier: many cheap turns to handle the common case. Each
+  # attempt sees the sticky repair log so the 10 passes compound on
+  # each other rather than restarting from zero.
   - model: gemini-flash-top
     max_turns: 12
-    repair_attempts: 2
+    repair_attempts: 10
   # Escalation: stronger model with fewer turns. Sees flash-top's
   # full repair log so it doesn't redo the obvious-fix attempts.
   - model: gemini-pro
