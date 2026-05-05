@@ -480,12 +480,24 @@ class Coder(BaseAIAgent):
             # tests still catch regressions. Surface in logs only.
             log(f"Coder: workspace context extraction skipped ({type(_e).__name__}: {_e})")
 
+        # Auth context — AUTH_CONTRACT.md + spec.json from project root.
+        # Same loader engineer + integration testers + debugger use, so
+        # every agent reasons from the same source of truth on roles,
+        # endpoints, JWT claims, and test users.
+        auth_context = ""
+        try:
+            from bizniz.auth.context import load_auth_context_for_prompt
+            auth_context = load_auth_context_for_prompt(self._workspace)
+        except Exception:
+            pass
+
         user_prompt = GENERATE_MULTI_USER_PROMPT_TEMPLATE.format(
             issue_description=issue_description,
             target_files_description=target_desc,
             test_files_description=test_desc,
             workspace_context=workspace_context,
             existing_files_block=existing_files_block,
+            auth_context=auth_context,
         )
 
         system_prompt = get_generate_multi_system_prompt(lang).format(

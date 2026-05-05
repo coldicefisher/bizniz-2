@@ -546,6 +546,13 @@ class Architect(BaseAIAgent):
                 description="",
             )
 
+            # Cumulative auth spec — accumulated across milestone deltas.
+            # Each milestone gets its delta applied before provisioner
+            # runs, so the auth state at provision time reflects every
+            # auth change that should have shipped by this milestone.
+            from bizniz.auth.spec import AuthSpec
+            current_auth_spec = AuthSpec.baseline()
+
             for milestone in sorted(plan.milestones, key=lambda m: m.sequence_index):
                 m_label = f"#{milestone.sequence_index} '{milestone.name}'"
                 log(f"Architect: ── milestone {m_label} ──")
@@ -616,6 +623,35 @@ class Architect(BaseAIAgent):
                             break
                     tracker.set_phase(None)
 
+                    # Apply this milestone's AuthSpec delta to the cumulative
+                    # spec. The orchestrator materializes the cumulative spec
+                    # (not the delta) so a fresh kickstart can rebuild the
+                    # entire auth state from any milestone forward.
+                    if not milestone.auth_delta.is_empty():
+                        current_auth_spec = current_auth_spec.apply(milestone.auth_delta)
+                        log(
+                            f"Architect: auth spec evolved — "
+                            f"{len(current_auth_spec.roles)} role(s), "
+                            f"{len(current_auth_spec.applications)} app(s), "
+                            f"{len(current_auth_spec.test_users)} test user(s)"
+                            + (
+                                f", {len(current_auth_spec.deprecated_roles)} deprecated"
+                                if current_auth_spec.deprecated_roles else ""
+                            )
+                        )
+
+                    # Persist the cumulative spec to disk as the canonical
+                    # intent record. Sibling to docs/auth/contract.json
+                    # (intent vs verified-reality split). Engineer/coder
+                    # context loaders read this so they know the role
+                    # landscape, not just what FusionAuth confirmed exists.
+                    if current_auth_spec.enabled:
+                        spec_path = project.root / "docs" / "auth" / "spec.json"
+                        spec_path.parent.mkdir(parents=True, exist_ok=True)
+                        spec_path.write_text(
+                            current_auth_spec.model_dump_json(indent=2)
+                        )
+
                     # Step 2b.6: configure FusionAuth (roles, test users, contract)
                     # Stack is still up from validation — FusionAuth is reachable
                     if has_auth and stack_healthy:
@@ -650,6 +686,7 @@ class Architect(BaseAIAgent):
                                 frontend_port=fe_port,
                                 ai_client=self._client,
                                 on_status=self._on_status_message,
+                                auth_spec=current_auth_spec,
                             )
                             log(
                                 f"Architect: FusionAuth configured — "

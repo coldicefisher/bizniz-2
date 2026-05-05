@@ -137,6 +137,16 @@ class Engineer(BaseAIAgent):
         section = load_skeleton_conventions(self._workspace)
         return section or ""
 
+    def _auth_context_for_user_prompt(self) -> str:
+        """Return AUTH_CONTRACT.md + docs/auth/spec.json as a prompt
+        section, or empty string if neither exists. Same injection
+        rationale as skeleton_contract — putting it in the user prompt
+        keeps it close to the problem statement so the AI can't drift
+        away from it under the weight of more-concrete instructions
+        further down."""
+        from bizniz.auth.context import load_auth_context_for_prompt
+        return load_auth_context_for_prompt(self._workspace)
+
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def analyze(self, problem_statement: str) -> EngineeringAnalysis:
@@ -157,11 +167,13 @@ class Engineer(BaseAIAgent):
         log("Engineer: calling AI for engineering analysis...")
         models_str = ", ".join(self._available_models)
         skeleton_contract = self._skeleton_contract_for_user_prompt()
+        auth_context = self._auth_context_for_user_prompt()
         user_prompt = get_analyze_prompt(self._language).format(
             problem_statement=problem_statement,
             architecture_context="",
             available_models=models_str,
             skeleton_contract=skeleton_contract,
+            auth_context=auth_context,
         )
         raw = self._call_ai_for_analysis(user_prompt)
 
@@ -182,6 +194,7 @@ class Engineer(BaseAIAgent):
             architecture_context=f"ARCHITECTURE PLAN:\n{arch_context}",
             available_models=models_str,
             skeleton_contract=skeleton_contract,
+            auth_context=auth_context,
         )
         refined_raw = self._call_ai_for_analysis(refined_prompt)
 
@@ -1099,6 +1112,7 @@ class Engineer(BaseAIAgent):
             requirements_text=requirements_text,
             use_cases_text=use_cases_text,
             skeleton_contract=self._skeleton_contract_for_user_prompt(),
+            auth_context=self._auth_context_for_user_prompt(),
         )
 
         log("Engineer: calling AI for architecture plan...")

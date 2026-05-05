@@ -111,6 +111,7 @@ TEST FILES (write pytest tests for the source files — stubs already exist):
 
 {existing_files_block}
 {workspace_context}
+{auth_context}
 INSTRUCTIONS:
 1. View each source stub file to see its skeleton (class names, imports, signatures).
 2. Use the WORKSPACE CONTEXT above as ground truth for what's already exported in this

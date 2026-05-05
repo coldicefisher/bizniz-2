@@ -390,6 +390,79 @@ class FusionAuthOrchestrator:
             body={"user": {"active": True}},
         )
 
+    # ── Groups ──────────────────────────────────────────────────────
+
+    def get_group_by_name(self, name: str) -> Optional[dict]:
+        """Find a group by name. Returns the raw group dict or None."""
+        try:
+            result = self.request("GET", "/api/group")
+        except FusionAuthError as e:
+            if e.status_code in (401, 403):
+                raise
+            return None
+        for g in (result.get("groups") or []):
+            if g.get("name") == name:
+                return g
+        return None
+
+    def ensure_group(
+        self,
+        name: str,
+        description: str = "",
+        application_id: Optional[ApplicationId] = None,
+        role_names: Optional[List[str]] = None,
+    ) -> str:
+        """Idempotent: ensure a group exists with the given role grants.
+
+        Returns the group_id. If ``application_id`` is set, the named
+        roles are looked up on that application and granted to the
+        group (so adding a user to the group grants them those roles).
+        """
+        role_names = role_names or []
+        existing = self.get_group_by_name(name)
+        if existing is not None:
+            return existing.get("id", "")
+
+        role_grants: List[Dict[str, Any]] = []
+        if application_id and role_names:
+            for rn in role_names:
+                role = self.get_role(application_id, rn)
+                if role is None:
+                    self._log(
+                        f"FusionAuth: group {name!r} references unknown role "
+                        f"{rn!r} on app {application_id} — skipping grant"
+                    )
+                    continue
+                role_grants.append({
+                    "applicationId": application_id,
+                    "roleId": role.role_id,
+                })
+
+        self._log(f"FusionAuth: creating group {name!r} (roles={role_names})")
+        body: Dict[str, Any] = {
+            "group": {
+                "name": name,
+                "description": description,
+            },
+        }
+        if role_grants:
+            body["roleIds"] = [g["roleId"] for g in role_grants]
+        result = self.request("POST", "/api/group", body=body)
+        return (result.get("group") or {}).get("id", "")
+
+    def add_user_to_group(self, user_id: UserId, group_id: str) -> None:
+        """Idempotent: add a user to a group. 409 (already member) is
+        treated as success."""
+        self.request(
+            "POST", "/api/group/member",
+            body={
+                "members": {
+                    group_id: [{"userId": user_id}],
+                }
+            },
+            ok_statuses=[200, 201, 202, 409],
+        )
+
     # ── Auth ────────────────────────────────────────────────────────
 
     def get_token(self, app_id: ApplicationId, email: str, password: str) -> str:
@@ -585,6 +658,255 @@ class FusionAuthOrchestrator:
                     except FusionAuthError as e:
                         action.error = str(e)
                     report.actions.append(action)
+
+        return report
+
+    # ── Materialize from spec ───────────────────────────────────────
+
+    def materialize(
+        self,
+        spec: "Any",
+        *,
+        primary_app_id: Optional[ApplicationId] = None,
+    ) -> ReconcileReport:
+        """Bring FusionAuth into the desired state described by ``spec``.
+
+        ``spec`` is a ``bizniz.auth.spec.AuthSpec`` (typed late to keep
+        this module free of a hard import cycle through planner). This
+        is the single entrypoint the provisioner calls — it walks the
+        spec and ensures each application, role, group, and user.
+
+        Behavior:
+          - **Disabled spec** (``spec.enabled is False``): no-op,
+            returns empty report. Provisioner should skip the FusionAuth
+            container in this case but this is also safe defensively.
+          - **Applications**: ensured in spec order. Each app gets all
+            spec.roles registered (or the app's explicit role_names if
+            set). Roles previously registered on the app stay — additive.
+          - **Seeded admin**: always created if not present, registered
+            on every spec application with super_admin.
+          - **Test users**: created with deterministic email/password,
+            registered on every app where they have at least one role
+            (direct or via group membership).
+          - **Groups**: created when ``spec.groups_enabled`` is true.
+            Role grants resolved at materialize time.
+          - **Soft-delete**: roles in ``spec.deprecated_roles`` are NOT
+            hard-deleted from FusionAuth — the orchestrator logs a
+            warning and emits a ``soft_delete_role`` action so a human
+            can decide. Production data loss must always be opt-in.
+
+        ``primary_app_id`` is the application ID for "the" app in
+        single-app deployments; used for backwards compatibility with
+        callers that still pass a single app_id (kickstart, contract
+        validation). When the spec has multiple applications, the first
+        one is the primary if not specified.
+        """
+        report = ReconcileReport()
+
+        if not getattr(spec, "enabled", False):
+            return report
+
+        from bizniz.auth.kickstart import _deterministic_uuid
+
+        # Build map of name → app_id for cross-references (groups, users).
+        app_id_by_name: Dict[str, ApplicationId] = {}
+        for app in spec.applications:
+            app_id = _deterministic_uuid("application", app.name)
+            app_id_by_name[app.name] = app_id
+
+            action = ReconcileAction(
+                operation="ensure_application",
+                target=f"app:{app.name}",
+                detail=f"id={app_id}",
+            )
+            try:
+                self.ensure_application(app_id=app_id, name=app.name)
+                action.applied = True
+            except FusionAuthError as e:
+                action.error = str(e)
+            report.actions.append(action)
+
+            # Register every spec role on this application (or the
+            # explicit subset if app.role_names is set).
+            target_role_names = (
+                app.role_names if app.role_names
+                else [r.name for r in spec.roles]
+            )
+            for rn in target_role_names:
+                role_def = next(
+                    (r for r in spec.roles if r.name == rn), None,
+                )
+                role_action = ReconcileAction(
+                    operation="ensure_role",
+                    target=f"role:{rn}@{app.name}",
+                )
+                try:
+                    self.ensure_role(
+                        app_id=app_id,
+                        name=rn,
+                        description=role_def.description if role_def else "",
+                        is_default=role_def.is_default if role_def else False,
+                        is_super_role=role_def.is_super_role if role_def else False,
+                    )
+                    role_action.applied = True
+                except FusionAuthError as e:
+                    role_action.error = str(e)
+                report.actions.append(role_action)
+
+            # Seeded admin's role (super_admin) — implicit, register too.
+            for admin_role in spec.seeded_admin.role_names:
+                if admin_role in target_role_names:
+                    continue  # already handled above
+                ra = ReconcileAction(
+                    operation="ensure_role",
+                    target=f"role:{admin_role}@{app.name}",
+                )
+                try:
+                    self.ensure_role(
+                        app_id=app_id,
+                        name=admin_role,
+                        description="Platform super admin (seeded)",
+                        is_super_role=True,
+                    )
+                    ra.applied = True
+                except FusionAuthError as e:
+                    ra.error = str(e)
+                report.actions.append(ra)
+
+        primary = primary_app_id or (
+            next(iter(app_id_by_name.values()), None)
+        )
+        if primary is None:
+            self._log("FusionAuth: spec has no applications — nothing further to materialize")
+            return report
+
+        # Soft-delete deprecated roles (warning only; never destroy data).
+        for dep in spec.deprecated_roles:
+            sd = ReconcileAction(
+                operation="soft_delete_role",
+                target=f"role:{dep.name}",
+                detail=(
+                    f"deprecated_at={dep.deprecated_at} reason={dep.reason!r}"
+                ),
+                applied=True,
+            )
+            self._log(
+                f"FusionAuth: role {dep.name!r} is DEPRECATED in spec — "
+                f"leaving in place. Hard-delete requires human approval."
+            )
+            report.actions.append(sd)
+
+        # Seeded admin (registered on every spec application).
+        admin = spec.seeded_admin
+        for app_name, app_id in app_id_by_name.items():
+            aa = ReconcileAction(
+                operation="ensure_user",
+                target=f"user:{admin.email}@{app_name}",
+            )
+            try:
+                self.ensure_user(
+                    app_id=app_id,
+                    email=admin.email,
+                    password=admin.password,
+                    first_name=admin.first_name,
+                    last_name=admin.last_name,
+                    roles=list(admin.role_names),
+                    verified=True,
+                )
+                aa.applied = True
+            except FusionAuthError as e:
+                aa.error = str(e)
+            report.actions.append(aa)
+
+        # Test users — register on each app where they have a role
+        # (direct role_names or group_names that grant roles on the app).
+        for user in spec.test_users:
+            for app in spec.applications:
+                app_id = app_id_by_name[app.name]
+                granted = set(user.role_names)
+                # Pull roles via group memberships
+                for gn in user.group_names:
+                    grp = next(
+                        (g for g in spec.groups if g.name == gn), None,
+                    )
+                    if grp and (grp.application is None or grp.application == app.name):
+                        granted.update(grp.role_names)
+                app_role_names = set(
+                    app.role_names if app.role_names
+                    else [r.name for r in spec.roles]
+                )
+                grants_for_app = sorted(granted & app_role_names)
+                if not grants_for_app:
+                    continue
+
+                ua = ReconcileAction(
+                    operation="ensure_user",
+                    target=f"user:{user.email}@{app.name}",
+                    detail=f"roles={grants_for_app}",
+                )
+                try:
+                    self.ensure_user(
+                        app_id=app_id,
+                        email=user.email,
+                        password=user.password,
+                        first_name=user.first_name,
+                        last_name=user.last_name,
+                        roles=grants_for_app,
+                        verified=user.verified,
+                    )
+                    ua.applied = True
+                except FusionAuthError as e:
+                    ua.error = str(e)
+                report.actions.append(ua)
+
+        # Groups (only when explicitly enabled in the spec).
+        if spec.groups_enabled:
+            user_id_cache: Dict[str, UserId] = {}
+            for group in spec.groups:
+                app_id = (
+                    app_id_by_name.get(group.application)
+                    if group.application else primary
+                )
+                ga = ReconcileAction(
+                    operation="ensure_group",
+                    target=f"group:{group.name}",
+                )
+                try:
+                    group_id = self.ensure_group(
+                        name=group.name,
+                        description=group.description,
+                        application_id=app_id,
+                        role_names=group.role_names,
+                    )
+                    ga.applied = True
+                except FusionAuthError as e:
+                    ga.error = str(e)
+                    report.actions.append(ga)
+                    continue
+                report.actions.append(ga)
+
+                # Add any test users that reference this group.
+                for user in spec.test_users:
+                    if group.name not in user.group_names:
+                        continue
+                    if user.email not in user_id_cache:
+                        u = self.get_user_by_email(user.email)
+                        if u is None:
+                            continue
+                        user_id_cache[user.email] = (u.get("user") or {}).get("id", "")
+                    uid = user_id_cache[user.email]
+                    if not uid:
+                        continue
+                    ma = ReconcileAction(
+                        operation="add_user_to_group",
+                        target=f"user:{user.email}→group:{group.name}",
+                    )
+                    try:
+                        self.add_user_to_group(uid, group_id)
+                        ma.applied = True
+                    except FusionAuthError as e:
+                        ma.error = str(e)
+                    report.actions.append(ma)
 
         return report
 

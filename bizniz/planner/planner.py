@@ -114,6 +114,18 @@ class Planner(BaseAIAgent):
         )
         raw = self._call_ai_for_plan(user_prompt)
 
+        from bizniz.auth.spec import AuthSpecDelta
+
+        def _parse_auth_delta(raw_delta: Optional[dict]) -> AuthSpecDelta:
+            # Tolerate older / partial responses by passing through
+            # Pydantic, which fills in defaults for any missing field.
+            if not raw_delta:
+                return AuthSpecDelta()
+            try:
+                return AuthSpecDelta.model_validate(raw_delta)
+            except Exception:
+                return AuthSpecDelta()
+
         milestones = [
             Milestone(
                 sequence_index=int(m.get("sequence_index", i)),
@@ -123,6 +135,7 @@ class Planner(BaseAIAgent):
                 success_criteria=list(m.get("success_criteria") or []),
                 depends_on_names=list(m.get("depends_on_names") or []),
                 estimated_effort=m.get("estimated_effort"),
+                auth_delta=_parse_auth_delta(m.get("auth_delta")),
             )
             for i, m in enumerate(raw.get("milestones") or [])
         ]

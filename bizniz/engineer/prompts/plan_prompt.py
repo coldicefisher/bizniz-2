@@ -3,6 +3,8 @@ Plan the software architecture for the following project.
 
 {skeleton_contract}
 
+{auth_context}
+
 PROBLEM STATEMENT:
 ──────────────────────────────────────────────────────────────
 {problem_statement}
@@ -73,6 +75,8 @@ _ARCHITECTURE_PLAN_PROMPT_TYPESCRIPT = """
 Plan the software architecture for the following project.
 
 {skeleton_contract}
+
+{auth_context}
 
 PROBLEM STATEMENT:
 ──────────────────────────────────────────────────────────────

@@ -199,108 +199,206 @@ def provision_fusionauth(
     frontend_port: int = 5173,
     ai_client=None,
     on_status: Optional[Callable[[str], None]] = None,
+    auth_spec=None,  # bizniz.auth.spec.AuthSpec | None
 ) -> dict:
     """Configure FusionAuth for the project and write AUTH_CONTRACT.md.
+
+    Two materialization paths, picked by whether ``auth_spec`` is provided:
+
+    1. **Spec-driven** (preferred). Architect passes the cumulative
+       ``AuthSpec`` accumulated from milestone ``auth_delta`` entries.
+       Provisioner renders ``kickstart.json`` from the spec, calls
+       ``FusionAuthOrchestrator.materialize(spec)`` to reconcile live
+       state, then validates the AuthContract. No LLM calls.
+
+    2. **Legacy / fallback** (no ``auth_spec`` provided). Extracts roles
+       from the problem statement via the AI client. Kept for backward
+       compatibility with callers that don't yet pass a spec.
 
     Returns a dict with:
       - roles: list of role dicts
       - tenancy_model: "roles" | "groups" | "tenants"
       - test_users: list of {email, password, roles}
       - contract_path: path to AUTH_CONTRACT.md
+      - smoke_passed: bool (live login test result)
+      - spec_driven: bool (True if path #1 was taken)
     """
     fa = _FusionAuthClient(fusionauth_url, fusionauth_api_key)
+    spec_driven = auth_spec is not None and getattr(auth_spec, "enabled", False)
 
-    # Step 1: Extract roles from problem statement
-    if ai_client:
-        role_info = _extract_roles(ai_client, problem_statement, on_status)
+    if spec_driven:
+        # ── Path 1: spec-driven ─────────────────────────────────────
+        from bizniz.auth.kickstart import render_kickstart
+
+        # Persist intent (spec.json) and render kickstart.json from it.
+        # Kickstart only takes effect on a fresh FusionAuth boot, but we
+        # write it every milestone so a future teardown+rebuild from
+        # any milestone forward gets the right initial state.
+        spec_dir = project_root / "docs" / "auth"
+        spec_dir.mkdir(parents=True, exist_ok=True)
+        (spec_dir / "spec.json").write_text(auth_spec.model_dump_json(indent=2))
+
+        kickstart_dir = project_root / "infra" / "development" / "fusionauth" / "kickstart"
+        kickstart_dir.mkdir(parents=True, exist_ok=True)
+        kickstart_data = render_kickstart(auth_spec)
+        import json as _json
+        (kickstart_dir / "kickstart.json").write_text(
+            _json.dumps(kickstart_data, indent=2)
+        )
+        _log(on_status,
+             f"FusionAuth agent: rendered kickstart.json from spec "
+             f"({len(auth_spec.applications)} app(s), "
+             f"{len(auth_spec.roles)} role(s), "
+             f"{len(auth_spec.test_users)} test user(s))")
+
+        # Build legacy-shaped lists for the AuthContract construction
+        # below. The orchestrator will materialize() in a moment; this
+        # is just so the contract document reflects the spec.
+        roles = [
+            {
+                "name": r.name,
+                "description": r.description,
+                "is_default": r.is_default,
+            }
+            for r in auth_spec.roles
+        ]
+        test_users = [
+            {
+                "email": u.email,
+                "password": u.password,
+                "roles": list(u.role_names),
+            }
+            for u in auth_spec.test_users
+        ]
+        if auth_spec.multitenant and auth_spec.groups_enabled:
+            tenancy_model = "groups"
+        elif auth_spec.multitenant:
+            tenancy_model = "tenants"
+        else:
+            tenancy_model = "roles"
+
+        # Materialize via orchestrator (idempotent reconcile against live FA).
+        from bizniz.auth import FusionAuthOrchestrator
+        orch_for_materialize = FusionAuthOrchestrator(
+            base_url=fusionauth_url,
+            api_key=fusionauth_api_key,
+            on_status=on_status,
+        )
+        report = orch_for_materialize.materialize(
+            auth_spec, primary_app_id=application_id,
+        )
+        applied = sum(1 for a in report.actions if a.applied)
+        failed = sum(1 for a in report.actions if a.error)
+        _log(on_status,
+             f"FusionAuth agent: orchestrator.materialize — "
+             f"{applied} applied, {failed} failed")
+        if failed:
+            for a in report.actions:
+                if a.error:
+                    _log(on_status,
+                         f"FusionAuth agent: materialize action FAILED — "
+                         f"{a.operation}({a.target}): {a.error}")
+
+        # Smoke test: log in as the first non-admin test user (spec path).
+        smoke_passed = False
+        if auth_spec.test_users:
+            first = auth_spec.test_users[0]
+            _log(on_status,
+                 f"FusionAuth agent: smoke test — logging in as {first.email}...")
+            login_result = fa.login(application_id, first.email, first.password)
+            if "token" in login_result:
+                _log(on_status, "FusionAuth agent: smoke test PASS — got valid JWT")
+                smoke_passed = True
+            else:
+                _log(on_status,
+                     f"FusionAuth agent: smoke test FAIL — {login_result}")
     else:
-        role_info = {
-            "roles": [
-                {"name": "admin", "description": "Administrator", "is_default": False},
-                {"name": "user", "description": "Regular user", "is_default": True},
-            ],
-            "tenancy_model": "roles",
-            "tenancy_reason": "No AI client provided, defaulting to basic roles.",
-        }
-
-    roles = role_info.get("roles", [])
-    tenancy_model = role_info.get("tenancy_model", "roles")
-
-    # Step 2: Ensure the application exists. The kickstart creates it on
-    # first boot, but if the DB was recreated or the kickstart didn't run
-    # (e.g. FusionAuth container restarted without a fresh DB), we need to
-    # create it ourselves.
-    existing_app = fa.get_application(application_id)
-    if "_error" in existing_app or "application" not in existing_app:
-        _log(on_status, f"FusionAuth agent: application {application_id} not found, creating...")
-        create_result = fa.create_application(
-            application_id,
-            name=project_root.name.replace("_", " ").title(),
-            frontend_port=frontend_port,
-        )
-        if "_error" in create_result:
-            _log(on_status, f"FusionAuth agent: failed to create application: {create_result}")
+        # ── Path 2: legacy AI-extraction (kept for backwards compat) ─
+        # Step 1: Extract roles from problem statement
+        if ai_client:
+            role_info = _extract_roles(ai_client, problem_statement, on_status)
         else:
-            _log(on_status, "FusionAuth agent: application created")
-        # Re-fetch to get the application object
+            role_info = {
+                "roles": [
+                    {"name": "admin", "description": "Administrator", "is_default": False},
+                    {"name": "user", "description": "Regular user", "is_default": True},
+                ],
+                "tenancy_model": "roles",
+                "tenancy_reason": "No AI client provided, defaulting to basic roles.",
+            }
+
+        roles = role_info.get("roles", [])
+        tenancy_model = role_info.get("tenancy_model", "roles")
+
+        # Step 2 (legacy): Ensure the application exists. The kickstart
+        # creates it on first boot, but if the DB was recreated or the
+        # kickstart didn't run (e.g. FusionAuth container restarted without
+        # a fresh DB), we need to create it ourselves.
         existing_app = fa.get_application(application_id)
+        if "_error" in existing_app or "application" not in existing_app:
+            _log(on_status, f"FusionAuth agent: application {application_id} not found, creating...")
+            create_result = fa.create_application(
+                application_id,
+                name=project_root.name.replace("_", " ").title(),
+                frontend_port=frontend_port,
+            )
+            if "_error" in create_result:
+                _log(on_status, f"FusionAuth agent: failed to create application: {create_result}")
+            else:
+                _log(on_status, "FusionAuth agent: application created")
+            existing_app = fa.get_application(application_id)
 
-    existing_roles = set()
-    if "application" in existing_app:
-        for r in existing_app["application"].get("roles", []):
-            existing_roles.add(r["name"])
+        existing_roles = set()
+        if "application" in existing_app:
+            for r in existing_app["application"].get("roles", []):
+                existing_roles.add(r["name"])
 
-    for role in roles:
-        name = role["name"]
-        if name in existing_roles:
-            _log(on_status, f"FusionAuth agent: role '{name}' already exists")
-            continue
-        result = fa.create_role(
-            application_id, name,
-            is_default=role.get("is_default", False),
-            is_super=(name == "admin"),
-        )
-        if "_error" in result:
-            _log(on_status, f"FusionAuth agent: failed to create role '{name}': {result}")
-        else:
-            _log(on_status, f"FusionAuth agent: created role '{name}'")
+        for role in roles:
+            name = role["name"]
+            if name in existing_roles:
+                _log(on_status, f"FusionAuth agent: role '{name}' already exists")
+                continue
+            result = fa.create_role(
+                application_id, name,
+                is_default=role.get("is_default", False),
+                is_super=(name == "admin"),
+            )
+            if "_error" in result:
+                _log(on_status, f"FusionAuth agent: failed to create role '{name}': {result}")
+            else:
+                _log(on_status, f"FusionAuth agent: created role '{name}'")
 
-    # Step 3: Create test users (one per role)
-    test_users = []
-    for role in roles:
-        name = role["name"]
-        if name == "admin":
-            continue  # kickstart already creates admin
-        # Use @example.com (a reserved real TLD per RFC 2606) instead of
-        # @test.local. Strict email validators like pydantic's EmailStr
-        # reject `.local` outright as a special-use TLD, which silently
-        # blocks every contract-user login test downstream. example.com
-        # is safe, always reserved, and accepted by every validator.
-        email = f"{name}@example.com"
-        password = "TestPass123!"
-        result = fa.register_user(
-            application_id, email, password,
-            first_name=name.capitalize(),
-            last_name="TestUser",
-            roles=[name],
-        )
-        if "_error" in result and result["_error"] != 409:  # 409 = already exists
-            _log(on_status, f"FusionAuth agent: failed to create test user '{email}': {result}")
-        else:
-            _log(on_status, f"FusionAuth agent: test user '{email}' ready (role: {name})")
-        test_users.append({"email": email, "password": password, "roles": [name]})
+        # Step 3 (legacy): Create test users (one per role)
+        test_users = []
+        for role in roles:
+            name = role["name"]
+            if name == "admin":
+                continue  # kickstart already creates admin
+            email = f"{name}@example.com"
+            password = "TestPass123!"
+            result = fa.register_user(
+                application_id, email, password,
+                first_name=name.capitalize(),
+                last_name="TestUser",
+                roles=[name],
+            )
+            if "_error" in result and result["_error"] != 409:
+                _log(on_status, f"FusionAuth agent: failed to create test user '{email}': {result}")
+            else:
+                _log(on_status, f"FusionAuth agent: test user '{email}' ready (role: {name})")
+            test_users.append({"email": email, "password": password, "roles": [name]})
 
-    # Step 4: Smoke test — login with a test user and validate JWT
-    smoke_passed = False
-    if test_users:
-        test_user = test_users[0]
-        _log(on_status, f"FusionAuth agent: smoke test — logging in as {test_user['email']}...")
-        login_result = fa.login(application_id, test_user["email"], test_user["password"])
-        if "token" in login_result:
-            _log(on_status, "FusionAuth agent: smoke test PASS — got valid JWT")
-            smoke_passed = True
-        else:
-            _log(on_status, f"FusionAuth agent: smoke test FAIL — {login_result}")
+        # Step 4 (legacy): Smoke test — login with a test user and validate JWT
+        smoke_passed = False
+        if test_users:
+            test_user = test_users[0]
+            _log(on_status, f"FusionAuth agent: smoke test — logging in as {test_user['email']}...")
+            login_result = fa.login(application_id, test_user["email"], test_user["password"])
+            if "token" in login_result:
+                _log(on_status, "FusionAuth agent: smoke test PASS — got valid JWT")
+                smoke_passed = True
+            else:
+                _log(on_status, f"FusionAuth agent: smoke test FAIL — {login_result}")
 
     # Step 5: Build the typed AuthContract, validate it against
     # live FusionAuth, then write AUTH_CONTRACT.md + JSON sidecar.
@@ -401,6 +499,7 @@ def provision_fusionauth(
         "test_users": test_users,
         "contract_path": str(contract_path),
         "smoke_passed": smoke_passed,
+        "spec_driven": spec_driven,
     }
 
 

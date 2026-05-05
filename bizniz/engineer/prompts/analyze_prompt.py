@@ -3,6 +3,8 @@ Analyze the following problem statement and produce a complete engineering break
 
 {skeleton_contract}
 
+{auth_context}
+
 PROBLEM STATEMENT:
 ──────────────────────────────────────────────────────────────
 {problem_statement}
@@ -67,6 +69,8 @@ Analyze the following problem statement and produce a complete engineering break
 This is a TypeScript project.
 
 {skeleton_contract}
+
+{auth_context}
 
 PROBLEM STATEMENT:
 ──────────────────────────────────────────────────────────────

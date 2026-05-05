@@ -37,15 +37,26 @@ IMPORTANT framework rules:
 
 Authentication (REQUIRED whenever the project has user accounts, login,
 or any concept of "user"):
-- Add an auth service with framework="fusionauth", service_type="auth",
-  language="yaml", workspace_name="fusionauth", port=9011, skeleton="none".
+- The pipeline supports exactly TWO auth modes: **FusionAuth** or **none**.
+  No custom JWT signing, no Auth0/Cognito/Keycloak/Clerk, no DIY session
+  cookies, no application-side password hashing. If the problem implies
+  any user identity, you provision FusionAuth. If it doesn't, you skip
+  the auth service entirely. There is no third option.
+- When auth is needed: add an auth service with framework="fusionauth",
+  service_type="auth", language="yaml", workspace_name="fusionauth",
+  port=9011, skeleton="none".
 - FusionAuth REQUIRES postgres. If you add a fusionauth service, you MUST
   also add a postgres service: framework="postgres", service_type="database",
   language="sql", workspace_name="postgres", port=5432, skeleton="none".
-- The Provisioner ships a complete kickstart.json (realm, application,
-  roles admin+user, OAuth redirect URLs for the frontend, an initial
-  admin user) so you don't need to plan any FusionAuth config yourself.
+- The Provisioner ships a kickstart.json rendered from the milestone's
+  cumulative AuthSpec (roles, applications, groups, test users seeded
+  from the planner's auth_delta deltas, plus an always-seeded admin
+  with passwordChangeRequired=true). You don't plan any FusionAuth
+  config yourself — the spec → kickstart pipeline handles it.
 - Backend services that need auth should list "auth" in their depends_on.
+- Backend code validates FusionAuth-issued JWTs via JWKS and reads roles
+  from the JWT's ``roles`` claim. There is no local Role/UserRole table
+  in the skeleton — engineers MUST NOT introduce one.
 
 Available skeletons (pre-built starter repos that come with auth, Docker, tests, README):
 {skeletons}
