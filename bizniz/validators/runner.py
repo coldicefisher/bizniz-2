@@ -103,12 +103,34 @@ _PY_SIDECAR_IMAGE = "bizniz-doc-python:latest"
 def _run_node_sidecar(service, prof, workspace_root: Path, timeout_s: int) -> ValidationReport:
     """Run a node-based validator (tsc) inside the doc sidecar.
 
-    The doc sidecar already has the TypeScript compiler installed at
-    /opt/extractor/node_modules/typescript, so we override the
-    entrypoint to point ``npx`` at that copy. No second image needed.
+    The doc sidecar has the TypeScript compiler installed but NOT
+    the project's runtime deps (react, jest types, etc.). When the
+    workspace lacks ``node_modules/`` on the host filesystem (i.e.
+    the project's deps live only inside its docker container),
+    tsc fails with hundreds of TS2307 "Cannot find module 'react'"
+    errors that aren't real code bugs — they're environment-level
+    "module resolution can't see the deps."
+
+    Soft-skip in that case rather than fail. Long-term fix: switch
+    to ``docker exec frontend-container tsc --noEmit`` so tsc runs
+    inside the project container where ``node_modules`` exists.
     """
     if not _docker_available():
         return _skip(service, "docker_unavailable", "")
+
+    # If the workspace doesn't have node_modules on the host, the
+    # sidecar's tsc can't resolve project deps. Skip rather than
+    # fail with noise the post-flight repair can't address.
+    node_modules = workspace_root / "node_modules"
+    if not node_modules.is_dir():
+        return _skip(
+            service, "node_modules_missing",
+            f"node_modules not present at {node_modules}; tsc would fail "
+            f"on every project import. The frontend's deps are installed "
+            f"inside its container, not on the host. Validation should "
+            f"run via docker exec into the running container — see "
+            f"follow-up in bizniz/validators/runner.py."
+        )
 
     # Mount workspace, override entrypoint to /bin/sh, run the
     # validator command. We rewrite ``npx tsc ...`` and bare ``tsc``
