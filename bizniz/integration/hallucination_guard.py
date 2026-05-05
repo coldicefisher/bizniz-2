@@ -86,6 +86,16 @@ _GENERIC_VOCAB: Set[str] = {
     "components", "hooks", "stores", "store", "providers", "layouts",
     "pages", "features", "containers", "widgets", "atoms", "molecules",
     "organisms", "templates",
+    # Standard test-scaffolding directory names. The hallucination
+    # guard's job is to catch NEW domain code that drifts away from
+    # the problem statement — not to block fixes to test files. Test
+    # files by nature share vocabulary with the source files they
+    # exercise, and rejecting fixes to them was the single biggest
+    # reason the integration debugger couldn't converge in M1 v17/v18
+    # (every test-file fix REJECTED → only auth.py mutations applied
+    # → debugger circled the same wrong layer).
+    "integration", "unit", "e2e", "smoke", "regression", "functional",
+    "acceptance", "contract", "snapshot",
     # More generic English filler that shows up in test docstrings
     "contract", "domain", "failure", "localhost", "malformed", "problem",
     "profile", "provided", "requires", "simulation", "statement", "there",
