@@ -23,7 +23,7 @@ context it needs from the validator output alone.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from bizniz.integration.debug_loop import DebuggerTierSpec
 from bizniz.repair_log.log import (
@@ -102,7 +102,20 @@ def repair_post_flight_failure(
                     source_files.append(head)
                     seen.add(head)
 
-    test_files: List[str] = []  # post-flight is type-checking, not test running
+    # AgenticDebugger expects source_files / test_files as Dict[path, content].
+    # Build the dict from the file list, reading current contents.
+    def _read_files_dict(paths: List[str]) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for p in paths:
+            try:
+                out[p] = workspace.read_file(p)
+            except Exception:
+                # File doesn't exist or can't be read — skip rather than
+                # erroring (debugger can still reason from error_output).
+                pass
+        return out
+
+    test_files: Dict[str, str] = {}  # post-flight is type-checking, not test running
 
     for tier in escalation:
         tier_label = tier.model_label
@@ -119,6 +132,10 @@ def repair_post_flight_failure(
             sticky_block = _log_format(ws_root) if ws_root else ""
             combined_history = [sticky_block] if sticky_block else []
 
+            # Re-read files each attempt — earlier attempts may have
+            # written partial fixes that we want the debugger to see.
+            source_files_dict = _read_files_dict(source_files)
+
             try:
                 debugger = tier.factory(workspace)
                 if hasattr(debugger, "_max_turns"):
@@ -126,7 +143,7 @@ def repair_post_flight_failure(
 
                 diagnosis = debugger.diagnose(
                     error_output=last_output,
-                    source_files=source_files,
+                    source_files=source_files_dict,
                     test_files=test_files,
                     repair_history=combined_history,
                 )
