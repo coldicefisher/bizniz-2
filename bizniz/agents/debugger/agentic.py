@@ -52,8 +52,10 @@ class AgenticDebugger(BaseDebugger):
         The workspace to explore files in.
     environment:
         Execution environment for running tests.
-    max_turns:
-        Maximum number of tool-call turns before forcing a diagnosis.
+    tool_iterations:
+        Maximum number of tool-call iterations before forcing a diagnosis.
+        Each iteration is one LLM round-trip that may include a tool call
+        (view_file, run_command, inspect_container, etc.).
     timeout_seconds:
         Maximum wall-clock time for the debugging session.
     on_status_message:
@@ -65,7 +67,7 @@ class AgenticDebugger(BaseDebugger):
         client: BaseAIClient,
         workspace: BaseWorkspace,
         environment: BaseExecutionEnvironment,
-        max_turns: int = 15,
+        tool_iterations: int = 15,
         timeout_seconds: int = 600,
         on_status_message: Optional[Callable[[str], None]] = None,
         compose_path: Optional[str] = None,
@@ -77,7 +79,7 @@ class AgenticDebugger(BaseDebugger):
             environment=environment,
             on_status_message=on_status_message,
         )
-        self._max_turns = max_turns
+        self._tool_iterations = tool_iterations
         self._timeout_seconds = timeout_seconds
         self._compose_path = compose_path
         self._service_name = service_name
@@ -134,7 +136,7 @@ class AgenticDebugger(BaseDebugger):
         parse_failures = 0
         max_parse_failures = 3
 
-        for turn in range(1, self._max_turns + 1):
+        for turn in range(1, self._tool_iterations + 1):
             # Check timeout
             elapsed = time.time() - start_time
             if elapsed > self._timeout_seconds:
@@ -290,10 +292,85 @@ class AgenticDebugger(BaseDebugger):
                     "content": f"[TOOL RESULT: inspect_container(\"{path}\")]\n{result}",
                 })
 
+            elif action_type == "tail_logs":
+                service = (action.get("service") or "").strip()
+                lines = path.strip() or "100"
+                self._log(f"AgenticDebugger: tailing logs ({service or 'self'}, {lines} lines)")
+                result = self._tool_tail_logs(service, lines)
+                messages.append({
+                    "role": "user",
+                    "content": f"[TOOL RESULT: tail_logs(service={service!r}, lines={lines!r})]\n{result}",
+                })
+
+            elif action_type == "run_in_container":
+                service = (action.get("service") or "").strip()
+                command = action.get("command") or ""
+                self._log(f"AgenticDebugger: running in container ({service or 'self'}): {command[:80]}")
+                result = self._tool_run_in_container(service, command)
+                messages.append({
+                    "role": "user",
+                    "content": f"[TOOL RESULT: run_in_container(service={service!r}, command={command!r})]\n{result}",
+                })
+
+            elif action_type == "run_python_in_container":
+                service = (action.get("service") or "").strip()
+                command = action.get("command") or ""
+                self._log(f"AgenticDebugger: running python in container ({service or 'self'}): {command[:80]}")
+                result = self._tool_run_python_in_container(service, command)
+                messages.append({
+                    "role": "user",
+                    "content": f"[TOOL RESULT: run_python_in_container(service={service!r})]\n{result}",
+                })
+
+            elif action_type == "hit_endpoint":
+                service = (action.get("service") or "").strip()
+                url = action.get("url") or ""
+                request_data = action.get("request_data") or "{}"
+                self._log(f"AgenticDebugger: hitting endpoint {url}")
+                result = self._tool_hit_endpoint(service, url, request_data)
+                messages.append({
+                    "role": "user",
+                    "content": f"[TOOL RESULT: hit_endpoint(url={url!r})]\n{result}",
+                })
+
+            elif action_type == "inspect_env":
+                service = (action.get("service") or "").strip()
+                prefix = path.strip()
+                self._log(f"AgenticDebugger: inspecting env in {service or 'self'} (prefix={prefix!r})")
+                result = self._tool_inspect_env(service, prefix)
+                messages.append({
+                    "role": "user",
+                    "content": f"[TOOL RESULT: inspect_env(service={service!r}, prefix={prefix!r})]\n{result}",
+                })
+
+            elif action_type == "query_database":
+                service = (action.get("service") or "").strip()
+                sql = action.get("command") or ""
+                self._log(f"AgenticDebugger: query_database ({service or 'auto'}): {sql[:120]}")
+                result = self._tool_query_database(service, sql)
+                messages.append({
+                    "role": "user",
+                    "content": f"[TOOL RESULT: query_database(service={service!r})]\n{result}",
+                })
+
+            elif action_type == "decode_jwt":
+                token = action.get("token") or ""
+                self._log("AgenticDebugger: decoding JWT")
+                result = self._tool_decode_jwt(token)
+                messages.append({
+                    "role": "user",
+                    "content": f"[TOOL RESULT: decode_jwt(token=<{len(token)} chars>)]\n{result}",
+                })
+
             else:
                 messages.append({
                     "role": "user",
-                    "content": f"Unknown action '{action_type}'. Use one of: view_file, list_directory, search_files, run_command, run_tests, submit_fix",
+                    "content": (
+                        f"Unknown action '{action_type}'. Available: view_file, list_directory, "
+                        f"search_files, search_imports, list_all_imports, run_command, run_tests, "
+                        f"tail_logs, run_in_container, run_python_in_container, hit_endpoint, "
+                        f"inspect_env, query_database, decode_jwt, submit_fix."
+                    ),
                 })
 
         # Exhausted turns without a diagnosis — force one
@@ -471,6 +548,243 @@ class AgenticDebugger(BaseDebugger):
             return "\n".join(output_parts)
         except Exception as e:
             return f"ERROR: Could not run tests: {e}"
+
+    # -- Live container introspection --------------------------------------------
+
+    def _resolve_service(self, service: str) -> Optional[str]:
+        """Resolve the target container service name. Empty string falls back to
+        the debugger's bound service. Returns None if no service is available."""
+        return service or self._service_name
+
+    def _exec_in_container(
+        self,
+        service: str,
+        argv: List[str],
+        timeout: int = 60,
+    ) -> "subprocess.CompletedProcess":
+        """Run a command inside the target container via docker compose exec."""
+        cmd = [
+            "docker", "compose", "-f", self._compose_path,
+            "exec", "-T", service,
+        ] + argv
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+    def _tool_tail_logs(self, service: str, lines: str) -> str:
+        if not self._compose_path:
+            return "ERROR: tail_logs unavailable (no compose_path configured)."
+        target = self._resolve_service(service)
+        if not target:
+            return "ERROR: tail_logs needs a service name (none was provided and the debugger isn't bound to one)."
+        try:
+            n = int(lines or "100")
+        except ValueError:
+            n = 100
+        n = max(1, min(n, 500))
+        try:
+            r = subprocess.run(
+                ["docker", "compose", "-f", self._compose_path,
+                 "logs", "--no-color", "--tail", str(n), target],
+                capture_output=True, text=True, timeout=30,
+            )
+            output = (r.stdout or "") + (r.stderr or "")
+            if not output.strip():
+                return f"(no logs available for {target})"
+            return f"=== {target} (last {n} lines) ===\n{output}"
+        except subprocess.TimeoutExpired:
+            return "ERROR: tail_logs timed out."
+        except Exception as e:
+            return f"ERROR: tail_logs failed: {e}"
+
+    def _tool_run_in_container(self, service: str, command: str) -> str:
+        if not self._compose_path:
+            return "ERROR: run_in_container unavailable (no compose_path configured)."
+        if not command.strip():
+            return "ERROR: run_in_container requires a non-empty `command`."
+        target = self._resolve_service(service)
+        if not target:
+            return "ERROR: run_in_container needs a service name."
+        try:
+            r = self._exec_in_container(target, ["sh", "-c", command], timeout=60)
+            output = (r.stdout or "") + (r.stderr or "")
+            if len(output) > 10000:
+                output = output[:10000] + "\n\n... (output truncated)"
+            return f"{output}\n(exit code: {r.returncode})"
+        except subprocess.TimeoutExpired:
+            return "ERROR: run_in_container timed out (60s)."
+        except Exception as e:
+            return f"ERROR: run_in_container failed: {e}"
+
+    def _tool_run_python_in_container(self, service: str, command: str) -> str:
+        if not self._compose_path:
+            return "ERROR: run_python_in_container unavailable (no compose_path configured)."
+        if not command.strip():
+            return "ERROR: run_python_in_container requires a non-empty `command` (Python code)."
+        target = self._resolve_service(service)
+        if not target:
+            return "ERROR: run_python_in_container needs a service name."
+        try:
+            r = self._exec_in_container(target, ["python", "-c", command], timeout=60)
+            output = (r.stdout or "") + (r.stderr or "")
+            if len(output) > 10000:
+                output = output[:10000] + "\n\n... (output truncated)"
+            return f"{output}\n(exit code: {r.returncode})"
+        except subprocess.TimeoutExpired:
+            return "ERROR: run_python_in_container timed out (60s)."
+        except Exception as e:
+            return f"ERROR: run_python_in_container failed: {e}"
+
+    def _tool_hit_endpoint(self, service: str, url: str, request_data: str) -> str:
+        if not self._compose_path:
+            return "ERROR: hit_endpoint unavailable (no compose_path configured)."
+        if not url.strip():
+            return "ERROR: hit_endpoint requires a `url`."
+        target = self._resolve_service(service)
+        if not target:
+            return "ERROR: hit_endpoint needs a service name to issue the request from."
+
+        # Parse the request_data JSON.
+        import json as _json
+        method = "GET"
+        headers: Dict[str, str] = {}
+        body = None
+        try:
+            data = _json.loads(request_data) if request_data and request_data.strip() else {}
+            if isinstance(data, dict):
+                method = (data.get("method") or "GET").upper()
+                headers = data.get("headers") or {}
+                body = data.get("body")
+        except Exception as e:
+            return f"ERROR: hit_endpoint could not parse request_data JSON: {e}"
+
+        # Build curl command. Use --silent --show-error and -i for headers.
+        argv = ["curl", "-sS", "-i", "--max-time", "30", "-X", method]
+        for k, v in (headers or {}).items():
+            argv.extend(["-H", f"{k}: {v}"])
+        if body is not None:
+            if isinstance(body, (dict, list)):
+                argv.extend(["--data-binary", _json.dumps(body)])
+                if "Content-Type" not in (headers or {}):
+                    argv.extend(["-H", "Content-Type: application/json"])
+            else:
+                argv.extend(["--data-binary", str(body)])
+        argv.append(url)
+
+        try:
+            r = self._exec_in_container(target, argv, timeout=45)
+            output = (r.stdout or "") + (r.stderr or "")
+            if len(output) > 10000:
+                output = output[:10000] + "\n\n... (output truncated)"
+            return f"{output}\n(curl exit code: {r.returncode})"
+        except subprocess.TimeoutExpired:
+            return "ERROR: hit_endpoint timed out (45s)."
+        except FileNotFoundError:
+            return "ERROR: curl not available in target container. Try a different service or use run_python_in_container with httpx."
+        except Exception as e:
+            return f"ERROR: hit_endpoint failed: {e}"
+
+    def _tool_inspect_env(self, service: str, prefix: str) -> str:
+        if not self._compose_path:
+            return "ERROR: inspect_env unavailable (no compose_path configured)."
+        target = self._resolve_service(service)
+        if not target:
+            return "ERROR: inspect_env needs a service name."
+        try:
+            r = self._exec_in_container(target, ["printenv"], timeout=15)
+            if r.returncode != 0:
+                return f"ERROR: printenv failed: {r.stderr or r.stdout}"
+            lines = (r.stdout or "").splitlines()
+            if prefix:
+                lines = [ln for ln in lines if ln.startswith(prefix)]
+            lines.sort()
+            if not lines:
+                hint = f" matching '{prefix}'" if prefix else ""
+                return f"(no env vars{hint} in {target})"
+            output = "\n".join(lines)
+            if len(output) > 8000:
+                output = output[:8000] + "\n\n... (truncated)"
+            return f"=== env vars in {target}" + (f" (prefix='{prefix}')" if prefix else "") + " ===\n" + output
+        except subprocess.TimeoutExpired:
+            return "ERROR: inspect_env timed out."
+        except Exception as e:
+            return f"ERROR: inspect_env failed: {e}"
+
+    def _tool_query_database(self, service: str, sql: str) -> str:
+        if not self._compose_path:
+            return "ERROR: query_database unavailable (no compose_path configured)."
+        if not sql.strip():
+            return "ERROR: query_database requires a SQL statement."
+
+        target = service or self._guess_db_service()
+        if not target:
+            return "ERROR: query_database could not auto-detect a postgres service. Pass service= explicitly."
+
+        # Use psql with env auth (DATABASE / POSTGRES_USER / POSTGRES_DB are
+        # typically set on the postgres container by the provisioner template).
+        # We launch psql with -At for unaligned, tuples-only output, and
+        # enforce a per-statement timeout via --command.
+        psql_argv = [
+            "sh", "-c",
+            f'psql -At -U "${{POSTGRES_USER:-dev}}" -d "${{POSTGRES_DB:-postgres}}" -c {self._shell_quote(sql)}',
+        ]
+        try:
+            r = self._exec_in_container(target, psql_argv, timeout=30)
+            output = (r.stdout or "") + (r.stderr or "")
+            if len(output) > 10000:
+                output = output[:10000] + "\n\n... (output truncated)"
+            return f"=== psql {target} ===\n{output}\n(exit code: {r.returncode})"
+        except subprocess.TimeoutExpired:
+            return "ERROR: query_database timed out (30s)."
+        except Exception as e:
+            return f"ERROR: query_database failed: {e}"
+
+    def _tool_decode_jwt(self, token: str) -> str:
+        token = (token or "").strip()
+        if not token:
+            return "ERROR: decode_jwt requires a non-empty `token`."
+        # Strip a possible "Bearer " prefix.
+        if token.lower().startswith("bearer "):
+            token = token.split(None, 1)[1]
+        parts = token.split(".")
+        if len(parts) != 3:
+            return f"ERROR: token does not look like a JWT (expected 3 parts, got {len(parts)})."
+        import base64 as _b64
+        import json as _json
+        try:
+            def _decode(seg: str) -> dict:
+                pad = seg + "=" * (-len(seg) % 4)
+                return _json.loads(_b64.urlsafe_b64decode(pad.encode()))
+            header = _decode(parts[0])
+            payload = _decode(parts[1])
+        except Exception as e:
+            return f"ERROR: could not decode JWT: {e}"
+        return (
+            "=== JWT (signature NOT verified) ===\n"
+            f"Header:\n{_json.dumps(header, indent=2)}\n\n"
+            f"Payload:\n{_json.dumps(payload, indent=2)}"
+        )
+
+    @staticmethod
+    def _shell_quote(s: str) -> str:
+        """Single-quote-escape a string for shell."""
+        return "'" + s.replace("'", "'\\''") + "'"
+
+    def _guess_db_service(self) -> Optional[str]:
+        """Best-effort auto-detect of the project's postgres service name by
+        reading the compose file. Avoids a hardcoded 'database' assumption."""
+        if not self._compose_path:
+            return None
+        try:
+            import yaml
+            with open(self._compose_path, "r") as f:
+                compose = yaml.safe_load(f) or {}
+            services = compose.get("services") or {}
+            for name, spec in services.items():
+                image = ((spec or {}).get("image") or "").lower()
+                if "postgres" in image or "postgis" in image:
+                    return name
+        except Exception:
+            return None
+        return None
 
     # -- Context building -------------------------------------------------------
 

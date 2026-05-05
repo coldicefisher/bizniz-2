@@ -36,7 +36,7 @@ Problem statement:
 
 Return a JSON object with:
 - "roles": array of role objects, each with:
-  - "name": lowercase role identifier (e.g. "landlord", "tenant", "admin")
+  - "name": lowercase role identifier — derive from the problem statement
   - "description": one-line description of what this role can do
   - "is_default": boolean — true if new users should get this role automatically
 - "tenancy_model": one of:
@@ -48,7 +48,8 @@ Return a JSON object with:
 Rules:
 - Always include an "admin" role with is_default=false
 - The problem statement is written in business language, not technical language.
-  "Landlord manages properties" means landlord is a role, not a tenant.
+  Treat job titles or user-types in the problem statement as ROLES, not as
+  separate tenants (unless data isolation is explicitly described).
 - Default to "roles" unless the problem explicitly describes isolated organizations.
 - "Each company has its own workspace/data" → "groups"
 - "White-label per customer" or "separate deployment per client" → "tenants"
@@ -185,6 +186,82 @@ class _FusionAuthClient:
             "loginId": email,
             "password": password,
         })
+
+
+def _reconcile_issuer_in_env(
+    token: str,
+    project_root: Path,
+    on_status: Optional[Callable[[str], None]],
+) -> None:
+    """Decode the smoke-test JWT, read its actual ``iss`` claim, and
+    rewrite ``FUSIONAUTH_ISSUER`` in ``.env`` if it differs from what
+    the provisioner template guessed.
+
+    Why: the provisioner sets ``FUSIONAUTH_ISSUER=http://auth:9011``
+    (the internal Docker URL) on the assumption FusionAuth will mint
+    JWTs with that issuer. But FA's tenant ``issuer`` field defaults
+    to ``acme.com`` on a fresh tenant, and the kickstart can't override
+    it (FA's tenant PATCH validator is broken on a fresh-bootstrap
+    tenant — see fusionauth.py:103-117). The skeleton's auth.py
+    strictly validates ``iss == FUSIONAUTH_ISSUER``, so a mismatch
+    produces ``Invalid issuer`` 401s on every authenticated request.
+
+    Fix: at this point the smoke test has just produced a real JWT.
+    Decode its body, extract ``iss``, and update .env so the backend
+    validates against the actual value. This keeps prod-mode strict
+    issuer validation intact while being self-correcting in dev.
+    """
+    import base64
+    import json as _json
+
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return
+        body_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = _json.loads(base64.urlsafe_b64decode(body_b64.encode()))
+        actual_iss = claims.get("iss")
+    except Exception as e:
+        _log(on_status,
+             f"FusionAuth agent: could not decode JWT for issuer reconcile "
+             f"({type(e).__name__}: {e}) — leaving .env untouched")
+        return
+
+    if not actual_iss:
+        return
+
+    env_path = project_root / "infra" / "development" / ".env"
+    if not env_path.is_file():
+        return
+
+    try:
+        lines = env_path.read_text().splitlines()
+    except Exception:
+        return
+
+    out: list[str] = []
+    changed = False
+    found = False
+    for line in lines:
+        if line.startswith("FUSIONAUTH_ISSUER="):
+            found = True
+            current = line.split("=", 1)[1].strip()
+            if current != actual_iss:
+                out.append(f"FUSIONAUTH_ISSUER={actual_iss}")
+                changed = True
+            else:
+                out.append(line)
+        else:
+            out.append(line)
+    if not found:
+        out.append(f"FUSIONAUTH_ISSUER={actual_iss}")
+        changed = True
+
+    if changed:
+        env_path.write_text("\n".join(out) + "\n")
+        _log(on_status,
+             f"FusionAuth agent: reconciled FUSIONAUTH_ISSUER in .env to "
+             f"{actual_iss!r} (matches JWT iss claim)")
 
 
 # ── Main provisioning function ───────────────────────────────────────────────
@@ -334,6 +411,7 @@ def provision_fusionauth(
                 if token:
                     _log(on_status, "FusionAuth agent: smoke test PASS — got valid JWT")
                     smoke_passed = True
+                    _reconcile_issuer_in_env(token, project_root, on_status)
             except _FAError as e:
                 _log(on_status, f"FusionAuth agent: smoke test FAIL — {e}")
     else:

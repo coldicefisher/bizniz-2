@@ -111,10 +111,15 @@ class FusionAuthTemplate(InfraTemplate):
                 # PATCH/POST. JWT signing config goes there.
                 #
                 # Tenant.issuer would be nice to set (so the JWT's
-                # ``iss`` claim matches the backend's
-                # ``FUSIONAUTH_ISSUER``), but the same validator
-                # quirk blocks it. Skeleton's auth.py is tolerant of
-                # the default issuer in dev mode.
+                # ``iss`` claim matches the placeholder value we
+                # write to ``FUSIONAUTH_ISSUER`` in .env), but the
+                # same validator quirk blocks it on a fresh tenant.
+                # Instead, the FA agent reconciles this after a
+                # successful smoke test: decodes the JWT body, reads
+                # the actual ``iss``, and rewrites ``FUSIONAUTH_ISSUER``
+                # in .env to match (see fusionauth_agent.py
+                # _reconcile_issuer_in_env). The skeleton's auth.py
+                # then validates against the correct issuer.
                 # Roles for the application
                 {
                     "method": "POST",
