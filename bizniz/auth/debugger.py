@@ -169,26 +169,25 @@ def _apply_typed_fixes(
             except FusionAuthError as e:
                 _log(on_status, f"FA debugger: ensure_application failed — {e}")
 
-        # jwks_has_keys  → tenant is signing with HS256, no public
-        # key for JWKS to expose. Generate an RS256 keypair and bind
-        # it as the tenant's accessTokenKeyId. The skeleton's
-        # validation expects RS256 — without this fix every backend
-        # request with a JWT 401s on signature verification.
+        # jwks_has_keys  → tenant is signing with HS256, JWKS empty,
+        # backend RS256 verification will fail. Generate an RS256
+        # keypair and bind it at the APPLICATION level (overrides
+        # the tenant's HS256 default). Tenant-level PATCH would be
+        # the "natural" fix but FA's validator on freshly-booted
+        # tenants is contradictory — see FusionAuthOrchestrator.
+        # set_application_signing_key for the long-form note.
         elif name == "jwks_has_keys":
             _log(on_status,
-                 "FA debugger: generating RSA-2048 signing key + binding to default tenant")
+                 "FA debugger: generating RSA-2048 signing key + binding to application")
             try:
-                # Use the same stable key ID the provisioner template
-                # uses, so re-runs are idempotent.
                 from bizniz.provisioner.templates.fusionauth import FusionAuthTemplate
                 key_id = FusionAuthTemplate.ACCESS_TOKEN_KEY_ID
-                tenant_id = FusionAuthTemplate.DEFAULT_TENANT_ID
                 orchestrator.generate_signing_key(
                     key_id=key_id, algorithm="RS256", length=2048,
                     name="Access Token Signing Key",
                 )
-                orchestrator.set_tenant_signing_key(
-                    tenant_id=tenant_id, key_id=key_id, also_id_token=True,
+                orchestrator.set_application_signing_key(
+                    app_id=application_id, key_id=key_id, also_id_token=True,
                 )
                 actions += 1
             except Exception as e:

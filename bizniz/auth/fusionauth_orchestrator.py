@@ -632,12 +632,13 @@ class FusionAuthOrchestrator:
     ) -> None:
         """Bind ``key_id`` as the tenant's accessTokenSigningKey.
 
-        ``also_id_token`` (default True) sets the same key for
-        idTokenKeyId — typical for FA + JWKS setups where both
-        access and ID tokens use RS256 with the same kid.
-        ``patch_tenant`` handles FA's tenant-name validation quirks
-        for us via dual-attempt; this method just constructs the
-        jwtConfiguration body.
+        DEPRECATED in favor of ``set_application_signing_key`` —
+        FusionAuth's tenant PATCH validator on a fresh tenant rejects
+        both forms of the body (without name → [blank], with name →
+        [duplicate]). Application-level JWT config overrides tenant-
+        level and works around the broken validator entirely. Kept
+        for callers that genuinely need to set tenant defaults; they
+        accept the risk of the FA validator quirk.
         """
         jwt_config = {"accessTokenKeyId": key_id}
         if also_id_token:
@@ -648,6 +649,44 @@ class FusionAuthOrchestrator:
             f"accessTokenKeyId{' + idTokenKeyId' if also_id_token else ''}"
         )
         self.patch_tenant(tenant_id, {"jwtConfiguration": jwt_config})
+
+    def set_application_signing_key(
+        self,
+        app_id: ApplicationId,
+        key_id: str,
+        *,
+        also_id_token: bool = True,
+    ) -> None:
+        """Bind ``key_id`` as the application's accessTokenSigningKey.
+
+        Application-level JWT config overrides the tenant's. Setting
+        ``jwtConfiguration.enabled = true`` is required — without it,
+        the application falls back to tenant defaults (typically
+        HS256 → empty JWKS → backend signature verification fails).
+
+        This is the path FusionAuthDebugger uses for the
+        ``jwks_has_keys`` typed-fix because tenant PATCH has a
+        contradictory validator on freshly-bootstrapped tenants:
+          - PATCH tenant without name → 400 [blank]tenant.name
+          - PATCH tenant with same name → 400 [duplicate]tenant.name
+        Application PATCH has no such quirk and is the recommended
+        path for per-app token customization regardless.
+        """
+        jwt_config = {
+            "enabled": True,
+            "accessTokenKeyId": key_id,
+        }
+        if also_id_token:
+            jwt_config["idTokenKeyId"] = key_id
+
+        self._log(
+            f"FusionAuth: binding key {key_id} as application {app_id} "
+            f"accessTokenKeyId{' + idTokenKeyId' if also_id_token else ''}"
+        )
+        self.request(
+            "PATCH", f"/api/application/{app_id}",
+            body={"application": {"jwtConfiguration": jwt_config}},
+        )
 
     def diagnose_jwt_setup(
         self,

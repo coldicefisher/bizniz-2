@@ -100,27 +100,21 @@ class FusionAuthTemplate(InfraTemplate):
                         }
                     },
                 },
-                # Patch the default tenant: set issuer (so the JWT's
-                # iss claim matches what the backend expects) AND
-                # bind the RSA key as the access-token signing key
-                # (so FA mints RS256 JWTs and JWKS exposes the public
-                # half). Both PATCHes need ``tenant.name`` because
-                # FA's PATCH validation rejects without it; "Default"
-                # is the literal default tenant name.
-                {
-                    "method": "PATCH",
-                    "url": f"/api/tenant/{self.DEFAULT_TENANT_ID}",
-                    "body": {
-                        "tenant": {
-                            "name": "Default",
-                            "issuer": issuer,
-                            "jwtConfiguration": {
-                                "accessTokenKeyId": "#{accessTokenKeyId}",
-                                "idTokenKeyId": "#{accessTokenKeyId}",
-                            },
-                        }
-                    },
-                },
+                # NOTE: we deliberately do NOT PATCH the default
+                # tenant here. FusionAuth's PATCH validator on a
+                # freshly-bootstrapped default tenant is broken in
+                # both directions:
+                #   - body without name → 400 [blank]tenant.name
+                #   - body with name="Default" → 400 [duplicate]tenant.name
+                # The application-level jwtConfiguration below
+                # overrides the tenant's defaults and IS accepted on
+                # PATCH/POST. JWT signing config goes there.
+                #
+                # Tenant.issuer would be nice to set (so the JWT's
+                # ``iss`` claim matches the backend's
+                # ``FUSIONAUTH_ISSUER``), but the same validator
+                # quirk blocks it. Skeleton's auth.py is tolerant of
+                # the default issuer in dev mode.
                 # Roles for the application
                 {
                     "method": "POST",
@@ -149,6 +143,14 @@ class FusionAuthTemplate(InfraTemplate):
                                 "enabled": True,
                                 "timeToLiveInSeconds": 3600,
                                 "refreshTokenTimeToLiveInMinutes": 43200,
+                                # Bind the RSA key here at the
+                                # APPLICATION level (not tenant) —
+                                # FA's tenant PATCH validator is
+                                # broken on fresh tenants. Application
+                                # JWT config overrides tenant defaults
+                                # and the validator is happy here.
+                                "accessTokenKeyId": "#{accessTokenKeyId}",
+                                "idTokenKeyId": "#{accessTokenKeyId}",
                             },
                         }
                     },
