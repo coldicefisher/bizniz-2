@@ -64,25 +64,52 @@ def test_generate_signing_key_creates_when_missing(orch):
     assert body["key"]["length"] == 2048
 
 
-def test_set_tenant_signing_key_includes_name_in_patch(orch):
-    """FA's PATCH validation rejects bodies without tenant.name —
-    set_tenant_signing_key fetches the existing tenant, re-includes
-    its name to satisfy validation, then patches the jwtConfiguration.
-    """
+def test_set_tenant_signing_key_patches_jwt_config_without_name(orch):
+    """First-attempt PATCH omits name (works on mature tenants and
+    avoids FA's duplicate-name trap on fresh tenants)."""
     with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
-        # GET tenant → return name="MyTenant"
-        # PATCH tenant → 200
-        m.side_effect = [
-            _resp(200, {"tenant": {"id": "t1", "name": "MyTenant"}}),
-            _resp(200, {}),
-        ]
+        m.return_value = _resp(200, {})
         orch.set_tenant_signing_key(tenant_id="t1", key_id="k1")
 
     patch_call = m.call_args_list[-1]
     body = patch_call.kwargs.get("json")
-    assert body["tenant"]["name"] == "MyTenant"
+    assert "name" not in body["tenant"]
     assert body["tenant"]["jwtConfiguration"]["accessTokenKeyId"] == "k1"
     assert body["tenant"]["jwtConfiguration"]["idTokenKeyId"] == "k1"
+
+
+def test_patch_tenant_retries_with_name_on_blank_name_error(orch):
+    """When FA rejects a name-less PATCH with a tenant.name error,
+    we re-fetch the tenant's actual name and retry with it included.
+    Covers the fresh-tenant case where FA's validator demands name."""
+    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+        m.side_effect = [
+            # First PATCH (no name) → 400 with tenant.name error
+            _resp(400, {}, text='{"fieldErrors":{"tenant.name":[{"code":"[blank]tenant.name"}]}}'),
+            # GET tenant for the retry
+            _resp(200, {"tenant": {"id": "t1", "name": "Default"}}),
+            # Second PATCH (with name) → 200
+            _resp(200, {}),
+        ]
+        orch.patch_tenant("t1", {"jwtConfiguration": {"accessTokenKeyId": "k1"}})
+
+    # Three calls total: PATCH, GET, PATCH
+    assert m.call_count == 3
+    last_patch = m.call_args_list[-1]
+    body = last_patch.kwargs.get("json")
+    assert body["tenant"]["name"] == "Default"
+    assert body["tenant"]["jwtConfiguration"]["accessTokenKeyId"] == "k1"
+
+
+def test_patch_tenant_does_not_retry_on_unrelated_400(orch):
+    """A 400 that isn't a tenant.name issue should propagate, not
+    trigger a retry."""
+    from bizniz.auth.types import FusionAuthError
+    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+        m.return_value = _resp(400, {}, text="some other validation error")
+        with pytest.raises(FusionAuthError):
+            orch.patch_tenant("t1", {"foo": "bar"})
+    assert m.call_count == 1
 
 
 def test_diagnose_jwt_setup_flags_empty_jwks(orch):

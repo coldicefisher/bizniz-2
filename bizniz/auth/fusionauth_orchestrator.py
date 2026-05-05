@@ -506,14 +506,45 @@ class FusionAuthOrchestrator:
             raise
 
     def patch_tenant(self, tenant_id: str, patch: dict) -> dict:
-        """Apply a partial update to a tenant. Caller must include
-        ``name`` in the patch body — FA's PATCH validation rejects
-        any tenant body without it.
+        """Apply a partial update to a tenant.
+
+        FusionAuth's tenant PATCH validator behaves inconsistently
+        depending on tenant state:
+          - On a freshly-bootstrapped tenant, omitting ``name`` returns
+            400 ``[blank]tenant.name``; including ``name`` (even
+            unchanged) returns 400 ``[duplicate]tenant.name``.
+          - On a mature/configured tenant, both forms work.
+
+        We dual-attempt to handle both: try without name first
+        (works on mature tenants and avoids the duplicate-name trap
+        when it does), then if FA rejects with a name-related error,
+        retry including the existing tenant's name.
         """
-        return self.request(
-            "PATCH", f"/api/tenant/{tenant_id}",
-            body={"tenant": patch},
-        )
+        # Strip any name the caller passed; we'll add it on the retry
+        # path if needed.
+        patch_no_name = {k: v for k, v in patch.items() if k != "name"}
+        try:
+            return self.request(
+                "PATCH", f"/api/tenant/{tenant_id}",
+                body={"tenant": patch_no_name},
+            )
+        except FusionAuthError as e:
+            if e.status_code == 400 and "tenant.name" in (e.response_body or ""):
+                existing = self.get_tenant(tenant_id)
+                tenant_name = "Default"
+                if existing and existing.get("tenant"):
+                    tenant_name = existing["tenant"].get("name", "Default")
+                self._log(
+                    f"FusionAuth: PATCH tenant {tenant_id} retried with "
+                    f"name={tenant_name!r} after FA rejected without it"
+                )
+                with_name = dict(patch_no_name)
+                with_name["name"] = tenant_name
+                return self.request(
+                    "PATCH", f"/api/tenant/{tenant_id}",
+                    body={"tenant": with_name},
+                )
+            raise
 
     def get_jwks(self) -> dict:
         """Fetch FA's JWKS. Returns the raw response.
@@ -603,15 +634,11 @@ class FusionAuthOrchestrator:
 
         ``also_id_token`` (default True) sets the same key for
         idTokenKeyId — typical for FA + JWKS setups where both
-        access and ID tokens use RS256 with the same kid. The
-        tenant's existing name is fetched and re-included because
-        FA's PATCH validation rejects bodies missing tenant.name.
+        access and ID tokens use RS256 with the same kid.
+        ``patch_tenant`` handles FA's tenant-name validation quirks
+        for us via dual-attempt; this method just constructs the
+        jwtConfiguration body.
         """
-        tenant = self.get_tenant(tenant_id)
-        tenant_name = "Default"
-        if tenant and tenant.get("tenant"):
-            tenant_name = tenant["tenant"].get("name", "Default")
-
         jwt_config = {"accessTokenKeyId": key_id}
         if also_id_token:
             jwt_config["idTokenKeyId"] = key_id
@@ -620,10 +647,7 @@ class FusionAuthOrchestrator:
             f"FusionAuth: binding key {key_id} as tenant {tenant_id} "
             f"accessTokenKeyId{' + idTokenKeyId' if also_id_token else ''}"
         )
-        self.patch_tenant(tenant_id, {
-            "name": tenant_name,
-            "jwtConfiguration": jwt_config,
-        })
+        self.patch_tenant(tenant_id, {"jwtConfiguration": jwt_config})
 
     def diagnose_jwt_setup(
         self,
