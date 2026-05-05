@@ -2059,9 +2059,12 @@ class Architect(BaseAIAgent):
 
             # Phase 6 post-flight: run the language's type checker
             # on the whole service. Catches cross-file consistency
-            # bugs (the LoginPage/authStore class) at engineer time,
-            # before integration tests run. Surfaces errors via the
-            # service result; doesn't auto-regenerate yet.
+            # bugs (sync/async mismatch, wrong typed argument, missing
+            # await) at engineer time, before integration tests run.
+            # When the validator fails, dispatch the post-flight
+            # repair loop — same AgenticDebugger brain integration
+            # repair uses, just fed mypy/tsc errors instead of pytest
+            # output.
             if ws_root and ws_root.is_dir():
                 try:
                     from bizniz.validators import run_validator
@@ -2072,15 +2075,68 @@ class Architect(BaseAIAgent):
                             f"{report.summary}"
                         )
                     if not report.passed and not report.skipped_reason:
-                        # Truncate the error tail so the result blob
-                        # stays readable in DB/logs.
-                        err_tail = "\n".join(
-                            (report.stderr or report.stdout).splitlines()[-25:]
-                        )[:3000]
-                        validator_error = (
-                            f"post_flight_validation_failed: "
-                            f"{' '.join(report.command)}\n{err_tail}"
-                        )
+                        # Try to repair before failing the service.
+                        repaired = False
+                        repair_specs = self._build_debugger_escalation_specs()
+                        if repair_specs:
+                            try:
+                                from bizniz.engineer.post_flight_repair import (
+                                    repair_post_flight_failure,
+                                )
+                                # Extract failing files from validator output
+                                failing_files = sorted({
+                                    line.split(":", 1)[0].strip()
+                                    for line in (report.stdout + "\n" + report.stderr).splitlines()
+                                    if ":" in line and (
+                                        line.split(":", 1)[0].endswith(".py")
+                                        or line.split(":", 1)[0].endswith((".ts", ".tsx"))
+                                    )
+                                })
+
+                                def _rerun_validator(_service=service, _ws=ws_root):
+                                    rr = run_validator(_service, _ws)
+                                    out = (rr.stderr or "") + "\n" + (rr.stdout or "")
+                                    return rr.passed, out
+
+                                if self._on_status_message:
+                                    self._on_status_message(
+                                        f"Architect: post-flight {service.name} "
+                                        f"FAILED — dispatching repair "
+                                        f"({len(failing_files)} file(s))"
+                                    )
+                                ok, _final = repair_post_flight_failure(
+                                    service_name=service.name,
+                                    workspace=workspace,
+                                    validator_output=(report.stderr or report.stdout)[:16000],
+                                    failing_files=list(failing_files),
+                                    rerun_validator=_rerun_validator,
+                                    escalation=repair_specs,
+                                    on_status=self._on_status_message,
+                                )
+                                repaired = ok
+                            except Exception as e:
+                                if self._on_status_message:
+                                    self._on_status_message(
+                                        f"Architect: post-flight repair raised "
+                                        f"({type(e).__name__}: {e}) — falling back to FAIL"
+                                    )
+
+                        if not repaired:
+                            # Truncate the error tail so the result blob
+                            # stays readable in DB/logs.
+                            err_tail = "\n".join(
+                                (report.stderr or report.stdout).splitlines()[-25:]
+                            )[:3000]
+                            validator_error = (
+                                f"post_flight_validation_failed: "
+                                f"{' '.join(report.command)}\n{err_tail}"
+                            )
+                        else:
+                            if self._on_status_message:
+                                self._on_status_message(
+                                    f"Architect: post-flight {service.name} "
+                                    f"REPAIRED — validator now clean"
+                                )
                 except Exception as e:
                     if self._on_status_message:
                         self._on_status_message(
