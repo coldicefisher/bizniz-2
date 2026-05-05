@@ -118,19 +118,25 @@ def _run_node_sidecar(service, prof, workspace_root: Path, timeout_s: int) -> Va
     if not _docker_available():
         return _skip(service, "docker_unavailable", "")
 
-    # If the workspace doesn't have node_modules on the host, the
-    # sidecar's tsc can't resolve project deps. Skip rather than
-    # fail with noise the post-flight repair can't address.
-    node_modules = workspace_root / "node_modules"
-    if not node_modules.is_dir():
-        return _skip(
-            service, "node_modules_missing",
-            f"node_modules not present at {node_modules}; tsc would fail "
-            f"on every project import. The frontend's deps are installed "
-            f"inside its container, not on the host. Validation should "
-            f"run via docker exec into the running container — see "
-            f"follow-up in bizniz/validators/runner.py."
-        )
+    # ALWAYS skip — the sidecar pattern is structurally broken for
+    # tsc validation. Even when node_modules exists on the host
+    # (Vite bind-mounts may populate it), the sidecar's tsc can't
+    # always resolve types correctly, and the post-flight repair
+    # can't fix env-level errors regardless. M1 v22 + v23 both
+    # burned 11 attempts each on TS2307 "Cannot find module 'react'"
+    # cycles that were unfixable by code edits.
+    #
+    # Hallucination review + route review + integration tests still
+    # catch real issues. Long-term fix (task #47): switch to
+    # ``docker compose exec frontend tsc --noEmit`` against the
+    # running container, where node_modules actually works.
+    return _skip(
+        service, "tsc_sidecar_unreliable",
+        "TypeScript validation in the sidecar is unreliable due to "
+        "node_modules mount inconsistencies. Skipping until the "
+        "container-exec runner lands (task #47). Hallucination "
+        "review + integration tests still cover this service."
+    )
 
     # Mount workspace, override entrypoint to /bin/sh, run the
     # validator command. We rewrite ``npx tsc ...`` and bare ``tsc``
