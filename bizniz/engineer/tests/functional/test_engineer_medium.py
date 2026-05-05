@@ -29,7 +29,7 @@ def _make_orchestrator(config, workspace, suggested_model=None, image_name=None)
     )
 
     def debugger_factory():
-        fresh_client = config.make_client()
+        fresh_client = config.make_client(model=config.debugger_model)
         return AgenticDebugger(
             client=fresh_client, workspace=workspace, environment=test_env,
         )
@@ -37,7 +37,7 @@ def _make_orchestrator(config, workspace, suggested_model=None, image_name=None)
     def client_factory(model_name):
         return config.make_client(model=model_name)
 
-    issue_client = config.make_client(model=suggested_model) if suggested_model else config.make_client()
+    issue_client = config.make_client(model=suggested_model or config.engineer_model)
 
     return CodingOrchestrator(
         coder=Coder(client=issue_client, environment=sandbox, workspace=workspace),

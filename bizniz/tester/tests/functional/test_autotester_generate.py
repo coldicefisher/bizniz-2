@@ -26,8 +26,13 @@ def workspace_with_code(workspace_path):
 @pytest.mark.functional
 def test_generate_tests_from_prompt(api_key, workspace_path):
     """Tester generates tests from a problem statement."""
-    config = BiznizConfig(api_key=api_key)
-    client = config.make_client()
+    config = BiznizConfig(
+        api_key=api_key,
+        coder_models=["gpt-4o-mini"],
+        tester_models=["gpt-4o-mini"],
+        repair_models=["gpt-4o-mini"],
+    )
+    client = config.make_client(model="gpt-4o-mini")
     workspace = LocalWorkspace(root=str(workspace_path))
     environment = DockerExecutionEnvironment()
 
@@ -50,8 +55,13 @@ def test_generate_tests_from_prompt(api_key, workspace_path):
 @pytest.mark.functional
 def test_generate_multi_tests(api_key, workspace_with_code):
     """Tester generates tests for multiple source files."""
-    config = BiznizConfig(api_key=api_key)
-    client = config.make_client()
+    config = BiznizConfig(
+        api_key=api_key,
+        coder_models=["gpt-4o-mini"],
+        tester_models=["gpt-4o-mini"],
+        repair_models=["gpt-4o-mini"],
+    )
+    client = config.make_client(model="gpt-4o-mini")
     workspace = workspace_with_code
     environment = DockerExecutionEnvironment()
 

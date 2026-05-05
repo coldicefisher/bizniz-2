@@ -317,7 +317,7 @@ class Tester(BaseAIAgent):
                 initial_user_message=user_prompt,
                 action_schema=TesterGenerateActionSchema,
                 terminal_action="submit_tests",
-                max_turns=10,
+                tool_iterations=10,
                 timeout_seconds=300,
                 on_status_message=self._on_status_message,
                 agent_name="Tester",

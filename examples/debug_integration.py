@@ -209,7 +209,7 @@ def main():
             DebuggerTierSpec(
                 factory=lambda ws, m=t.model: _make_integration_debugger(ws, model_override=m),
                 model_label=t.model,
-                max_turns=t.max_turns,
+                tool_iterations=t.tool_iterations,
                 repair_attempts=t.repair_attempts,
             )
             for t in config.debugger_escalation
@@ -218,7 +218,7 @@ def main():
             log(
                 "Debugger escalation: "
                 + " → ".join(
-                    f"{s.model_label}({s.repair_attempts}×{s.max_turns})"
+                    f"{s.model_label}({s.repair_attempts}×{s.tool_iterations})"
                     for s in debugger_escalation_specs
                 )
             )

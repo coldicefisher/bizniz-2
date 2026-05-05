@@ -125,7 +125,7 @@ def _make_orchestrator(config, workspace, on_status_message=None, suggested_mode
         )
 
     def debugger_factory():
-        fresh_client = config.make_client()
+        fresh_client = config.make_client(model=config.debugger_model)
         return AgenticDebugger(
             client=fresh_client, workspace=workspace, environment=test_env,
             on_status_message=on_status_message,
@@ -134,7 +134,7 @@ def _make_orchestrator(config, workspace, on_status_message=None, suggested_mode
     def client_factory(model_name):
         return config.make_client(model=model_name)
 
-    issue_client = config.make_client(model=suggested_model) if suggested_model else config.make_client()
+    issue_client = config.make_client(model=suggested_model or config.engineer_model)
 
     return CodingOrchestrator(
         coder=Coder(client=issue_client, environment=sandbox, workspace=workspace),
@@ -178,7 +178,7 @@ def _make_engineer(config, workspace, on_status_message=None, image_name=None, l
         orchestrator_factory=orchestrator_factory,
         on_status_message=on_status_message,
         language=language,
-        available_models=config.coder_models or config.models,
+        available_models=config.coder_models,
         debugger_model=config.debugger_model,
         debugger_max_iterations=config.debugger_max_iterations,
     )
@@ -196,10 +196,10 @@ if __name__ == "__main__":
 
     log("Loading config...")
     config = BiznizConfig.find_and_load()
-    log(f"Config: default_model={config.default_model}, engineer_model={config.engineer_model}, architect_model={config.architect_model}")
-    log(f"Model progression: {config.models}")
-    log(f"Coder models: {config.coder_models or config.models}")
-    log(f"Repair models: {config.repair_models or config.models}")
+    log(f"Config: engineer_model={config.engineer_model}, architect_model={config.architect_model}, debugger_model={config.debugger_model}")
+    log(f"Coder models: {config.coder_models}")
+    log(f"Tester models: {config.tester_models}")
+    log(f"Repair models: {config.repair_models}")
     log(f"Stall threshold: {config.stall_threshold}, Agentic debug threshold: {config.agentic_debug_threshold}")
     log(f"Layered generation: {config.layered_generation}, Parallel services: {config.parallel_services}")
 
@@ -246,7 +246,7 @@ if __name__ == "__main__":
         def _coder_for_ux(workspace):
             from bizniz.agents.coder.coder import Coder
             return Coder(
-                client=config.make_client(),
+                client=config.make_client(model=config.engineer_model),
                 environment=DockerExecutionEnvironment(),
                 workspace=workspace,
             )

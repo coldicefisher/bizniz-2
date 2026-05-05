@@ -18,7 +18,7 @@ def _spec(factory, label="flash-top", attempts=2, turns=12):
     return DebuggerTierSpec(
         factory=factory,
         model_label=label,
-        max_turns=turns,
+        tool_iterations=turns,
         repair_attempts=attempts,
     )
 
@@ -45,7 +45,7 @@ def test_repair_succeeds_first_attempt(tmp_path):
     workspace.path.return_value = tmp_path
 
     debugger = MagicMock()
-    debugger._max_turns = 99
+    debugger._tool_iterations = 99
     debugger.diagnose.return_value = _make_diagnosis(
         fixes=[_make_fix("app/api/properties.py", "async def get(...)...")],
     )
@@ -66,8 +66,8 @@ def test_repair_succeeds_first_attempt(tmp_path):
         content="async def get(...)...",
     )
     rerun.assert_called_once()
-    # max_turns was applied from the tier spec
-    assert debugger._max_turns == 12
+    # tool_iterations was applied from the tier spec
+    assert debugger._tool_iterations == 12
 
 
 def test_repair_escalates_when_first_tier_exhausts(tmp_path):

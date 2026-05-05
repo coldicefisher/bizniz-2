@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import yaml
 import os
 
@@ -28,8 +28,12 @@ class DebuggerTier(BaseModel):
     The chain runs sequentially: cheap-and-many at the bottom,
     expensive-and-few at the top. Each tier gets ``repair_attempts``
     independent debug sessions; each session may use up to
-    ``max_turns`` agent steps (tool calls + diagnose) before being
-    forced to commit.
+    ``tool_iterations`` agent steps (tool calls + diagnose) before
+    being forced to commit.
+
+    ``tool_iterations`` = LLM round-trips within a single attempt.
+    ``repair_attempts`` = independent debug sessions before escalating
+    to the next tier.
 
     Sticky repair log: every attempt at every tier reads the full
     history of prior attempts (across QuickDebugger,
@@ -37,25 +41,27 @@ class DebuggerTier(BaseModel):
     debugger never repeats a fix the previous tier already tried.
     """
     model: str
-    max_turns: int = 12
+    tool_iterations: int = 12
     repair_attempts: int = 2
 
 
 class BiznizConfig(BaseModel):
-    default_model: str = "gpt-4o-mini"
+    # Per-agent model fields below are required (no shared
+    # ``default_model`` fallback). Either the config names a specific
+    # model for the role or the app refuses to run.
     engineer_model: str = "gpt-4o"
     architect_model: str = "gpt-4o"
     # Top-tier model for the Planner agent (multi-week project sequencing).
     # See bizniz/planner/. One call per project — top tier is justified.
     planner_model: str = "gemini-pro"
-    models: List[str] = [
-        "gpt-4o-mini", "gpt-4o", "gpt-5",
-        "claude-sonnet", "claude-opus",
-    ]
-    # Per-agent model progressions (override `models` when set)
-    coder_models: Optional[List[str]] = None
-    tester_models: Optional[List[str]] = None
-    repair_models: Optional[List[str]] = None
+    # Per-agent stall-escalation progressions. REQUIRED — no shared
+    # fallback. Each list MUST have at least one model. The previous
+    # ``models`` array was a silent fallback that hid mis-config; any
+    # bizniz.yaml without these three lists must hard-fail at load
+    # rather than silently route to a generic default.
+    coder_models: List[str] = Field(min_length=1)
+    tester_models: List[str] = Field(min_length=1)
+    repair_models: List[str] = Field(min_length=1)
     # Three-phase strategy (used when Engineer.run_three_phase is dispatched):
     #   debugger_model           — top-tier model for Phase 3 agentic debugging
     #                              (full context + discovery tools + run_command + run_tests)
@@ -66,8 +72,8 @@ class BiznizConfig(BaseModel):
     # Each tier sees the full prior repair log so it doesn't repeat
     # fixes the previous tier already tried.
     debugger_escalation: List[DebuggerTier] = [
-        DebuggerTier(model="gemini-flash-top", max_turns=12, repair_attempts=2),
-        DebuggerTier(model="gemini-pro", max_turns=8, repair_attempts=1),
+        DebuggerTier(model="gemini-flash-top", tool_iterations=12, repair_attempts=2),
+        DebuggerTier(model="gemini-pro", tool_iterations=8, repair_attempts=1),
     ]
     # Model used by HTTPApiTester and WebUITester for generating
     # integration tests. Test generation is once-per-service-per-run
@@ -111,12 +117,22 @@ class BiznizConfig(BaseModel):
             current = parent
         return cls()  # defaults
 
-    def make_client(self, model: Optional[str] = None) -> BaseAIClient:
+    def make_client(self, model: str) -> BaseAIClient:
         """Create an AI client for the given model.
 
-        Automatically selects Claude, Gemini, or OpenAI based on the model name prefix.
+        ``model`` is REQUIRED — there's no shared ``default_model``
+        fallback. Caller must pass a specific model name. The router
+        selects Claude / Gemini / OpenAI by name prefix.
         """
-        resolved_model = model or self.default_model
+        if not model:
+            raise ValueError(
+                "make_client() requires an explicit model name. "
+                "There is no default_model fallback — pick one of the "
+                "configured model fields (engineer_model, architect_model, "
+                "planner_model, integration_tester_model, debugger_model) "
+                "or supply a model name directly."
+            )
+        resolved_model = model
 
         if _is_claude_model(resolved_model):
             return self._make_claude_client(resolved_model)
@@ -140,19 +156,33 @@ class BiznizConfig(BaseModel):
         return self.make_client(model=self.integration_tester_model)
 
     def make_model_progression(self) -> ModelProgression:
-        return ModelProgression(models=self.models)
+        """Shared progression for callers that don't differentiate per-
+        agent. Returns the Coder's progression, which is the most
+        central in CodingOrchestrator (the Coder generates the actual
+        files; Tester + repair derive from its output). Prefer the
+        per-agent factories below in new code; this is for legacy
+        callers that pass a single ``model_progression`` to the
+        orchestrator instead of per-agent ones.
+        """
+        return ModelProgression(models=list(self.coder_models))
 
     def make_autocoder_progression(self) -> ModelProgression:
-        """Model progression for code generation (coder)."""
-        return ModelProgression(models=self.coder_models or self.models)
+        """Model progression for code generation (Coder agent).
+        Drives stall-escalation when the Coder's generated code keeps
+        failing tests. Required in config — no fallback."""
+        return ModelProgression(models=list(self.coder_models))
 
     def make_autotester_progression(self) -> ModelProgression:
-        """Model progression for test generation (tester)."""
-        return ModelProgression(models=self.tester_models or self.models)
+        """Model progression for test generation (Tester agent).
+        Drives stall-escalation when the Tester's generated tests are
+        malformed. Required in config — no fallback."""
+        return ModelProgression(models=list(self.tester_models))
 
     def make_repair_progression(self) -> ModelProgression:
-        """Model progression for code repair."""
-        return ModelProgression(models=self.repair_models or self.models)
+        """Model progression for inline repair (QuickDebugger).
+        Drives stall-escalation when single-call repair stalls.
+        Required in config — no fallback."""
+        return ModelProgression(models=list(self.repair_models))
 
     def make_db(self) -> "BiznizDB":
         """Create a BiznizDB from the configured database_url."""

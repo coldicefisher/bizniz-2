@@ -137,7 +137,7 @@ class DebuggerTierSpec:
     """
     factory: Callable                  # (workspace) → AgenticDebugger
     model_label: str
-    max_turns: int
+    tool_iterations: int
     repair_attempts: int
 
 
@@ -162,7 +162,7 @@ def repair_integration_failure(
     Two ways to drive this:
 
     1. ``escalation``: a list of DebuggerTierSpec. The loop runs each
-       tier's repair_attempts attempts with that tier's max_turns;
+       tier's repair_attempts attempts with that tier's tool_iterations;
        if a tier exhausts its attempts without converging, escalates
        to the next tier. Every attempt at every tier reads the
        sticky repair log so it doesn't repeat fixes.
@@ -199,7 +199,7 @@ def repair_integration_failure(
         escalation = [DebuggerTierSpec(
             factory=_legacy_adapter,
             model_label="(unspecified)",
-            max_turns=12,
+            tool_iterations=12,
             repair_attempts=max_iterations,
         )]
 
@@ -254,7 +254,7 @@ def repair_integration_failure(
         _log(
             on_status,
             f"Integration debug: '{service.name}' tier {tier_idx + 1}/{len(escalation)} "
-            f"({tier.model_label}, max_turns={tier.max_turns}, "
+            f"({tier.model_label}, tool_iterations={tier.tool_iterations}, "
             f"repair_attempts={tier.repair_attempts})..."
         )
 
@@ -286,12 +286,12 @@ def repair_integration_failure(
             try:
                 debugger = tier.factory(workspace)
                 # Cap the agent's per-call turn budget per the tier config.
-                # AgenticDebugger reads ``_max_turns`` in its turn loop;
+                # AgenticDebugger reads ``_tool_iterations`` in its turn loop;
                 # writing to any other name silently leaves the constructor
                 # default of 15 in place, which is how an earlier version
                 # of this code let pro tier blow past its 8-turn cap.
-                if hasattr(debugger, "_max_turns"):
-                    debugger._max_turns = tier.max_turns
+                if hasattr(debugger, "_tool_iterations"):
+                    debugger._tool_iterations = tier.tool_iterations
                 # Arm the debugger with container inspection if we have
                 # a compose path. This lets it pull more logs or exec
                 # commands inside the running container on demand.

@@ -20,7 +20,7 @@ if __name__ == "__main__":
 
     # 1. Set up dependencies via config
     config = BiznizConfig.find_and_load()
-    client = config.make_client()
+    client = config.make_client(model=config.engineer_model)
     environment = DockerExecutionEnvironment()
     workspace = TempWorkspace()
 

@@ -1,53 +1,175 @@
-default_model: gemini-flash-lite
-engineer_model: gemini-flash
+# bizniz.yaml — model + escalation configuration for the pipeline.
+#
+# This file is loaded once per build (via BiznizConfig.find_and_load).
+# Models are routed by name prefix:
+#   - claude-*    → Claude
+#   - gemini-*    → Gemini
+#   - else        → OpenAI
+#
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  AGENT-SPECIFIC MODELS (every role names its own model — required)║
+# ╚═══════════════════════════════════════════════════════════════════╝
+#
+# Each named role uses its model for ALL its calls. There is NO shared
+# default_model fallback — every role's model is named explicitly so a
+# typo or omission hard-fails at config load rather than silently
+# routing to a generic default.
+
+# The Engineer plans the work for each service: requirements, use cases,
+# domain models, issues. Quality here cascades — bad issues = bad code.
+engineer_model: gemini-flash-top
+
+# The Architect decomposes the project into services and orchestrates
+# the milestone walk. One call per milestone, so quality > cost.
 architect_model: gemini-flash-top
-# Top-tier model for the Planner. The Planner runs once per project (or
-# rarely on re-plans) and its output drives the entire build sequence,
-# so the cost is rounding-error and the quality bump is foundational.
+
+# The Planner runs once per project (or rarely on re-plans) and its
+# output drives the entire build sequence — top-tier model is worth
+# the rounding-error cost.
 planner_model: gemini-flash-top
-models:
-  - gemini-flash-lite
-  - gemini-flash
-  - gemini-flash-top
+
+# Top-tier model for integration test generation (HTTPApiTester +
+# WebUITester). Hallucinations here get amplified by the debugger
+# into real code corruption (e.g. fake /grooming routes appearing in
+# a property-manager app), so we pay for the better model.
+integration_tester_model: gemini-pro
+
+# Legacy single-tier debugger model — only used as a fallback when
+# `debugger_escalation` (further down) is empty. The active config
+# is the escalation chain, not this field.
+debugger_model: gemini-flash-lite
+
+
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  STALL ESCALATION LISTS (unit-test-time)                          ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+#
+# These are simple ordered lists of model names — NOT array-of-hashes
+# like `debugger_escalation` below. They drive the
+# `bizniz/orchestrator/model_progression.py` ModelProgression class:
+# start at index 0 (cheapest), call .escalate() on stall to move to
+# the next entry, until the list is exhausted.
+#
+# Each list is consumed by CodingOrchestrator at __init__ time and
+# escalates on stall during unit-test-driven code generation. Per-
+# entry parameters (turns, attempts) are not needed here because
+# each call is one-shot — escalation just means "use stronger next."
+#
+# All three lists below are REQUIRED — there's no shared
+# ``models`` fallback. Each list must have at least one entry.
+# A bizniz.yaml that's missing any of them hard-fails at load
+# rather than silently routing to a generic default.
+
+# Coder agent: writes the actual code in a target file based on the
+# issue description + tests. Escalates when its generated code fails
+# tests repeatedly.
 coder_models:
   - gemini-flash-lite
   - gemini-flash
   - gemini-flash-top
+
+# Tester agent: writes the tests for an issue based on the issue
+# description and target signatures. Escalates when its generated
+# tests are malformed or fail to compile.
 tester_models:
   - gemini-flash-lite
   - gemini-flash
   - gemini-flash-top
+
+# QuickDebugger inline repair: fixes test failures via single-call
+# diagnose-and-patch (no agentic tool loop). Skips the cheapest tier
+# because trivial fixes already pass the Coder; if QuickDebugger is
+# firing, we already need at least mid-tier reasoning.
 repair_models:
   - gemini-flash
   - gemini-flash-top
-# Three-phase strategy (run_three_phase): top-tier model for the agentic
-# debugging round and the per-ticket iteration cap there.
-# Legacy single-tier debugger model (used as a fallback only when
-# debugger_escalation is empty). The active config is the escalation
-# chain below.
-debugger_model: gemini-flash-top
+
+
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  AGENTIC DEBUG ESCALATION (integration-test-time)                 ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+#
+# Array-of-hashes — each tier has its own model + per-attempt
+# tool-iteration budget + retry count. Used by:
+#   - The integration debugger (post-test-run repair against a live
+#     stack via the bizniz/integration/debug_loop.py)
+#   - The post-flight repair loop (mypy/tsc fixes via
+#     bizniz/engineer/post_flight_repair.py)
+#   - The FA debugger (auth-config repair via
+#     bizniz/auth/debugger.py — uses the same escalation specs)
+#
+# Field semantics:
+#   tool_iterations  = LLM round-trips (each typically a tool call:
+#                      view_file, run_command, inspect_container, etc.)
+#                      within ONE diagnose-and-fix attempt.
+#   repair_attempts  = independent diagnose-and-fix sessions before
+#                      escalating to the next tier.
+#
+# Tiers run in order. Each attempt within a tier sees the sticky
+# .bizniz_repair_log.json so subsequent attempts compound on prior
+# diagnoses rather than restarting.
+#
+# Cost-vs-capability calibration (post v25 lessons): cheap-grinding
+# on flash-lite for 20×20 attempts wastes time on auth/JWT-class
+# bugs because the model can't hold the multi-file context across
+# iterations. Skip straight from triage to flash-top, then escalate
+# to pro when flash-top is stuck.
 debugger_escalation:
-  # First tier: many cheap turns to handle the common case. Each
-  # attempt sees the sticky repair log so the 10 passes compound on
-  # each other rather than restarting from zero.
+  # Tier 1 — quick-pass triage with the cheapest model. Catches truly
+  # trivial fixes (typo, wrong import, missing field name) for
+  # fractions of a cent each. 2 iterations lets the model peek at one
+  # file before forced submission. Two attempts because flash-lite
+  # sometimes mis-diagnoses on the first shot but gets it on the
+  # second after the sticky log clarifies. Beyond 2 attempts the
+  # signal-to-noise drops fast — escalate to the workhorse tier.
+  - model: gemini-flash-lite
+    tool_iterations: 2
+    repair_attempts: 2
+  # Tier 2 — workhorse grind. Mid-tier model can hold multi-file
+  # context across iterations and produces real fixes for logic bugs.
+  # 40 tool iterations per attempt = enough to view a dozen files PLUS
+  # do live runtime introspection (run_python_in_container, hit_endpoint,
+  # inspect_env, decode_jwt) before forming a thoughtful diagnosis.
+  # 5 attempts because the sticky log compounds — each attempt builds
+  # on prior diagnoses.
   - model: gemini-flash-top
-    max_turns: 12
-    repair_attempts: 10
-  # Escalation: stronger model with fewer turns. Sees flash-top's
-  # full repair log so it doesn't redo the obvious-fix attempts.
+    tool_iterations: 40
+    repair_attempts: 5
+  # Tier 3 — pro escalation. 24 iterations gives pro plenty of runway
+  # to use the live-introspection tools to nail config or auth bugs.
+  # 2 attempts only — pro is the strongest model, so if it can't fix
+  # it after one full grind plus a sticky-log retry, the bug is
+  # structural (wrong skeleton, wrong contract) and no more LLM
+  # iteration will help. Surface for human review.
   - model: gemini-pro
-    max_turns: 8
-    repair_attempts: 1
-# Top-tier model for integration test generation. Hallucinations here
-# get amplified by the debugger into real code corruption (e.g. fake
-# /grooming routes appearing in a property-manager app), so we pay
-# for the better model.
-integration_tester_model: gemini-pro
+    tool_iterations: 24
+    repair_attempts: 2
+
+
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  ORCHESTRATION KNOBS                                              ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+
+# Legacy three-phase strategy parameters. The active path is
+# debugger_escalation; these stay as a single-tier fallback only.
 debugger_max_iterations: 12
 stall_threshold: 3
 agentic_debug_threshold: 2
 enable_agentic_debug: false
+
+# Engineer's three-phase code-generation strategy: dispatch issues
+# in dependency-order layers, each layer fully resolves before the
+# next starts. Set false to dispatch issues serially in declaration
+# order (slower but easier to debug a stuck run).
 layered_generation: true
+
+# Architect dispatches engineers per service in parallel when true.
+# Bounded by max_service_workers — set higher than your CPU count
+# only if most service work is I/O-bound (LLM calls).
 parallel_services: true
 max_service_workers: 4
-max_iterations: 20
+
+# Per-issue iteration cap inside CodingOrchestrator. Hit this and the
+# orchestrator gives up on the issue (which propagates to the engineer
+# as a service-level failure for that ticket).
+max_iterations: 30

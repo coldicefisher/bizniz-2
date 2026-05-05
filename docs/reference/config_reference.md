@@ -2,32 +2,58 @@
 
 Every key supported by `BiznizConfig` (defined in `bizniz/config/bizniz_config.py`).
 
-`BiznizConfig.find_and_load()` walks from the current working directory up the directory tree looking for the first `bizniz.yaml` it finds. If none exists, defaults are used.
+`BiznizConfig.find_and_load()` walks from the current working directory up the directory tree looking for the first `bizniz.yaml` it finds. If none exists, defaults are used — but the required progression lists below mean a fully-empty config will still hard-fail at construction.
 
 ## Top-level keys
 
 ### Model selection
 
-| Key | Type | Default | Notes |
-|-----|------|---------|-------|
-| `default_model` | str | `"gpt-4o-mini"` | Used when no agent has its own override |
-| `engineer_model` | str | `"gpt-4o"` | Used by `make_engineer_client()` |
-| `architect_model` | str | `"gpt-4o"` | Used by the architect (read by user code, not auto) |
-
-### Model progressions
+There is **no** shared `default_model` fallback. Every role names its model explicitly so a typo or omission hard-fails at config load rather than silently routing to a generic default.
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `models` | list[str] | `["gpt-4o-mini", "gpt-4o", "gpt-5", "claude-sonnet", "claude-opus"]` | Default progression for stall escalation |
-| `coder_models` | list[str] \| null | null | Override for coder; falls back to `models` |
-| `tester_models` | list[str] \| null | null | Override for tester; falls back to `models` |
-| `repair_models` | list[str] \| null | null | Override for repair; falls back to `models` |
+| `engineer_model` | str | `"gpt-4o"` | Used by `make_engineer_client()` (Engineer's analysis + plan + governance + enrichment calls) |
+| `architect_model` | str | `"gpt-4o"` | Used by the Architect (decomposition + milestone walk) |
+| `planner_model` | str | `"gemini-pro"` | Used by `make_planner_client()` (one-shot project planning) |
+| `integration_tester_model` | str | `"gemini-pro"` | Used by `make_integration_tester_client()` (HTTPApiTester + WebUITester) |
+| `debugger_model` | str | `"gemini-pro"` | Single-tier fallback for debugger callers — see `debugger_escalation` below for the active chain |
+
+`make_client(model)` itself **requires** an explicit model name; passing an empty/missing value raises `ValueError`. Use the per-role factories above, or pick one of the role fields directly.
+
+### Model progressions (required)
+
+Every list **must** have at least one entry — pydantic enforces `Field(min_length=1)`. There's no shared `models` fallback; each list must be defined explicitly. A `bizniz.yaml` missing any of these hard-fails at load.
+
+| Key | Type | Notes |
+|-----|------|-------|
+| `coder_models` | list[str] | Stall-escalation progression for the Coder agent |
+| `tester_models` | list[str] | Stall-escalation progression for the Tester agent |
+| `repair_models` | list[str] | Stall-escalation progression for the QuickDebugger (inline repair) |
 
 Provider routing happens automatically by name prefix:
 
 - `claude-*` → Anthropic
 - `gemini-*` → Google
 - everything else → OpenAI / Azure
+
+### Debugger escalation chain
+
+`debugger_escalation` is an array-of-hashes (NOT a flat list). Each tier has its own model + per-attempt turn budget + retry count. Used by the integration debugger, the post-flight repair loop, and the FA debugger. Tiers run in order, sticky repair log compounds across tiers.
+
+```yaml
+debugger_escalation:
+  - model: gemini-flash-lite
+    max_turns: 1
+    repair_attempts: 1
+  - model: gemini-flash-lite
+    max_turns: 20
+    repair_attempts: 20
+  - model: gemini-flash-top
+    max_turns: 12
+    repair_attempts: 3
+```
+
+Pro tier is deliberately absent — if mid-tier (`gemini-flash-top`) can't grind a fix in 3×12 attempts after the cheap tier has already burned 20×20, the system stops and surfaces for human review rather than burning pro budget.
 
 ### Stall and debugging
 
@@ -37,6 +63,7 @@ Provider routing happens automatically by name prefix:
 | `agentic_debug_threshold` | int | `5` | Consecutive failures before the AgenticDebugger is invoked |
 | `enable_agentic_debug` | bool | `true` | Master switch for deep diagnosis |
 | `stall_recovery` | str | `"full"` | `"full"` (rebuild from scratch), `"regenerate"` (one side only), `"none"` |
+| `debugger_max_iterations` | int | `12` | Per-ticket cap for the legacy single-tier agentic debugger |
 
 ### Pipeline mode
 
@@ -79,24 +106,35 @@ Bizniz reads these at runtime. Most are fallbacks for keys that can also live in
 ## Example: Gemini-only setup
 
 ```yaml
-default_model: gemini-flash-lite
-engineer_model: gemini-flash
-architect_model: gemini-flash
-models:
-  - gemini-flash-lite
-  - gemini-flash
-  - gemini-pro
+engineer_model: gemini-flash-top
+architect_model: gemini-flash-top
+planner_model: gemini-flash-top
+integration_tester_model: gemini-pro
+debugger_model: gemini-flash-lite
+
 coder_models:
   - gemini-flash-lite
   - gemini-flash
-  - gemini-pro
+  - gemini-flash-top
 tester_models:
   - gemini-flash-lite
   - gemini-flash
-  - gemini-pro
+  - gemini-flash-top
 repair_models:
   - gemini-flash
-  - gemini-pro
+  - gemini-flash-top
+
+debugger_escalation:
+  - model: gemini-flash-lite
+    max_turns: 1
+    repair_attempts: 1
+  - model: gemini-flash-lite
+    max_turns: 20
+    repair_attempts: 20
+  - model: gemini-flash-top
+    max_turns: 12
+    repair_attempts: 3
+
 stall_threshold: 3
 agentic_debug_threshold: 2
 enable_agentic_debug: false
@@ -109,21 +147,31 @@ max_iterations: 20
 ## Example: mixed providers
 
 ```yaml
-default_model: gpt-4o-mini
 engineer_model: gpt-4o
 architect_model: claude-sonnet
-models:
-  - gpt-4o-mini
-  - gpt-4o
-  - claude-sonnet
-  - claude-opus
+planner_model: claude-opus
+integration_tester_model: gpt-4o
+debugger_model: claude-opus
+
 coder_models:
   - gpt-4o-mini
   - gpt-4o
   - gpt-5
+tester_models:
+  - gpt-4o-mini
+  - gpt-4o
 repair_models:
   - claude-sonnet
   - claude-opus
+
+debugger_escalation:
+  - model: gpt-4o-mini
+    max_turns: 1
+    repair_attempts: 1
+  - model: gpt-4o
+    max_turns: 12
+    repair_attempts: 3
+
 api_key: sk-...
 anthropic_api_key: sk-ant-...
 stall_threshold: 2
@@ -143,8 +191,15 @@ database_url: mysql://bizniz:secret@localhost/bizniz
 is_azure: true
 api_base: https://my-resource.openai.azure.com/
 api_key: <azure-key>
-default_model: gpt-4o-mini
 engineer_model: gpt-4o
+architect_model: gpt-4o
+planner_model: gpt-4o
+integration_tester_model: gpt-4o
+debugger_model: gpt-4o
+
+coder_models: [gpt-4o-mini, gpt-4o]
+tester_models: [gpt-4o-mini, gpt-4o]
+repair_models: [gpt-4o-mini, gpt-4o]
 ```
 
 (Note: Azure also requires `available_models` mapping inside a `ChatGPTClientConfig` if you bypass `BiznizConfig` — but the standard path through `BiznizConfig.make_client` constructs that for you.)

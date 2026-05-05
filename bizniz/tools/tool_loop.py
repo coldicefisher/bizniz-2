@@ -74,7 +74,7 @@ def run_tool_loop(
     initial_user_message: str,
     action_schema: dict,
     terminal_action: str,
-    max_turns: int = 10,
+    tool_iterations: int = 10,
     timeout_seconds: int = 300,
     on_status_message: Optional[Callable[[str], None]] = None,
     extra_tool_handlers: Optional[Dict[str, Callable]] = None,
@@ -102,7 +102,7 @@ def run_tool_loop(
         and the terminal action).
     terminal_action:
         The action name that signals the loop should return (e.g. "submit_code").
-    max_turns:
+    tool_iterations:
         Maximum number of tool-use turns before forcing submission.
     timeout_seconds:
         Wall-clock timeout before forcing submission.
@@ -133,7 +133,7 @@ def run_tool_loop(
     max_parse_failures = 5
     rate_limit_backoff = 0.0  # accumulates across turns to prevent rapid re-hitting
 
-    for turn in range(1, max_turns + 1):
+    for turn in range(1, tool_iterations + 1):
         elapsed = time.time() - start_time
         if elapsed > timeout_seconds:
             log(f"{agent_name}: timeout after {int(elapsed)}s — forcing submission")
@@ -268,7 +268,7 @@ def run_tool_loop(
         # Build tool result with turn budget warning
         tool_result = f"[TOOL RESULT: {action_type}(\"{path}\")]\n{result}"
 
-        remaining = max_turns - turn
+        remaining = tool_iterations - turn
         if remaining <= 2:
             tool_result += (
                 f"\n\n⚠️ WARNING: You have {remaining} turn(s) remaining. "
@@ -327,5 +327,5 @@ def run_tool_loop(
             raise ToolLoopBadResponseError(f"Final forced submission failed: {e}")
 
     raise ToolLoopTimeoutError(
-        f"LLM did not submit '{terminal_action}' after {max_turns} turns + forced attempt"
+        f"LLM did not submit '{terminal_action}' after {tool_iterations} turns + forced attempt"
     )

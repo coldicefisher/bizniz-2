@@ -136,7 +136,7 @@ class Architect(BaseAIAgent):
             from bizniz.config.bizniz_config import BiznizConfig
             cfg = BiznizConfig.find_and_load()
             for key in (
-                "default_model", "architect_model", "engineer_model",
+                "architect_model", "engineer_model",
                 "coder_model", "tester_model", "debugger_model",
                 "agentic_debugger_model", "planner_model",
             ):
@@ -923,6 +923,19 @@ class Architect(BaseAIAgent):
                             # full project. M1 tests auth, not M3's rent collection.
                             milestone_problem = milestone.problem_slice or problem_statement
                             log(f"Architect: milestone {m_label} — running integration phase...")
+                            # Build the same escalation chain used for the
+                            # backend layer gate so frontend integration
+                            # debugging gets full flash-lite → flash-top →
+                            # pro escalation instead of single-tier legacy.
+                            milestone_escalation = self._build_debugger_escalation_specs()
+                            if milestone_escalation:
+                                log(
+                                    "Architect: milestone integration — debugger escalation chain: "
+                                    + " → ".join(
+                                        f"{s.model_label}({s.repair_attempts}×{s.tool_iterations})"
+                                        for s in milestone_escalation
+                                    )
+                                )
                             m_results = run_integration_phase(
                                 architecture=evolved_arch,
                                 service_results=list(m_results),
@@ -934,6 +947,7 @@ class Architect(BaseAIAgent):
                                 on_status=self._on_status_message,
                                 debugger_factory=self._integration_debugger_factory,
                                 web_ui_tester_factory=self._web_ui_tester_factory,
+                                debugger_escalation=milestone_escalation,
                             )
                             # Re-evaluate success after integration
                             milestone_succeeded = all(
@@ -1213,7 +1227,7 @@ class Architect(BaseAIAgent):
             specs.append(DebuggerTierSpec(
                 factory=_tier_factory,
                 model_label=tier.model,
-                max_turns=tier.max_turns,
+                tool_iterations=tier.tool_iterations,
                 repair_attempts=tier.repair_attempts,
             ))
         return specs
@@ -1266,7 +1280,7 @@ class Architect(BaseAIAgent):
             log(
                 f"Architect: layer gate — debugger escalation chain: "
                 + " → ".join(
-                    f"{s.model_label}({s.repair_attempts}×{s.max_turns})"
+                    f"{s.model_label}({s.repair_attempts}×{s.tool_iterations})"
                     for s in debugger_escalation_specs
                 )
             )
@@ -2267,7 +2281,15 @@ class Architect(BaseAIAgent):
         service: ServiceDefinition,
         architecture: SystemArchitecture,
     ) -> str:
-        """Build a focused prompt for a single service."""
+        """Build a focused prompt for a single service.
+
+        ``problem_statement`` is the milestone-scoped slice when called
+        from the milestone walk, or the full project statement when
+        called from a one-shot ``build()``. Either way, it's labeled
+        as the SCOPE and the service description is downgraded to
+        "eventual scope" so the engineer doesn't engineer features
+        from future milestones.
+        """
         other_services = [
             f"- {s.name} ({s.framework}): {s.description}"
             for s in architecture.services
@@ -2283,18 +2305,25 @@ class Architect(BaseAIAgent):
         contracts_section = self._format_contracts_for_prompt(architecture, service)
 
         return (
-            f"Overall project: {problem_statement}\n\n"
+            f"━━━ SCOPE FOR THIS DISPATCH (THE ONLY SOURCE OF TRUTH FOR WHAT TO BUILD) ━━━\n"
+            f"{problem_statement}\n"
+            f"━━━ END SCOPE ━━━\n\n"
             f"You are building the '{service.name}' service for the "
             f"'{architecture.project_name}' project.\n\n"
-            f"Service details:\n"
+            f"Service details (the service's EVENTUAL shape across all milestones — "
+            f"do NOT implement everything described here; implement ONLY what the "
+            f"SCOPE above explicitly asks for. Treat anything in the description below "
+            f"that isn't covered by the SCOPE as a future-milestone concern):\n"
             f"- Type: {service.service_type}\n"
             f"- Framework: {service.framework}\n"
             f"- Language: {service.language}\n"
             f"- Description: {service.description}\n"
             f"- Port: {service.port}\n\n"
-            f"Other services in the system:\n{other_services_text}\n\n"
+            f"Other services in the system (also describe eventual shape — same rule):\n"
+            f"{other_services_text}\n\n"
             f"{contracts_section}"
-            f"Build ONLY this service. Use {service.language} with {service.framework}. "
+            f"Build ONLY this service AND ONLY what the SCOPE asks for. "
+            f"Use {service.language} with {service.framework}. "
             f"Focus on clean, working code with tests. "
             f"The service will run in a Docker container."
         )

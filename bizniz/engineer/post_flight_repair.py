@@ -80,7 +80,7 @@ def repair_post_flight_failure(
         to ``run_validator(service, workspace_root)``.
     escalation:
         Tier list — same shape integration repair uses. Each tier's
-        ``factory(workspace)`` returns a debugger; ``max_turns`` and
+        ``factory(workspace)`` returns a debugger; ``tool_iterations`` and
         ``repair_attempts`` cap effort per tier.
     """
     last_output = validator_output
@@ -138,8 +138,8 @@ def repair_post_flight_failure(
 
             try:
                 debugger = tier.factory(workspace)
-                if hasattr(debugger, "_max_turns"):
-                    debugger._max_turns = tier.max_turns
+                if hasattr(debugger, "_tool_iterations"):
+                    debugger._tool_iterations = tier.tool_iterations
 
                 diagnosis = debugger.diagnose(
                     error_output=last_output,

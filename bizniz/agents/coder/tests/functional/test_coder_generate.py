@@ -15,8 +15,13 @@ from bizniz.workspace.local_workspace import LocalWorkspace
 @pytest.mark.functional
 def test_generate_single_file(api_key, workspace_path):
     """Coder generates a single Python file from a prompt."""
-    config = BiznizConfig(api_key=api_key)
-    client = config.make_client()
+    config = BiznizConfig(
+        api_key=api_key,
+        coder_models=["gpt-4o-mini"],
+        tester_models=["gpt-4o-mini"],
+        repair_models=["gpt-4o-mini"],
+    )
+    client = config.make_client(model="gpt-4o-mini")
     workspace = LocalWorkspace(root=str(workspace_path))
     environment = DockerExecutionEnvironment()
 
@@ -36,8 +41,13 @@ def test_generate_single_file(api_key, workspace_path):
 @pytest.mark.functional
 def test_generate_multi_file(api_key, workspace_path):
     """Coder generates multiple files from an issue description."""
-    config = BiznizConfig(api_key=api_key)
-    client = config.make_client()
+    config = BiznizConfig(
+        api_key=api_key,
+        coder_models=["gpt-4o-mini"],
+        tester_models=["gpt-4o-mini"],
+        repair_models=["gpt-4o-mini"],
+    )
+    client = config.make_client(model="gpt-4o-mini")
     workspace = LocalWorkspace(root=str(workspace_path))
     environment = DockerExecutionEnvironment()
 
