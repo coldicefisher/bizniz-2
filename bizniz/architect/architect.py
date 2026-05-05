@@ -619,6 +619,8 @@ class Architect(BaseAIAgent):
                                 architecture=evolved_arch,
                                 service_results=[],
                                 project_root=str(project.root),
+                                success=False,
+                                abort_reason="stack_validation_failed",
                             ))
                             break
                     tracker.set_phase(None)
@@ -744,6 +746,8 @@ class Architect(BaseAIAgent):
                                             architecture=evolved_arch,
                                             service_results=[],
                                             project_root=str(project.root),
+                                            success=False,
+                                            abort_reason="fusionauth_validation_failed",
                                         ))
                                         # Tear down stack since we're bailing
                                         from bizniz.provisioner.stack_validator import teardown_stack
@@ -759,6 +763,8 @@ class Architect(BaseAIAgent):
                                     architecture=evolved_arch,
                                     service_results=[],
                                     project_root=str(project.root),
+                                    success=False,
+                                    abort_reason=f"fusionauth_provision_exception: {type(e).__name__}",
                                 ))
                                 break
                         tracker.set_phase(None)
@@ -957,6 +963,8 @@ class Architect(BaseAIAgent):
                                 architecture=evolved_arch,
                                 service_results=list(m_results),
                                 project_root=str(project.root),
+                                success=False,
+                                abort_reason="engineering_failed",
                             ))
                             break
 
@@ -964,11 +972,16 @@ class Architect(BaseAIAgent):
                     # evolve sees what's there now.
                     current_architecture = evolved_arch
 
+                    milestone_all_pass = (
+                        bool(m_results)
+                        and all(getattr(r, "success", False) for r in m_results)
+                    )
                     results.append(ArchitectResult(
                         project_name=project_name,
                         architecture=evolved_arch,
                         service_results=list(m_results),
                         project_root=str(project.root),
+                        success=milestone_all_pass,
                     ))
 
                 except AIInsufficientFunds:

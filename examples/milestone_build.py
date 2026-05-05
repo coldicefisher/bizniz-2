@@ -400,21 +400,25 @@ def main():
     except Exception as e:
         print(f"  Cost summary unavailable: {e}", flush=True)
 
-    # Update plan statuses and save
+    # Update plan statuses and save. Use ArchitectResult.success as
+    # the authoritative outcome — empty service_results from an aborted
+    # milestone (e.g. FA validation couldn't be repaired) is NOT a
+    # vacuous pass.
     for m in milestones_to_run:
         m_idx = m.sequence_index
         if m_idx < len(results):
             r = results[m_idx - m_start]
-            all_pass = all(sr.success for sr in r.service_results) if r.service_results else False
-            m.status = "completed" if all_pass else "failed"
+            m.status = "completed" if getattr(r, "success", False) else "failed"
     _save_plan(plan, plan_path)
 
-    all_passed = all(
-        sr.success
-        for r in results
-        for sr in r.service_results
+    all_passed = bool(results) and all(
+        getattr(r, "success", False) for r in results
     )
     print(f"\n  Overall: {'PASS' if all_passed else 'FAIL'}", flush=True)
+    for r in results:
+        if not getattr(r, "success", False):
+            reason = getattr(r, "abort_reason", None) or "see logs"
+            print(f"    ✗ milestone failed — reason: {reason}", flush=True)
     print(f"\n  Next steps:", flush=True)
     print(f"  1. Verify: docker compose -f {project_root}/infra/development/docker-compose.yml up -d", flush=True)
     print(f"  2. Integration tests: PYTHONPATH=. .venv/bin/python -u examples/debug_integration.py {project_root}", flush=True)

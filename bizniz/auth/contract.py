@@ -230,14 +230,22 @@ class AuthContract:
                 continue  # can't check roles without a token
 
             # 3c. Token contains stated roles.
-            # We decode the JWT directly rather than calling /oauth2/userinfo,
-            # which is OIDC-only and rejects FusionAuth's proprietary access
-            # tokens minted by /api/login. The skeleton's auth path uses the
-            # same JWT decode + claims["roles"] path, so this matches what
-            # production code will see at runtime.
+            # Decode the JWT payload via stdlib base64 — we don't need
+            # signature verification (we just got the token from a
+            # successful login), and we don't want to depend on a JWT
+            # library here. The skeleton's require_roles uses the same
+            # ``claims["roles"]`` lookup at runtime, so this matches
+            # what production code will see.
             try:
-                from jose import jwt as _jose_jwt
-                claims = _jose_jwt.get_unverified_claims(token)
+                import base64
+                import json as _json
+                parts = token.split(".")
+                if len(parts) != 3:
+                    raise ValueError(f"not a JWT (expected 3 parts, got {len(parts)})")
+                # base64url-decode the payload (segment 1), padding-tolerant
+                payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+                payload_bytes = base64.urlsafe_b64decode(payload_b64.encode("ascii"))
+                claims = _json.loads(payload_bytes)
                 token_roles = claims.get("roles") or []
                 if not isinstance(token_roles, list):
                     token_roles = [str(token_roles)]
