@@ -285,15 +285,22 @@ def provision_fusionauth(
         )
 
         # FusionAuth reports /api/status healthy as soon as its HTTP
-        # server is up, which is BEFORE kickstart finishes creating
-        # the bootstrap apiKey. Stack-validation passes that early-
-        # health check, then materialize fires immediately and gets
-        # 401s because the apiKey doesn't exist yet. Wait for the key
-        # to actually authenticate before we start hitting endpoints.
-        if not orch_for_materialize.wait_until_authenticated(deadline_s=30.0):
+        # server is up, but kickstart processing happens AFTER that —
+        # apiKey creation, then application/tenant config, then JWKS
+        # propagation. We wait for both readiness signals (API key
+        # authenticates AND JWKS has keys) before starting materialize
+        # so we don't race kickstart on a slow machine.
+        #
+        # 5-minute deadline, 5-second polls — generous because FA can
+        # take a while on first boot and we'd rather wait than burn a
+        # whole engineering pass on a kickstart that hadn't finished.
+        if not orch_for_materialize.wait_until_fully_ready(
+            deadline_s=300.0, poll_s=5.0, on_status=on_status,
+        ):
             _log(on_status,
-                 "FusionAuth agent: api key did not authenticate within 30s "
-                 "— kickstart may have failed; materialize will likely 401")
+                 "FusionAuth agent: FA not fully ready after 5min — "
+                 "proceeding; materialize/validation will surface "
+                 "any actual configuration gaps")
 
         report = orch_for_materialize.materialize(
             auth_spec, primary_app_id=application_id,

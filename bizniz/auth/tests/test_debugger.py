@@ -117,10 +117,10 @@ def test_typed_fix_for_application_exists_recreates_app():
     )
 
 
-def test_typed_fix_for_jwks_has_keys_generates_rsa_and_binds_tenant():
+def test_typed_fix_for_jwks_has_keys_generates_rsa_and_binds_application():
     """JWKS-empty failure → debugger generates RS256 key + binds it
-    as the tenant's accessTokenKeyId. Most common cause of "every
-    JWT 401s" because the default FA tenant uses HS256."""
+    at the APPLICATION level (not tenant — FA's tenant PATCH
+    validator is broken on freshly-bootstrapped tenants)."""
     spec = _make_spec()
     contract = _make_contract()
     orch = MagicMock()
@@ -139,9 +139,13 @@ def test_typed_fix_for_jwks_has_keys_generates_rsa_and_binds_tenant():
     assert gen_kwargs["algorithm"] == "RS256"
     assert gen_kwargs["length"] == 2048
 
-    orch.set_tenant_signing_key.assert_called_once()
-    bind_kwargs = orch.set_tenant_signing_key.call_args.kwargs
+    orch.set_application_signing_key.assert_called_once()
+    bind_kwargs = orch.set_application_signing_key.call_args.kwargs
+    assert bind_kwargs["app_id"] == "app-1"
     assert bind_kwargs["also_id_token"] is True
+    # Tenant-level binding must NOT be called — that's what was
+    # hitting the broken tenant PATCH validator.
+    orch.set_tenant_signing_key.assert_not_called()
 
 
 def test_typed_fix_skips_unknown_checks():

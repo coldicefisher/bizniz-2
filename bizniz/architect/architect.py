@@ -1846,6 +1846,7 @@ class Architect(BaseAIAgent):
                     service_prompt=service_prompt,
                     project=project,
                     layered=layered,
+                    problem_statement=problem_statement,
                 )
                 service_results.append(result)
                 status = "PASS" if result.success else "FAIL"
@@ -1901,6 +1902,7 @@ class Architect(BaseAIAgent):
                     project=project,
                     project_db_lock=project_db_lock,
                     layered=layered,
+                    problem_statement=problem_statement,
                 )
                 futures[future] = service
 
@@ -1937,6 +1939,7 @@ class Architect(BaseAIAgent):
         project=None,
         project_db_lock=None,
         layered: bool = True,
+        problem_statement: str = "",
     ) -> ServiceResult:
         """Dispatch an Engineer for a single service."""
         # Tag the cost tracker with the current service so every AI call

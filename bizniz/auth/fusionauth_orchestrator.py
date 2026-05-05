@@ -1316,3 +1316,115 @@ class FusionAuthOrchestrator:
                 pass
             time.sleep(poll_s)
         return False
+
+    def wait_until_jwks_populated(
+        self,
+        deadline_s: float = 15.0,
+        poll_s: float = 1.0,
+    ) -> bool:
+        """Block until the JWKS endpoint exposes at least one key.
+
+        FusionAuth's JWKS endpoint has a propagation delay after
+        application/tenant config changes — even after a successful
+        PATCH binding an RS256 key, JWKS may report ``{"keys":[]}``
+        for a few seconds before the key becomes visible. The
+        contract validator's ``jwks_has_keys`` check fires
+        immediately after materialize and was racing this delay.
+
+        Returns True once at least one key appears, False on timeout.
+        """
+        end = time.monotonic() + deadline_s
+        while time.monotonic() < end:
+            try:
+                resp = requests.get(
+                    f"{self.base_url}/.well-known/jwks.json",
+                    timeout=5.0,
+                )
+                if resp.status_code == 200:
+                    body = resp.json() or {}
+                    if body.get("keys"):
+                        return True
+            except requests.RequestException:
+                pass
+            time.sleep(poll_s)
+        return False
+
+    def wait_until_fully_ready(
+        self,
+        deadline_s: float = 300.0,
+        poll_s: float = 5.0,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """Block until FusionAuth is fully ready for production work.
+
+        Two conditions must both be true:
+          1. The orchestrator's API key authenticates against FA
+             (kickstart's apiKeys block has been applied)
+          2. JWKS exposes at least one signing key (kickstart's
+             application/tenant JWT config has propagated)
+
+        Both conditions are checked on every poll. Returns True the
+        first cycle they're both green; False if the deadline expires.
+        Default is 5-minute deadline with 5-second polls — generous
+        because FA on a slow machine can take 30-60s to finish
+        kickstart processing AND another few seconds for JWKS to
+        propagate after.
+
+        This consolidates ``wait_until_authenticated`` and
+        ``wait_until_jwks_populated`` into one trip — preferred for
+        all production-readiness checks. The individual methods
+        remain for callers that only care about one signal.
+        """
+        end = time.monotonic() + deadline_s
+        attempt = 0
+        while time.monotonic() < end:
+            attempt += 1
+            api_ok = False
+            jwks_ok = False
+            try:
+                resp = requests.get(
+                    f"{self.base_url}/api/application",
+                    headers={"Authorization": self.api_key},
+                    timeout=5.0,
+                )
+                api_ok = resp.status_code == 200
+            except requests.RequestException:
+                pass
+            try:
+                resp = requests.get(
+                    f"{self.base_url}/.well-known/jwks.json",
+                    timeout=5.0,
+                )
+                if resp.status_code == 200:
+                    body = resp.json() or {}
+                    jwks_ok = bool(body.get("keys"))
+            except requests.RequestException:
+                pass
+
+            if api_ok and jwks_ok:
+                if on_status:
+                    elapsed = deadline_s - (end - time.monotonic())
+                    on_status(
+                        f"FusionAuth: fully ready after {elapsed:.0f}s "
+                        f"(attempt {attempt})"
+                    )
+                return True
+
+            if on_status and attempt % 6 == 1:  # log every ~30s
+                missing = []
+                if not api_ok:
+                    missing.append("api-key")
+                if not jwks_ok:
+                    missing.append("jwks")
+                on_status(
+                    f"FusionAuth: not fully ready (attempt {attempt}, "
+                    f"missing: {', '.join(missing)})"
+                )
+            time.sleep(poll_s)
+
+        if on_status:
+            on_status(
+                f"FusionAuth: NOT fully ready after {deadline_s:.0f}s "
+                f"({attempt} attempts) — proceeding anyway"
+            )
+        return False
