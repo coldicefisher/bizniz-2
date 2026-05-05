@@ -68,9 +68,12 @@ Rules of thumb:
       add_test_users: list of {email, first_name, last_name, role_names,
                                 group_names} — used by integration tests.
         ALWAYS include at least one test user per role, with a
-        deterministic email like "<role>@example.test". Tests must be
-        able to log in as a real holder of every role the milestone
-        introduces.
+        deterministic email like "<role>@example.com". MUST use the
+        @example.com domain — strict email validators (Pydantic's
+        EmailStr) reject @example.test and @*.local outright, which
+        silently breaks every contract-user login test downstream.
+        Tests must be able to log in as a real holder of every role
+        the milestone introduces.
       note: one-line free-text justification (advisory, not parsed)
 
     The seeded super-admin (admin@admin.com) is ALWAYS provisioned

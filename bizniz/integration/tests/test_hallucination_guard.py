@@ -49,11 +49,15 @@ def test_book_an_appointment(client):
 """
     report = validate_test_grounding(PROPERTY_MANAGER, test)
     assert not report.ok
-    # The egregious confabulation tokens must surface
+    # The egregious confabulation tokens must surface. ``services`` is
+    # NOT in this list — it's a generic framework folder name (every
+    # FastAPI project has app/services/), and reliable bleed-through
+    # detection comes from domain-specific words (grooming, haircut,
+    # appointment) instead.
     flagged = set(report.suspicious)
     assert "grooming" in flagged
     assert "appointments" in flagged or "appointment" in flagged
-    assert "services" in flagged
+    assert "haircut" in flagged
 
 
 def test_corrective_message_is_actionable():
@@ -98,3 +102,53 @@ def test_helper(landlord_headers, tenant_token): pass
     report = validate_test_grounding(PROPERTY_MANAGER, test)
     assert "landlord" not in report.suspicious
     assert "tenant" not in report.suspicious
+
+
+# ── path-level guard (used by integration debug loop to filter fixes) ──
+
+def test_path_guard_allows_framework_folder_names():
+    """Standard FastAPI/Django folder names (schemas/, models/, routes/,
+    services/) must not trip the path-level hallucination guard. The M1 v10
+    bug was the integration debugger correctly diagnosing real bugs but
+    every fix to ``app/schemas/properties.py`` and ``app/models/property.py``
+    getting rejected because ``schemas`` and ``models`` weren't in the
+    generic vocab."""
+    from bizniz.integration.debug_loop import _is_hallucinated_new_file
+
+    class _StubWS:
+        def list_relative_files(self):
+            return []
+
+    # All of these are legitimate domain files in a property-manager
+    # project. None should be rejected.
+    for path in [
+        "app/schemas/properties.py",
+        "app/schemas/auth.py",
+        "app/models/property.py",
+        "app/api/routes/properties.py",
+        "app/services/property_service.py",
+        "app/utils/validators.py",
+        "app/middleware/cors.py",
+    ]:
+        assert not _is_hallucinated_new_file(
+            path, "", _StubWS(), PROPERTY_MANAGER,
+        ), f"{path} should NOT be flagged as hallucinated"
+
+
+def test_path_guard_still_catches_actual_hallucinations():
+    """A real domain mismatch (grooming/appointment in a property-manager
+    project) must still trip the guard."""
+    from bizniz.integration.debug_loop import _is_hallucinated_new_file
+
+    class _StubWS:
+        def list_relative_files(self):
+            return []
+
+    for path in [
+        "app/api/routes/grooming.py",
+        "app/schemas/appointment.py",
+        "app/models/haircut.py",
+    ]:
+        assert _is_hallucinated_new_file(
+            path, "", _StubWS(), PROPERTY_MANAGER,
+        ), f"{path} should be flagged as hallucinated"

@@ -73,7 +73,19 @@ _GENERIC_VOCAB: Set[str] = {
     # Common backend concepts that aren't training-prior contamination
     "health", "healthcheck", "version", "metadata", "config", "configuration",
     "environment", "env", "dev", "development", "production", "staging",
-    "database", "table", "record", "records", "schema", "migration",
+    "database", "table", "record", "records", "schema", "schemas",
+    "migration", "migrations",
+    # Standard FastAPI / Django / Flask / Rails framework folder names.
+    # These appear in every project's path layout regardless of domain
+    # (app/models/<X>.py, app/routes/<X>.py, app/services/<X>.py).
+    # Without these in vocab, the hallucination guard blocks every
+    # legitimate domain file because of the parent folder's name.
+    "models", "routes", "service", "services", "tasks", "utils", "helpers",
+    "middleware", "exceptions", "handlers", "controllers", "views",
+    "serializers", "validators", "repositories", "managers", "fixtures",
+    "components", "hooks", "stores", "store", "providers", "layouts",
+    "pages", "features", "containers", "widgets", "atoms", "molecules",
+    "organisms", "templates",
     # More generic English filler that shows up in test docstrings
     "contract", "domain", "failure", "localhost", "malformed", "problem",
     "profile", "provided", "requires", "simulation", "statement", "there",
