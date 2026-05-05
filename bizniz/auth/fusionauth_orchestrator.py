@@ -239,6 +239,7 @@ class FusionAuthOrchestrator:
         last_name: Optional[str] = None,
         roles: Optional[List[str]] = None,
         verified: bool = True,
+        password_change_required: bool = False,
     ) -> UserId:
         """Idempotent: ensure a user with this email exists on the
         application with the given roles.
@@ -246,10 +247,15 @@ class FusionAuthOrchestrator:
         Behavior:
           - If user doesn't exist: create + register on application
             with roles.
-          - If user exists but not registered on this app: register +
-            assign roles.
-          - If user exists and IS registered on this app: assign any
-            missing roles (additive — does not remove other roles).
+          - If user exists but not registered on this app: reset
+            password (so a stale prior-run password doesn't silently
+            break login), then register + assign roles.
+          - If user exists and IS registered on this app: reset
+            password + assign any missing roles (additive on roles).
+
+        ``password_change_required`` controls FusionAuth's first-login
+        rotation flag. False for test users (they need clean login);
+        True for the seeded admin (forces production-deployer rotation).
 
         Returns user_id.
         """
@@ -267,6 +273,21 @@ class FusionAuthOrchestrator:
             raise FusionAuthError(
                 f"FusionAuth returned a user record without an id for {email}"
             )
+
+        # User exists from a prior run — reset the password to the
+        # spec's value so login is deterministic. Without this, a
+        # persistent FusionAuth volume from a prior incomplete run
+        # silently breaks login (FA returns 404 on wrong password,
+        # which is indistinguishable from "user doesn't exist").
+        # PATCH avoids a full PUT that would clobber other fields.
+        self._log(f"FusionAuth: resetting password for existing user {email}")
+        self.request(
+            "PATCH", f"/api/user/{user_id}",
+            body={"user": {
+                "password": password,
+                "passwordChangeRequired": password_change_required,
+            }},
+        )
 
         registrations = user.get("registrations") or []
         existing_app_reg = next(
@@ -812,6 +833,7 @@ class FusionAuthOrchestrator:
                     last_name=admin.last_name,
                     roles=list(admin.role_names),
                     verified=True,
+                    password_change_required=admin.password_change_required,
                 )
                 aa.applied = True
             except FusionAuthError as e:
@@ -853,6 +875,7 @@ class FusionAuthOrchestrator:
                         last_name=user.last_name,
                         roles=grants_for_app,
                         verified=user.verified,
+                        password_change_required=user.password_change_required,
                     )
                     ua.applied = True
                 except FusionAuthError as e:
