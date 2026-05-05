@@ -78,11 +78,20 @@ class FusionAuthTemplate(InfraTemplate):
                 # application services will see FusionAuth from inside the
                 # docker network. UUID is hardcoded (see DEFAULT_TENANT_ID
                 # comment above) instead of being a kickstart variable.
+                # FusionAuth's PATCH validation rejects the request unless
+                # ``tenant.name`` is included alongside any other field;
+                # without it the kickstart runner errors out with
+                # ``[blank]tenant.name`` and aborts processing the rest of
+                # the file (no API key, no application, downstream API
+                # calls all 401). Default tenant's name is always
+                # "Default" — restating it satisfies validation without
+                # actually renaming.
                 {
                     "method": "PATCH",
                     "url": f"/api/tenant/{self.DEFAULT_TENANT_ID}",
                     "body": {
                         "tenant": {
+                            "name": "Default",
                             "issuer": issuer,
                         }
                     },
