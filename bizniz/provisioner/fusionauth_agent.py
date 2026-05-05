@@ -283,6 +283,18 @@ def provision_fusionauth(
             api_key=fusionauth_api_key,
             on_status=on_status,
         )
+
+        # FusionAuth reports /api/status healthy as soon as its HTTP
+        # server is up, which is BEFORE kickstart finishes creating
+        # the bootstrap apiKey. Stack-validation passes that early-
+        # health check, then materialize fires immediately and gets
+        # 401s because the apiKey doesn't exist yet. Wait for the key
+        # to actually authenticate before we start hitting endpoints.
+        if not orch_for_materialize.wait_until_authenticated(deadline_s=30.0):
+            _log(on_status,
+                 "FusionAuth agent: api key did not authenticate within 30s "
+                 "— kickstart may have failed; materialize will likely 401")
+
         report = orch_for_materialize.materialize(
             auth_spec, primary_app_id=application_id,
         )

@@ -972,12 +972,45 @@ class FusionAuthOrchestrator:
 
     def wait_until_ready(self, deadline_s: float = 60.0, poll_s: float = 2.0) -> bool:
         """Block until FusionAuth's status endpoint reports ready, or
-        the deadline expires. Returns True on ready, False on timeout."""
+        the deadline expires. Returns True on ready, False on timeout.
+
+        ``/api/status`` responds 200 as soon as the HTTP server is up,
+        which is BEFORE kickstart finishes creating the bootstrap
+        apiKey + application. Use ``wait_until_authenticated`` for the
+        stronger guarantee that the orchestrator's api_key actually
+        works."""
         end = time.monotonic() + deadline_s
         while time.monotonic() < end:
             try:
                 resp = requests.get(
                     f"{self.base_url}/api/status", timeout=5.0,
+                )
+                if resp.status_code == 200:
+                    return True
+            except requests.RequestException:
+                pass
+            time.sleep(poll_s)
+        return False
+
+    def wait_until_authenticated(
+        self,
+        deadline_s: float = 30.0,
+        poll_s: float = 1.5,
+    ) -> bool:
+        """Block until the orchestrator's api_key actually authenticates
+        against FusionAuth. Stronger than ``wait_until_ready`` — kickstart
+        processes apiKeys after the HTTP server is up, so /api/status
+        reports healthy before the key is actually usable. Polls a
+        known-good endpoint (``GET /api/application``) with the api_key
+        until it returns 200.
+        """
+        end = time.monotonic() + deadline_s
+        while time.monotonic() < end:
+            try:
+                resp = requests.get(
+                    f"{self.base_url}/api/application",
+                    headers={"Authorization": self.api_key},
+                    timeout=5.0,
                 )
                 if resp.status_code == 200:
                     return True
