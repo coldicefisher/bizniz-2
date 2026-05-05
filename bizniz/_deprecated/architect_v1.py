@@ -1,0 +1,2581 @@
+"""
+Architect
+
+Takes a problem statement and project name, decomposes the system into
+containerized services, creates the project directory structure, generates
+Dockerfiles and docker-compose.yml, builds Docker images, and dispatches
+Engineer instances for application services.
+
+Project structure:
+    project_root/
+    ├── .bizniz/project.db
+    ├── backend/                  (service source code)
+    │   ├── src/...
+    │   └── tests/...
+    ├── frontend/                 (service source code)
+    │   ├── src/...
+    │   └── tests/...
+    └── infra/
+        └── development/
+            ├── docker-compose.yml
+            ├── .env
+            ├── backend/          (Dockerfile, requirements)
+            └── frontend/         (Dockerfile)
+"""
+
+import concurrent.futures
+import datetime
+import json
+import threading
+import time
+from pathlib import Path
+from typing import Dict, Optional, Callable, List, TYPE_CHECKING
+
+from bizniz.base_ai_agent import BaseAIAgent
+from bizniz.clients.base_ai_client import BaseAIClient
+from bizniz.clients.chatgpt.messages import Message
+from bizniz.clients.chatgpt.types.response_format import ResponseFormat
+from bizniz.clients.errors import AIInsufficientFunds
+from bizniz.environment.base_environment import BaseExecutionEnvironment
+from bizniz.workspace.base_workspace import BaseWorkspace
+from bizniz.workspace.naming import slugify
+
+from bizniz.architect.types import (
+    ServiceDefinition,
+    SystemArchitecture,
+    ServiceResult,
+    ArchitectResult,
+    ArchitectBadAIResponseError,
+)
+from bizniz.architect.prompts.system_prompt import ARCHITECT_SYSTEM_PROMPT
+from bizniz.architect.prompts.decompose_prompt import DECOMPOSE_PROMPT_TEMPLATE
+from bizniz.architect.prompts.schema import ArchitectSchema
+
+if TYPE_CHECKING:
+    from bizniz.provisioner import Provisioner
+
+
+# Service types that are application code (need workspaces + engineers)
+_APPLICATION_TYPES = {"backend", "frontend", "worker"}
+
+# Service types that are infrastructure (use standard images, no workspace)
+_INFRASTRUCTURE_TYPES = {"database", "cache", "proxy", "auth"}
+
+
+class Architect(BaseAIAgent):
+    """
+    System architect agent.
+
+    decompose(problem_statement, project_name) → SystemArchitecture
+        AI decomposes the problem into services/containers.
+
+    build(problem_statement, project_name) → ArchitectResult
+        Full pipeline: decompose → create project structure → generate Docker
+        configs → build images → dispatch engineers for each application service.
+
+    Parameters
+    ----------
+    engineer_factory:
+        Callable(workspace, on_status_message, image_name) → Engineer context manager.
+    project_parent:
+        Parent directory where the project root is created.
+    """
+
+    def __init__(
+        self,
+        client: BaseAIClient,
+        environment: BaseExecutionEnvironment,
+        workspace: BaseWorkspace,
+        engineer_factory: Callable,
+        project_parent: Optional[str] = None,
+        max_retries: Optional[int] = 3,
+        on_event: Optional[Callable] = None,
+        on_status_message: Optional[Callable[[str], None]] = None,
+        provisioner: Optional["Provisioner"] = None,
+        http_api_tester_factory: Optional[Callable] = None,
+        integration_debugger_factory: Optional[Callable] = None,
+        web_ui_tester_factory: Optional[Callable] = None,
+        ux_designer_factory: Optional[Callable] = None,
+        integration_debugger_escalation_tiers: Optional[list] = None,
+    ):
+        super().__init__(
+            client=client,
+            environment=environment,
+            workspace=workspace,
+            max_retries=max_retries,
+            on_event=on_event,
+            on_status_message=on_status_message,
+        )
+        self._engineer_factory = engineer_factory
+        self._project_parent = project_parent
+        self._provisioner = provisioner  # constructed lazily in build() if None
+        self._http_api_tester_factory = http_api_tester_factory  # None → integration phase skipped
+        self._integration_debugger_factory = integration_debugger_factory  # None → no auto-repair on integration failure
+        self._web_ui_tester_factory = web_ui_tester_factory  # None → no Playwright UI tests
+        self._ux_designer_factory = ux_designer_factory  # None → no UX review phase
+        # Escalation tiers — list of DebuggerTier from config. Used
+        # by _run_layer_gate to construct a per-tier
+        # DebuggerTierSpec list. Falls back to single-tier (legacy)
+        # when None or empty.
+        self._integration_debugger_escalation_tiers = integration_debugger_escalation_tiers or []
+
+    @property
+    def _process_system_prompt(self) -> str:
+        return ARCHITECT_SYSTEM_PROMPT
+
+    # ── Public API ─────────────────────────────────────────────────────────────
+
+    def _models_snapshot(self) -> dict:
+        """Best-effort snapshot of the model configuration for the run report.
+
+        Reads from BiznizConfig if it loads cleanly; otherwise returns
+        whatever we can pull off the architect's own AI client.
+        """
+        snap: dict = {}
+        try:
+            from bizniz.config.bizniz_config import BiznizConfig
+            cfg = BiznizConfig.find_and_load()
+            for key in (
+                "architect_model", "engineer_model",
+                "coder_model", "tester_model", "debugger_model",
+                "agentic_debugger_model", "planner_model",
+            ):
+                v = getattr(cfg, key, None)
+                if v:
+                    snap[key] = v
+        except Exception:
+            pass
+        if not snap:
+            try:
+                snap["architect_client_model"] = getattr(
+                    self._client, "_model", None,
+                ) or getattr(self._client.ai_agent, "_model", None)
+            except Exception:
+                pass
+        return {k: v for k, v in snap.items() if v is not None}
+
+    def decompose(
+        self, problem_statement: str, project_name: str,
+    ) -> SystemArchitecture:
+        """Decompose a problem statement into a service-based architecture."""
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        project_slug = slugify(project_name)
+
+        log(f"Architect: decomposing '{project_name}' into services...")
+        user_prompt = DECOMPOSE_PROMPT_TEMPLATE.format(
+            problem_statement=problem_statement,
+            project_name=project_name,
+            project_slug=project_slug,
+        )
+
+        raw = self._call_ai_for_decomposition(user_prompt)
+
+        services = [
+            ServiceDefinition(**svc)
+            for svc in raw.get("services", [])
+        ]
+
+        architecture = SystemArchitecture(
+            project_name=raw["project_name"],
+            project_slug=raw["project_slug"],
+            services=services,
+            docker_compose=raw.get("docker_compose"),  # optional preview
+            description=raw["description"],
+        )
+
+        # Fresh decompose: every service is "new" by definition.
+        for svc in architecture.services:
+            svc.evolve_state = "new"
+
+        log(
+            f"Architect: architecture designed — "
+            f"{len(architecture.services)} services: "
+            f"{', '.join(s.name for s in architecture.services)}"
+        )
+        return architecture
+
+    def evolve(
+        self,
+        milestone,
+        existing_architecture: SystemArchitecture,
+        problem_statement: str,
+        project_name: str,
+        project_root: Optional[Path] = None,
+    ) -> SystemArchitecture:
+        """
+        Re-decompose a project for one milestone, preserving services that
+        already exist.
+
+        Parameters
+        ----------
+        milestone:
+            The Milestone to deliver. Provides ``problem_slice``,
+            ``use_cases``, ``success_criteria``, ``estimated_effort``.
+        existing_architecture:
+            The architecture as of before this milestone (services from
+            prior milestones plus any infra). All of its services will
+            appear in the returned architecture, tagged ``unchanged`` or
+            ``extended``.
+        problem_statement:
+            The full project's problem statement (the milestone's slice
+            references it).
+        project_name:
+            Human-readable project name.
+
+        Returns
+        -------
+        ``SystemArchitecture`` whose ``services`` list is a superset of
+        ``existing_architecture.services``: every existing service kept,
+        plus any new services the milestone adds. Each service has
+        ``evolve_state`` set.
+        """
+        from bizniz.architect.prompts.evolve_prompt import build_evolve_prompt
+        from bizniz.architect.prompts.evolve_schema import EvolveArchitectSchema
+
+        def log(msg: str) -> None:
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        project_slug = slugify(project_name)
+
+        existing_services_block = self._format_existing_services(existing_architecture)
+        use_cases_block = "\n".join(
+            f"    - {uc}" for uc in (milestone.use_cases or [])
+        ) or "    (none specified)"
+        success_block = "\n".join(
+            f"    - {sc}" for sc in (milestone.success_criteria or [])
+        ) or "    (none specified)"
+
+        # Read what's actually been built and documented on disk so
+        # the architect sees concrete extension points (existing
+        # routes, schemas, store members) instead of having to
+        # imagine them. Empty string when this is M1 (no docs yet)
+        # or no project_root provided.
+        workspace_state_block = ""
+        if project_root is not None:
+            try:
+                from bizniz.architect.workspace_reader import (
+                    format_existing_workspace_state,
+                )
+                workspace_state_block = format_existing_workspace_state(project_root)
+            except Exception as e:
+                log(f"Architect: workspace state read failed ({type(e).__name__}: {e})")
+
+        log(
+            f"Architect: evolving '{project_name}' for milestone "
+            f"'{milestone.name}'..."
+        )
+
+        user_prompt = build_evolve_prompt(
+            project_name=project_name,
+            project_slug=project_slug,
+            problem_statement=problem_statement,
+            existing_services=existing_services_block,
+            milestone_name=milestone.name,
+            milestone_effort=milestone.estimated_effort or "",
+            milestone_problem_slice=milestone.problem_slice,
+            use_cases_block=use_cases_block,
+            success_criteria_block=success_block,
+            workspace_state_block=workspace_state_block,
+        )
+
+        raw = self._call_ai_for_evolve(user_prompt, EvolveArchitectSchema)
+
+        existing_by_name = {s.name: s for s in existing_architecture.services}
+        services: List[ServiceDefinition] = []
+        for svc_raw in raw.get("services", []):
+            state = svc_raw.get("evolve_state") or "unchanged"
+            name = svc_raw["name"]
+            # Preserve identity of existing services. The AI is told to
+            # echo them back unchanged or extended; trust ID-bearing
+            # fields from the existing architecture rather than
+            # whatever the AI returns.
+            if name in existing_by_name:
+                prior = existing_by_name[name]
+                # Keep the prior service's image_name (set after the
+                # original build); allow new requirements/depends_on
+                # to merge in via "extended".
+                merged = ServiceDefinition(
+                    name=name,
+                    service_type=prior.service_type,
+                    framework=prior.framework,
+                    language=prior.language,
+                    description=svc_raw.get("description") or prior.description,
+                    workspace_name=prior.workspace_name,
+                    port=prior.port,
+                    depends_on=list(svc_raw.get("depends_on") or prior.depends_on),
+                    requirements=list(
+                        dict.fromkeys(
+                            list(prior.requirements or [])
+                            + list(svc_raw.get("requirements") or [])
+                        )
+                    ),
+                    skeleton=prior.skeleton,
+                    image_name=prior.image_name,
+                    evolve_state=state if state in ("extended", "unchanged") else "unchanged",
+                )
+                services.append(merged)
+            else:
+                # Brand-new service.
+                fresh = ServiceDefinition(
+                    name=name,
+                    service_type=svc_raw["service_type"],
+                    framework=svc_raw["framework"],
+                    language=svc_raw["language"],
+                    description=svc_raw["description"],
+                    workspace_name=svc_raw["workspace_name"],
+                    port=svc_raw.get("port"),
+                    depends_on=list(svc_raw.get("depends_on") or []),
+                    requirements=list(svc_raw.get("requirements") or []),
+                    skeleton=svc_raw.get("skeleton") or "none",
+                    evolve_state="new",
+                )
+                services.append(fresh)
+
+        # If the AI dropped a previously-existing service (it shouldn't,
+        # but defend anyway), put it back as "unchanged".
+        returned_names = {s.name for s in services}
+        for prior in existing_architecture.services:
+            if prior.name not in returned_names:
+                clone = prior.copy(deep=True) if hasattr(prior, "copy") else prior
+                clone.evolve_state = "unchanged"
+                services.append(clone)
+                log(
+                    f"Architect: evolve dropped service '{prior.name}' — "
+                    f"restoring as unchanged"
+                )
+
+        evolved = SystemArchitecture(
+            project_name=raw.get("project_name") or project_name,
+            project_slug=raw.get("project_slug") or project_slug,
+            services=services,
+            docker_compose=None,
+            description=raw.get("description") or existing_architecture.description,
+        )
+
+        new_count = sum(1 for s in evolved.services if s.evolve_state == "new")
+        ext_count = sum(1 for s in evolved.services if s.evolve_state == "extended")
+        log(
+            f"Architect: milestone '{milestone.name}' → "
+            f"{new_count} new + {ext_count} extended service(s) "
+            f"(total {len(evolved.services)})"
+        )
+        return evolved
+
+    @staticmethod
+    def _format_existing_services(arch: SystemArchitecture) -> str:
+        if not arch.services:
+            return "  (none — fresh project)"
+        lines = []
+        for s in arch.services:
+            depends = ", ".join(s.depends_on) if s.depends_on else "(none)"
+            lines.append(
+                f"  - {s.name}: type={s.service_type}, framework={s.framework}, "
+                f"language={s.language}, port={s.port}, "
+                f"skeleton={s.skeleton}, depends_on=[{depends}]"
+            )
+        return "\n".join(lines)
+
+    def _call_ai_for_evolve(self, user_prompt: str, schema: dict) -> dict:
+        """Single AI call for evolve(). Mirrors _call_ai_for_decomposition."""
+        attempts = self.max_retries
+        last_error = None
+
+        def log(msg: str) -> None:
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        self.clear_message_history()
+        self.add_messages_to_history([Message(role="user", content=user_prompt)])
+
+        for attempt in range(1, attempts + 1):
+            try:
+                log(f"Architect: evolve AI call (attempt {attempt}/{attempts})...")
+                t0 = time.time()
+                text, _, output_messages = self._client.get_text(
+                    messages=self.message_history,
+                    response_format=ResponseFormat.JSON_SCHEMA,
+                    schema=schema,
+                )
+                elapsed = time.time() - t0
+                log(f"Architect: evolve AI responded in {elapsed:.1f}s ({len(text or '')} chars)")
+                self.add_messages_to_history(output_messages)
+                if not text or not text.strip():
+                    last_error = "Empty response from AI"
+                    continue
+                text = self.clean_llm_json(text)
+                return json.loads(text)
+            except AIInsufficientFunds:
+                raise
+            except Exception as e:
+                last_error = e
+                log(f"Architect: evolve attempt {attempt} failed — {type(e).__name__}: {e}")
+                continue
+
+        raise ArchitectBadAIResponseError(
+            f"AI failed to produce an evolved architecture after {attempts} attempts. "
+            f"Last error: {last_error}"
+        )
+
+    # ── Director loop: Planner → Architect.evolve → Provisioner.evolve ─────
+
+    def build_with_plan(
+        self,
+        problem_statement: str,
+        project_name: str,
+        planner=None,
+        plan=None,
+        parallel: bool = False,
+        max_workers: int = 4,
+        layered: bool = True,
+        continue_on_failure: bool = False,
+    ):
+        """
+        End-to-end milestone-driven build.
+
+        Flow per project:
+          1. Planner.plan(problem) → ProjectPlan with N milestones
+          2. For each milestone in sequence_index order:
+              a. Mark milestone in_progress
+              b. tracker.set_milestone(milestone.db_id)
+              c. Architect.evolve(milestone, current_architecture)
+              d. Provisioner.evolve(evolved_architecture)
+              e. Engineer dispatch on services flagged NEW or EXTENDED
+              f. Mark milestone completed (or failed → stop, unless
+                 continue_on_failure=True)
+          3. Finalize job with rolled-up cost
+
+        Parameters
+        ----------
+        planner:
+            Optional pre-built Planner. If None, one is constructed from
+            ``self._client`` (or a fresh client at the planner tier when
+            available via the provisioner's parent).
+        plan:
+            Optional pre-computed ``ProjectPlan``. Skips the planner call.
+        parallel / max_workers / layered:
+            Forwarded to the engineer dispatch call (only relevant for
+            services within a single milestone).
+        continue_on_failure:
+            If True, a failed milestone is marked failed but the next
+            milestone still runs. Default False (stop at first failure).
+
+        Returns
+        -------
+        A list of ``ArchitectResult``-like records, one per milestone.
+        """
+        from bizniz.architect.types import ArchitectResult
+        from bizniz.cost import get_tracker
+        from bizniz.planner import Planner
+        from bizniz.project.project import Project
+        from bizniz.provisioner import Provisioner
+        from bizniz.workspace.local_workspace import LocalWorkspace
+        from bizniz.sidecars import ensure_sidecars_built, SidecarPreflightError
+
+        def log(msg: str) -> None:
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        # Sidecar preflight gate. The pipeline depends on documenter,
+        # validator, and test-runner images. If any are missing,
+        # build them upfront — never start AI/provisioner work
+        # against an incomplete infra. Raise propagates up; the
+        # caller surfaces it as a milestone failure.
+        try:
+            ensure_sidecars_built(on_status=self._on_status_message)
+        except SidecarPreflightError as e:
+            log(f"Architect: sidecar preflight FAILED — aborting build_with_plan: {e}")
+            raise
+
+        tracker = get_tracker()
+        provisional_slug = slugify(project_name)
+        job_id = tracker.start_job(
+            project_slug=provisional_slug,
+            problem_statement=problem_statement,
+        )
+        log(f"Architect: build_with_plan opened cost job {job_id[:8]}…")
+        job_status = "succeeded"
+
+        provisioner = self._provisioner or Provisioner(
+            project_parent=(
+                Path(self._project_parent) if self._project_parent
+                else self._workspace.root.parent
+            ),
+            on_status_message=self._on_status_message,
+        )
+
+        # Pre-flight: project root exists so we can attach the project DB
+        # before the Planner runs (so plan + milestones land durably).
+        parent = Path(self._project_parent) if self._project_parent else self._workspace.root.parent
+        project = Project(root=parent / provisional_slug, project_name=project_name)
+        project.create_structure()
+        try:
+            tracker.attach_project_db(project.db)
+            project.db.start_job(
+                job_id=job_id,
+                project_slug=provisional_slug,
+                problem_statement=problem_statement,
+            )
+        except Exception as e:
+            log(f"Architect: cost tracker DB attach failed ({e})")
+
+        results = []
+        try:
+            # Step 1: Plan (or use pre-supplied plan)
+            if plan is None:
+                tracker.set_phase("planner.plan")
+                planner = planner or self._build_default_planner()
+                plan = planner.plan(
+                    problem_statement=problem_statement,
+                    project_name=project_name,
+                    project_db=project.db,
+                )
+                tracker.set_phase(None)
+            log(f"Architect: walking {len(plan.milestones)} milestone(s)")
+
+            # Walk milestones in sequence order (Planner ensures this is
+            # a valid topological order over depends_on_names)
+            current_architecture = SystemArchitecture(
+                project_name=project_name,
+                project_slug=provisional_slug,
+                services=[],
+                description="",
+            )
+
+            # Cumulative auth spec — accumulated across milestone deltas.
+            # Each milestone gets its delta applied before provisioner
+            # runs, so the auth state at provision time reflects every
+            # auth change that should have shipped by this milestone.
+            from bizniz.auth.spec import AuthSpec
+            current_auth_spec = AuthSpec.baseline()
+
+            for milestone in sorted(plan.milestones, key=lambda m: m.sequence_index):
+                m_label = f"#{milestone.sequence_index} '{milestone.name}'"
+                log(f"Architect: ── milestone {m_label} ──")
+
+                if milestone.db_id is not None:
+                    project.db.update_milestone_status(milestone.db_id, "in_progress")
+                    tracker.set_milestone(milestone.db_id)
+                tracker.set_phase("architect.evolve")
+
+                try:
+                    # Step 2a: evolve architecture for this milestone
+                    evolved_arch = self.evolve(
+                        milestone=milestone,
+                        existing_architecture=current_architecture,
+                        problem_statement=problem_statement,
+                        project_name=project_name,
+                        project_root=project.root,
+                    )
+                    new_count = sum(1 for s in evolved_arch.services if s.evolve_state == "new")
+                    ext_count = sum(1 for s in evolved_arch.services if s.evolve_state == "extended")
+
+                    # Step 2b: provision (idempotent)
+                    tracker.set_phase("provisioner.evolve")
+                    provision_result = provisioner.evolve(evolved_arch, project_name)
+
+                    # Step 2b.5: build + bring up the stack in one shot,
+                    # then capture image names from the running containers.
+                    # This replaces both the old image stamp and the
+                    # separate stack validation compose-up.
+                    tracker.set_phase("stack_validation")
+                    compose_path = str(project.dev_root / "docker-compose.yml")
+                    has_auth = any(
+                        s.service_type == "auth" for s in evolved_arch.services
+                    )
+
+                    image_map = _compose_up_and_capture_images(
+                        compose_path, on_status=self._on_status_message,
+                    )
+                    for s in evolved_arch.services:
+                        img = image_map.get(s.name)
+                        if img:
+                            s.image_name = img
+                    # Also stamp back onto provision result for downstream
+                    ps_by_name = {ps.name: ps for ps in provision_result.services}
+                    for name, img in image_map.items():
+                        ps = ps_by_name.get(name)
+                        if ps:
+                            ps.image_name = img
+
+                    stack_healthy = self._validate_and_repair_stack(
+                        architecture=evolved_arch,
+                        compose_path=compose_path,
+                        project_root=project.root,
+                        port_remap=provision_result.port_remap,
+                        keep_up=has_auth,  # don't tear down if FusionAuth needs setup
+                        skip_compose_up=True,  # already up from the build above
+                    )
+                    if not stack_healthy:
+                        log(f"Architect: milestone {m_label} — stack validation failed, skipping engineering")
+                        if not continue_on_failure:
+                            job_status = "failed"
+                            results.append(ArchitectResult(
+                                project_name=project_name,
+                                architecture=evolved_arch,
+                                service_results=[],
+                                project_root=str(project.root),
+                                success=False,
+                                abort_reason="stack_validation_failed",
+                            ))
+                            break
+                    tracker.set_phase(None)
+
+                    # Apply this milestone's AuthSpec delta to the cumulative
+                    # spec. The orchestrator materializes the cumulative spec
+                    # (not the delta) so a fresh kickstart can rebuild the
+                    # entire auth state from any milestone forward.
+                    if not milestone.auth_delta.is_empty():
+                        current_auth_spec = current_auth_spec.apply(milestone.auth_delta)
+                        log(
+                            f"Architect: auth spec evolved — "
+                            f"{len(current_auth_spec.roles)} role(s), "
+                            f"{len(current_auth_spec.applications)} app(s), "
+                            f"{len(current_auth_spec.test_users)} test user(s)"
+                            + (
+                                f", {len(current_auth_spec.deprecated_roles)} deprecated"
+                                if current_auth_spec.deprecated_roles else ""
+                            )
+                        )
+
+                    # Persist the cumulative spec to disk as the canonical
+                    # intent record. Sibling to docs/auth/contract.json
+                    # (intent vs verified-reality split). Engineer/coder
+                    # context loaders read this so they know the role
+                    # landscape, not just what FusionAuth confirmed exists.
+                    if current_auth_spec.enabled:
+                        spec_path = project.root / "docs" / "auth" / "spec.json"
+                        spec_path.parent.mkdir(parents=True, exist_ok=True)
+                        spec_path.write_text(
+                            current_auth_spec.model_dump_json(indent=2)
+                        )
+
+                    # Step 2b.6: configure FusionAuth (roles, test users, contract)
+                    # Stack is still up from validation — FusionAuth is reachable
+                    if has_auth and stack_healthy:
+                        tracker.set_phase("fusionauth_provision")
+                        try:
+                            from bizniz.provisioner.fusionauth_agent import provision_fusionauth
+                            # Read FusionAuth connection details from the .env
+                            env_path = project.dev_root / ".env"
+                            env_vars = {}
+                            if env_path.exists():
+                                for line in env_path.read_text().splitlines():
+                                    line = line.strip()
+                                    if line and not line.startswith("#") and "=" in line:
+                                        k, v = line.split("=", 1)
+                                        env_vars[k.strip()] = v.strip()
+
+                            fa_host_url = env_vars.get("FUSIONAUTH_HOST_URL", "http://localhost:9011")
+                            fa_api_key = env_vars.get("FUSIONAUTH_API_KEY", "")
+                            fa_app_id = env_vars.get("FUSIONAUTH_APPLICATION_ID", "")
+                            frontend_svc = next(
+                                (s for s in evolved_arch.services if s.service_type == "frontend"),
+                                None,
+                            )
+                            fe_port = frontend_svc.port if frontend_svc else 5173
+
+                            fa_result = provision_fusionauth(
+                                problem_statement=problem_statement,
+                                project_root=project.root,
+                                fusionauth_url=fa_host_url,
+                                fusionauth_api_key=fa_api_key,
+                                application_id=fa_app_id,
+                                frontend_port=fe_port,
+                                ai_client=self._client,
+                                on_status=self._on_status_message,
+                                auth_spec=current_auth_spec,
+                            )
+                            log(
+                                f"Architect: FusionAuth configured — "
+                                f"{len(fa_result['roles'])} role(s), "
+                                f"{len(fa_result['test_users'])} test user(s), "
+                                f"smoke={'PASS' if fa_result['smoke_passed'] else 'FAIL'}"
+                            )
+
+                            # HARD GATE: AuthContract must validate before
+                            # engineering. If it doesn't, dispatch the
+                            # FusionAuth debugger BEFORE the stack tears
+                            # down — auth being broken means everything
+                            # downstream is broken, so we'd rather fix it
+                            # here than chase symptoms through engineering
+                            # and integration tests.
+                            if not fa_result.get("validation_ok", True):
+                                from bizniz.auth.debugger import repair_fusionauth_state
+                                log(
+                                    f"Architect: FusionAuth validation FAILED — "
+                                    f"dispatching FA debugger before engineering"
+                                )
+                                tracker.set_phase("fusionauth_debug")
+                                final_validation = repair_fusionauth_state(
+                                    auth_spec=current_auth_spec,
+                                    auth_contract=fa_result["auth_contract"],
+                                    validation_result=fa_result["validation"],
+                                    orchestrator=fa_result["orchestrator"],
+                                    application_id=fa_app_id,
+                                    project_root=project.root,
+                                    compose_path=compose_path,
+                                    on_status=self._on_status_message,
+                                    max_iterations=3,
+                                )
+                                if final_validation.ok:
+                                    # Re-write contract now that it's valid
+                                    fa_result["auth_contract"].write_to(project.root)
+                                    log(
+                                        f"Architect: FA debugger SUCCEEDED — "
+                                        f"contract now valid "
+                                        f"({len(final_validation.checks)} checks pass)"
+                                    )
+                                else:
+                                    log(
+                                        f"Architect: FA debugger COULD NOT REPAIR — "
+                                        f"{len(final_validation.failed_checks)} "
+                                        f"check(s) still failing. ABORTING milestone "
+                                        f"before engineering — auth must be valid "
+                                        f"before code generation."
+                                    )
+                                    tracker.set_phase(None)
+                                    if not continue_on_failure:
+                                        job_status = "failed"
+                                        results.append(ArchitectResult(
+                                            project_name=project_name,
+                                            architecture=evolved_arch,
+                                            service_results=[],
+                                            project_root=str(project.root),
+                                            success=False,
+                                            abort_reason="fusionauth_validation_failed",
+                                        ))
+                                        # Tear down stack since we're bailing
+                                        from bizniz.provisioner.stack_validator import teardown_stack
+                                        teardown_stack(compose_path, self._on_status_message)
+                                        break
+                                tracker.set_phase(None)
+                        except Exception as e:
+                            log(f"Architect: FusionAuth provisioning raised ({e}) — aborting milestone")
+                            if not continue_on_failure:
+                                job_status = "failed"
+                                results.append(ArchitectResult(
+                                    project_name=project_name,
+                                    architecture=evolved_arch,
+                                    service_results=[],
+                                    project_root=str(project.root),
+                                    success=False,
+                                    abort_reason=f"fusionauth_provision_exception: {type(e).__name__}",
+                                ))
+                                break
+                        tracker.set_phase(None)
+
+                    # Tear down stack after FusionAuth setup (or after validation
+                    # if no auth service). Clean state for engineering.
+                    if has_auth and stack_healthy:
+                        from bizniz.provisioner.stack_validator import teardown_stack
+                        teardown_stack(compose_path, self._on_status_message)
+
+                    # Step 2c: engineer dispatch on changed services only
+                    changed_services = [
+                        s for s in evolved_arch.services
+                        if s.evolve_state in ("new", "extended")
+                        and s.service_type in {"backend", "frontend", "worker"}
+                    ]
+                    if not changed_services:
+                        log(f"Architect: milestone {m_label} added no app services — skipping engineer dispatch")
+                        m_results = []
+                    else:
+                        log(
+                            f"Architect: dispatching engineers for "
+                            f"{len(changed_services)} changed service(s): "
+                            f"{', '.join(s.name for s in changed_services)}"
+                        )
+                        m_results = self._dispatch_engineers_for_milestone(
+                            milestone=milestone,
+                            changed_services=changed_services,
+                            architecture=evolved_arch,
+                            problem_statement=problem_statement,
+                            project=project,
+                            parallel=parallel,
+                            max_workers=max_workers,
+                            layered=layered,
+                        )
+
+                    milestone_succeeded = all(
+                        getattr(r, "success", False) for r in m_results
+                    ) if m_results else True
+
+                    # Rebuild Docker images after engineering so the
+                    # containers reflect the final code + dependencies
+                    # (not the skeleton's initial state).
+                    if milestone_succeeded and m_results:
+                        tracker.set_phase("image_rebuild")
+                        compose_path = str(project.dev_root / "docker-compose.yml")
+                        app_svc_names = [
+                            s.name for s in changed_services
+                            if s.service_type in {"backend", "frontend", "worker"}
+                        ]
+                        if app_svc_names:
+                            log(f"Architect: rebuilding images for {', '.join(app_svc_names)}...")
+                            try:
+                                import subprocess
+                                subprocess.run(
+                                    ["docker", "compose", "-f", compose_path, "build"] + app_svc_names,
+                                    capture_output=True, text=True, timeout=300,
+                                )
+                            except Exception as e:
+                                log(f"Architect: image rebuild failed ({e}) — integration may use stale images")
+                        tracker.set_phase(None)
+
+                    # UX review phase: screenshot frontends, evaluate
+                    # design via vision AI, and dispatch code fixes.
+                    # Runs while stack is up, before integration tests.
+                    if (
+                        milestone_succeeded
+                        and m_results
+                        and self._ux_designer_factory is not None
+                    ):
+                        from bizniz.ux_designer import UXDesigner
+                        from bizniz.ux_designer.ux_designer import run_ux_review
+                        from bizniz.workspace.local_workspace import LocalWorkspace as _LW
+                        tracker.set_phase("ux_review")
+                        all_app_services = [
+                            s for s in evolved_arch.services
+                            if s.service_type in {"backend", "frontend", "worker"}
+                        ]
+                        all_workspaces = {
+                            s.name: _LW(root=str(project.root / s.workspace_name))
+                            for s in all_app_services
+                            if (project.root / s.workspace_name).is_dir()
+                        }
+                        try:
+                            milestone_problem = milestone.problem_slice or problem_statement
+                            log(f"Architect: milestone {m_label} — running UX review phase...")
+                            # Bring stack up for screenshots
+                            import subprocess as _sp
+                            _sp.run(
+                                ["docker", "compose", "-f", compose_path, "up", "-d"],
+                                capture_output=True, text=True, timeout=120,
+                            )
+                            from bizniz.integration.runner import _wait_http_ok
+                            for fe in [s for s in evolved_arch.services if s.service_type == "frontend" and s.port]:
+                                _wait_http_ok(f"http://localhost:{fe.port}/", deadline_s=60)
+
+                            ux_results = run_ux_review(
+                                architecture=evolved_arch,
+                                service_workspaces=all_workspaces,
+                                compose_path=compose_path,
+                                problem_statement=milestone_problem,
+                                milestone_scope=milestone.problem_slice or "",
+                                on_status=self._on_status_message,
+                                **self._ux_designer_factory(),
+                            )
+                            for ux_r in ux_results:
+                                log(
+                                    f"Architect: UX review '{ux_r['service']}' — "
+                                    f"score={ux_r.get('final_score')}/10, "
+                                    f"fixes={ux_r.get('fixes_applied', 0)}"
+                                )
+
+                            # If UX designer made changes, rebuild images
+                            if any(r.get("fixes_applied", 0) > 0 for r in ux_results):
+                                log("Architect: UX fixes applied — rebuilding frontend images...")
+                                fe_names = [s.name for s in evolved_arch.services if s.service_type == "frontend"]
+                                _sp.run(
+                                    ["docker", "compose", "-f", compose_path, "build"] + fe_names,
+                                    capture_output=True, text=True, timeout=300,
+                                )
+
+                            # Tear down stack (integration phase will bring it up again)
+                            _sp.run(
+                                ["docker", "compose", "-f", compose_path, "down"],
+                                capture_output=True, text=True, timeout=60,
+                            )
+                        except Exception as e:
+                            log(f"Architect: milestone {m_label} UX review raised ({e}) — continuing")
+                        tracker.set_phase(None)
+
+                    # Integration phase: run integration tests against the
+                    # live stack after engineering passes. Same logic as
+                    # build() — tests are the source of truth.
+                    if (
+                        milestone_succeeded
+                        and m_results
+                        and self._http_api_tester_factory is not None
+                    ):
+                        from bizniz.integration import run_integration_phase
+                        from bizniz.workspace.local_workspace import LocalWorkspace as _LW
+                        tracker.set_phase("integration")
+                        # Build workspace map for ALL app services (not just
+                        # changed ones) — integration tests verify the whole stack.
+                        all_app_services = [
+                            s for s in evolved_arch.services
+                            if s.service_type in {"backend", "frontend", "worker"}
+                        ]
+                        all_workspaces = {
+                            s.name: _LW(root=str(project.root / s.workspace_name))
+                            for s in all_app_services
+                            if (project.root / s.workspace_name).is_dir()
+                        }
+                        try:
+                            # Use the milestone's problem_slice so integration
+                            # tests only verify this milestone's scope, not the
+                            # full project. M1 tests auth, not M3's rent collection.
+                            milestone_problem = milestone.problem_slice or problem_statement
+                            log(f"Architect: milestone {m_label} — running integration phase...")
+                            # Build the same escalation chain used for the
+                            # backend layer gate so frontend integration
+                            # debugging gets full flash-lite → flash-top →
+                            # pro escalation instead of single-tier legacy.
+                            milestone_escalation = self._build_debugger_escalation_specs()
+                            if milestone_escalation:
+                                log(
+                                    "Architect: milestone integration — debugger escalation chain: "
+                                    + " → ".join(
+                                        f"{s.model_label}({s.repair_attempts}×{s.tool_iterations})"
+                                        for s in milestone_escalation
+                                    )
+                                )
+                            m_results = run_integration_phase(
+                                architecture=evolved_arch,
+                                service_results=list(m_results),
+                                project_root=project.root,
+                                problem_statement=milestone_problem,
+                                compose_path=compose_path,
+                                http_api_tester_factory=self._http_api_tester_factory,
+                                service_workspaces=all_workspaces,
+                                on_status=self._on_status_message,
+                                debugger_factory=self._integration_debugger_factory,
+                                web_ui_tester_factory=self._web_ui_tester_factory,
+                                debugger_escalation=milestone_escalation,
+                            )
+                            # Re-evaluate success after integration
+                            milestone_succeeded = all(
+                                getattr(r, "success", False) for r in m_results
+                            )
+                        except Exception as e:
+                            log(f"Architect: milestone {m_label} integration phase raised ({e}) — continuing")
+                        tracker.set_phase(None)
+
+                    if milestone_succeeded:
+                        if milestone.db_id is not None:
+                            project.db.update_milestone_status(milestone.db_id, "completed")
+                        log(f"Architect: milestone {m_label} ✓ completed (new={new_count}, extended={ext_count})")
+                    else:
+                        log(f"Architect: milestone {m_label} ✗ failed (some services didn't pass)")
+                        try:
+                            project.db.log_build_event(
+                                "_milestone_", "image_build", False,
+                                f"Milestone {milestone.name} failed",
+                            )
+                        except Exception:
+                            pass
+                        if not continue_on_failure:
+                            job_status = "failed"
+                            results.append(ArchitectResult(
+                                project_name=project_name,
+                                architecture=evolved_arch,
+                                service_results=list(m_results),
+                                project_root=str(project.root),
+                                success=False,
+                                abort_reason="engineering_failed",
+                            ))
+                            break
+
+                    # Update current_architecture so the next milestone's
+                    # evolve sees what's there now.
+                    current_architecture = evolved_arch
+
+                    milestone_all_pass = (
+                        bool(m_results)
+                        and all(getattr(r, "success", False) for r in m_results)
+                    )
+                    results.append(ArchitectResult(
+                        project_name=project_name,
+                        architecture=evolved_arch,
+                        service_results=list(m_results),
+                        project_root=str(project.root),
+                        success=milestone_all_pass,
+                    ))
+
+                except AIInsufficientFunds:
+                    raise
+                except Exception as e:
+                    log(f"Architect: milestone {m_label} crashed: {type(e).__name__}: {e}")
+                    job_status = "failed"
+                    if not continue_on_failure:
+                        raise
+                finally:
+                    tracker.set_milestone(None)
+                    tracker.set_phase(None)
+
+            # Persist final-state architecture docs
+            _save_architecture_docs(project.root, current_architecture)
+            return results
+
+        finally:
+            try:
+                tracker.finish_job(status=job_status)
+                summary = tracker.summary()
+                log(
+                    f"Architect: build_with_plan {job_status} — "
+                    f"calls={summary.calls} cost=${summary.total_cost:.4f}"
+                )
+            except Exception as e:
+                log(f"Architect: cost job finish failed ({e})")
+
+    def _build_default_planner(self):
+        """Construct a Planner using the architect's own client. Used as
+        a fallback when build_with_plan() is called without one."""
+        from bizniz.planner import Planner
+        return Planner(
+            client=self._client,
+            environment=self._environment,
+            workspace=self._workspace,
+            on_status_message=self._on_status_message,
+        )
+
+    def _dispatch_engineers_for_milestone(
+        self,
+        milestone,
+        changed_services,
+        architecture: SystemArchitecture,
+        problem_statement: str,
+        project,
+        parallel: bool,
+        max_workers: int,
+        layered: bool,
+    ):
+        """Same as the layered/parallel dispatch in ``build()``, but
+        scoped to ``changed_services`` (only NEW or EXTENDED services
+        for the current milestone). Engineers analyze using the
+        milestone's ``problem_slice`` so issue lists stay milestone-scoped.
+        """
+        log = self._on_status_message or (lambda _msg: None)
+
+        from bizniz.workspace.local_workspace import LocalWorkspace
+        service_workspaces = {
+            s.name: LocalWorkspace(root=str(project.root / s.workspace_name))
+            for s in changed_services
+        }
+
+        # The milestone's problem_slice replaces the project-wide problem
+        # statement for this engineer dispatch — keeps the issue list
+        # scoped to what this milestone delivers.
+        milestone_problem = milestone.problem_slice or problem_statement
+
+        layers = _sort_services_by_dependency(changed_services)
+        results = []
+        compose_path = str(project.dev_root / "docker-compose.yml")
+        for layer_idx, layer in enumerate(layers):
+            if parallel and len(layer) > 1:
+                layer_results = self._dispatch_engineers_parallel(
+                    layer, service_workspaces, milestone_problem,
+                    architecture, project, max_workers, layered,
+                )
+            else:
+                layer_results = self._dispatch_engineers_sequential(
+                    layer, service_workspaces, milestone_problem,
+                    architecture, project, layered,
+                )
+            results.extend(layer_results)
+
+            # First check: did ANY service in this layer fail
+            # engineering? If so, abort the milestone — don't
+            # dispatch later layers against a broken layer-1.
+            # (Originally "no passed backends → skip gate" silently
+            # progressed; now we hard-fail.)
+            layer_failed_services = [
+                s for s in layer
+                if not any(r.service_name == s.name and r.success for r in layer_results)
+            ]
+            if layer_failed_services:
+                log(
+                    f"Architect: layer {layer_idx + 1} had "
+                    f"{len(layer_failed_services)} engineering failure(s) "
+                    f"({', '.join(s.name for s in layer_failed_services)}) "
+                    f"— aborting milestone before dispatching subsequent layers"
+                )
+                for skipped_layer in layers[layer_idx + 1:]:
+                    for s in skipped_layer:
+                        results.append(ServiceResult(
+                            service_name=s.name,
+                            workspace_name=s.workspace_name,
+                            success=False,
+                            issues_total=0,
+                            issues_passed=0,
+                            error="layer_engineering_failed: prior layer had engineering failures",
+                        ))
+                break
+
+            # Between layers, capture backend contracts AND gate on
+            # backend integration tests passing before dispatching
+            # the next layer's engineers (typically frontends).
+            # Without this, frontend coders build against an
+            # unverified backend contract — every drift bug makes
+            # it all the way to the final integration phase before
+            # surfacing.
+            is_final_layer = layer_idx == len(layers) - 1
+            if is_final_layer:
+                continue
+
+            layer_passed_backends = [
+                s for s in layer
+                if s.service_type == "backend" and s.port and any(
+                    r.service_name == s.name and r.success
+                    for r in layer_results
+                )
+            ]
+            if not layer_passed_backends:
+                # No HTTP backends in this layer (e.g., all workers,
+                # or the layer is purely infrastructure-adjacent).
+                # Nothing to integration-test; let the next layer
+                # dispatch.
+                continue
+
+            # Capture contracts so the next layer's engineers see
+            # actual endpoint shapes (already in build() — mirror
+            # here for the milestone path).
+            try:
+                from bizniz.integration.contracts import capture_backend_contracts
+                captured = capture_backend_contracts(
+                    architecture=architecture,
+                    project_root=project.root,
+                    compose_path=compose_path,
+                    on_status=self._on_status_message,
+                    only_names=[s.name for s in layer_passed_backends],
+                )
+                if not hasattr(self, "_captured_contracts") or self._captured_contracts is None:
+                    self._captured_contracts = {}
+                self._captured_contracts.update(captured)
+                log(
+                    f"Architect: between-layer contract capture — "
+                    f"{len(captured)} backend contract(s) for next layer's engineers"
+                )
+            except Exception as e:
+                log(f"Architect: between-layer contract capture failed ({e})")
+
+            # Layer-transition gate: run integration tests for the
+            # backends just built. If any fail (including post-
+            # debugger failure), stop the milestone before the
+            # next layer wastes work building against a broken
+            # contract.
+            if self._http_api_tester_factory is None:
+                continue
+
+            gate_passed = self._run_layer_gate(
+                architecture=architecture,
+                layer_backends=layer_passed_backends,
+                service_workspaces=service_workspaces,
+                service_results_so_far=results,
+                compose_path=compose_path,
+                problem_statement=milestone_problem,
+            )
+            if not gate_passed:
+                log(
+                    f"Architect: LAYER GATE FAILED after layer "
+                    f"{layer_idx + 1} — backend integration tests "
+                    f"didn't pass. Aborting before next layer "
+                    f"dispatches to avoid building against a broken "
+                    f"contract."
+                )
+                # Mark every UNDISPATCHED service as failed so the
+                # caller knows what got skipped vs what actually ran.
+                for skipped_layer in layers[layer_idx + 1:]:
+                    for s in skipped_layer:
+                        results.append(ServiceResult(
+                            service_name=s.name,
+                            workspace_name=s.workspace_name,
+                            success=False,
+                            issues_total=0,
+                            issues_passed=0,
+                            error="layer_gate_failed: prior layer's backend integration tests didn't pass",
+                        ))
+                break
+
+        return results
+
+    def _build_debugger_escalation_specs(self):
+        """Build per-tier DebuggerTierSpec objects from the
+        ``integration_debugger_escalation_tiers`` config. Each spec
+        wraps the existing debugger factory with a ``model_override``
+        argument so each tier instantiates a debugger using its own
+        model.
+
+        Returns ``None`` when no tiers are configured (caller falls
+        back to single-tier legacy via debugger_factory + max_iterations).
+        """
+        if not self._integration_debugger_escalation_tiers:
+            return None
+        if self._integration_debugger_factory is None:
+            return None
+
+        from bizniz.integration.debug_loop import DebuggerTierSpec
+
+        specs = []
+        base_factory = self._integration_debugger_factory
+        for tier in self._integration_debugger_escalation_tiers:
+            def _tier_factory(workspace, _base=base_factory, _model=tier.model):
+                """Per-tier factory: takes ws, returns a debugger
+                bound to this tier's model. Falls back to the base
+                factory's pre-encoded model if it doesn't accept a
+                model_override kwarg (back-compat with old factories)."""
+                try:
+                    return _base(workspace, model_override=_model)
+                except TypeError:
+                    return _base(workspace)
+            specs.append(DebuggerTierSpec(
+                factory=_tier_factory,
+                model_label=tier.model,
+                tool_iterations=tier.tool_iterations,
+                repair_attempts=tier.repair_attempts,
+            ))
+        return specs
+
+    def _run_layer_gate(
+        self,
+        architecture: SystemArchitecture,
+        layer_backends: List[ServiceDefinition],
+        service_workspaces: Dict[str, "BaseWorkspace"],  # noqa: F821
+        service_results_so_far: list,
+        compose_path: str,
+        problem_statement: str,
+    ) -> bool:
+        """Run HTTP integration tests for the just-built backend
+        layer. Returns True if all backends pass, False otherwise.
+
+        Reuses run_integration_phase under the hood with a sliced
+        architecture (only the layer's backends) and
+        ``web_ui_tester_factory=None`` so frontend tests don't run.
+        ``keep_stack_up=True`` because the next layer's dispatch
+        doesn't actually use the running stack — leaving it up is
+        harmless and saves a teardown/up cycle if the gate passes.
+        """
+        log = self._on_status_message or (lambda _msg: None)
+        from bizniz.integration.runner import run_integration_phase
+
+        # Slim architecture: only the backends being gated. The
+        # integration runner iterates architecture.services, so
+        # filtering here means it only generates and runs tests
+        # for these.
+        gated_arch = SystemArchitecture(
+            project_name=architecture.project_name,
+            project_slug=architecture.project_slug,
+            services=list(layer_backends),
+            description=architecture.description,
+        )
+
+        log(
+            f"Architect: layer gate — running integration tests on "
+            f"{len(layer_backends)} backend(s) ({', '.join(s.name for s in layer_backends)})..."
+        )
+
+        # Build the debugger escalation chain: one DebuggerTierSpec
+        # per configured tier. Each tier reuses the existing
+        # debugger factory but overrides the model via the optional
+        # `model_override` kwarg. Soft-skips tiers whose factory
+        # doesn't accept that kwarg (back-compat with old factories).
+        debugger_escalation_specs = self._build_debugger_escalation_specs()
+        if debugger_escalation_specs:
+            log(
+                f"Architect: layer gate — debugger escalation chain: "
+                + " → ".join(
+                    f"{s.model_label}({s.repair_attempts}×{s.tool_iterations})"
+                    for s in debugger_escalation_specs
+                )
+            )
+
+        try:
+            gate_results = run_integration_phase(
+                architecture=gated_arch,
+                service_results=service_results_so_far,
+                project_root=Path(compose_path).parent.parent.parent,
+                problem_statement=problem_statement,
+                compose_path=compose_path,
+                http_api_tester_factory=self._http_api_tester_factory,
+                service_workspaces={s.name: service_workspaces[s.name] for s in layer_backends if s.name in service_workspaces},
+                on_status=self._on_status_message,
+                debugger_factory=self._integration_debugger_factory,
+                debugger_escalation=debugger_escalation_specs,
+                web_ui_tester_factory=None,
+                keep_stack_up=True,
+            )
+        except Exception as e:
+            log(f"Architect: layer gate raised ({type(e).__name__}: {e})")
+            return False
+
+        # Check that every gated backend passed.
+        backend_names = {s.name for s in layer_backends}
+        passed = all(
+            getattr(r, "success", False)
+            for r in gate_results
+            if r.service_name in backend_names
+        )
+        return passed
+
+    def build(
+        self, problem_statement: str, project_name: str,
+        parallel: bool = True, max_workers: int = 4,
+        layered: bool = True,
+        force_no_skeleton: bool = False,
+    ) -> ArchitectResult:
+        """
+        Full pipeline:
+          1. Decompose problem into services (this class)
+          2. Provision the project on disk (Provisioner: directory tree,
+             skeleton seeding / app templates, infra templates, compose,
+             .env, Docker images)
+          3. Dispatch Engineer for each application service (this class)
+
+        The architect plans; the Provisioner materializes; the engineer
+        codes. Architect.build() is the thin orchestration shell.
+
+        ``force_no_skeleton``: after decompose, override every app
+        service's ``skeleton`` to ``"none"`` so the Provisioner falls
+        back to the minimal generated boilerplate (Dockerfile +
+        requirements.txt / package.json) and the AI must build the rest
+        from scratch. Used for apples-to-apples cost experiments.
+        """
+        from bizniz.project.project import Project
+        from bizniz.provisioner import Provisioner
+        from bizniz.cost import get_tracker
+        from bizniz.workspace.naming import slugify
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        # Open a cost-tracker job up-front so the architect's own AI calls
+        # (decompose, plan-architecture during engineer.analyze, etc.) get
+        # tagged with a job_id even before the project DB exists. The DB is
+        # attached after the Provisioner creates the project; buffered
+        # records flush at that point.
+        tracker = get_tracker()
+        provisional_slug = slugify(project_name)
+        run_started_at = datetime.datetime.now(datetime.timezone.utc)
+        job_id = tracker.start_job(
+            project_slug=provisional_slug,
+            problem_statement=problem_statement,
+        )
+        tracker.set_phase("architect.decompose")
+        log(f"Architect: cost job {job_id[:8]}… opened for '{project_name}'")
+        job_status = "succeeded"
+
+        # Captured during the try-block so the finally-block report can
+        # still write something useful when an early step raises.
+        _captured_architecture = None
+        _captured_service_results: list = []
+        _captured_project_root: Optional[Path] = None
+        _captured_compose_path: Optional[str] = None
+
+        try:
+            # Step 1: Decompose
+            architecture = self.decompose(problem_statement, project_name)
+            _captured_architecture = architecture
+            tracker.set_phase(None)
+
+            if force_no_skeleton:
+                _APP_TYPES = {"backend", "frontend", "worker"}
+                wiped = []
+                for svc in architecture.services:
+                    if svc.service_type in _APP_TYPES and svc.skeleton and svc.skeleton != "none":
+                        wiped.append(f"{svc.name}({svc.skeleton})")
+                        svc.skeleton = "none"
+                if wiped:
+                    log(f"Architect: --no-skeleton — wiped skeletons on {', '.join(wiped)}")
+
+            # Step 2: Provisioner — turn the plan into a real project on disk +
+            # built Docker images.
+            provisioner = self._provisioner or Provisioner(
+                project_parent=(
+                    Path(self._project_parent) if self._project_parent
+                    else self._workspace.root.parent
+                ),
+                on_status_message=self._on_status_message,
+            )
+            provision_result = provisioner.provision(architecture, project_name)
+
+            project = Project(
+                root=Path(provision_result.project_root),
+                project_name=project_name,
+            )
+            _captured_project_root = Path(provision_result.project_root)
+
+            # Wire the project DB into the cost tracker. This flushes any
+            # records buffered before the project existed (architect's
+            # decompose call) and live-persists everything that follows.
+            try:
+                tracker.attach_project_db(project.db)
+                project.db.start_job(
+                    job_id=job_id,
+                    project_slug=architecture.project_slug,
+                    problem_statement=problem_statement,
+                )
+            except Exception as e:
+                log(f"Architect: cost tracker DB attach failed ({e}) — continuing in-memory only")
+
+            # Save human-readable architecture docs (provisioner already saved
+            # the architecture snapshot to project DB).
+            _save_architecture_docs(project.root, architecture)
+
+            # Build a workspace map for engineer dispatch from the provision result.
+            from bizniz.workspace.local_workspace import LocalWorkspace
+            service_workspaces = {}
+            for ps in provision_result.services:
+                if ps.is_infrastructure or ps.workspace_path is None:
+                    continue
+                service_workspaces[ps.name] = LocalWorkspace(root=ps.workspace_path)
+
+            # Stamp image_name back onto ServiceDefinitions so engineer dispatch
+            # can pass the right image to the test environment.
+            ps_by_name = {ps.name: ps for ps in provision_result.services}
+            for service in architecture.services:
+                ps = ps_by_name.get(service.name)
+                if ps and ps.image_name:
+                    service.image_name = ps.image_name
+
+            # Step 2.5: Validate the stack comes up healthy before engineering
+            compose_path = str(project.dev_root / "docker-compose.yml")
+            _captured_compose_path = compose_path
+            tracker.set_phase("stack_validation")
+            stack_healthy = self._validate_and_repair_stack(
+                architecture=architecture,
+                compose_path=compose_path,
+                project_root=project.root,
+                port_remap=provision_result.port_remap,
+            )
+            if not stack_healthy:
+                log("Architect: stack validation failed — continuing with engineering (may fail at integration)")
+            tracker.set_phase(None)
+
+            # Step 3: Dispatch engineers for application services (in dependency order)
+            app_services = [s for s in architecture.services if s.name in service_workspaces]
+            service_layers = _sort_services_by_dependency(app_services)
+            log(f"Architect: {len(app_services)} services in {len(service_layers)} dependency layer(s)")
+
+            self._captured_contracts: Dict[str, dict] = {}
+            service_results = []
+            for layer_idx, layer in enumerate(service_layers):
+                layer_names = [s.name for s in layer]
+                log(f"Architect: dispatching layer {layer_idx + 1} ({', '.join(layer_names)})...")
+                if parallel and len(layer) > 1:
+                    layer_results = self._dispatch_engineers_parallel(
+                        layer, service_workspaces, problem_statement, architecture, project, max_workers, layered,
+                    )
+                else:
+                    layer_results = self._dispatch_engineers_sequential(
+                        layer, service_workspaces, problem_statement, architecture, project, layered,
+                    )
+                service_results.extend(layer_results)
+                _captured_service_results = list(service_results)
+
+                # If this layer produced any HTTP backends that passed
+                # AND there's another layer coming, capture their
+                # OpenAPI specs so the next layer's engineers see
+                # actual endpoints, not guesses. Skipped on the last
+                # layer (the integration phase below captures all).
+                if layer_idx < len(service_layers) - 1:
+                    layer_passed_backends = [
+                        s.name for s in layer
+                        if s.service_type == "backend" and s.port and any(
+                            r.service_name == s.name and r.success
+                            for r in layer_results
+                        )
+                    ]
+                    if layer_passed_backends:
+                        from bizniz.integration.contracts import capture_backend_contracts
+                        compose_path_so_far = str(project.dev_root / "docker-compose.yml")
+                        log(
+                            f"Architect: capturing contracts from layer {layer_idx + 1} "
+                            f"backends ({', '.join(layer_passed_backends)}) for downstream layers..."
+                        )
+                        try:
+                            captured = capture_backend_contracts(
+                                architecture=architecture,
+                                project_root=project.root,
+                                compose_path=compose_path_so_far,
+                                on_status=self._on_status_message,
+                                only_names=layer_passed_backends,
+                            )
+                            self._captured_contracts.update(captured)
+                        except Exception as e:
+                            log(f"Architect: between-layer contract capture failed ({e}) — continuing without contracts")
+
+            compose_path = str(project.dev_root / "docker-compose.yml")
+            _captured_compose_path = compose_path
+
+            # Rebuild images after engineering so containers have the
+            # final code + dependencies (not the skeleton's initial state).
+            if service_results and any(getattr(r, "success", False) for r in service_results):
+                tracker.set_phase("image_rebuild")
+                rebuild_names = [
+                    s.name for s in app_services
+                    if any(r.service_name == s.name and r.success for r in service_results)
+                ]
+                if rebuild_names:
+                    log(f"Architect: rebuilding images for {', '.join(rebuild_names)}...")
+                    try:
+                        import subprocess as _sp
+                        _sp.run(
+                            ["docker", "compose", "-f", compose_path, "build"] + rebuild_names,
+                            capture_output=True, text=True, timeout=300,
+                        )
+                    except Exception as e:
+                        log(f"Architect: image rebuild failed ({e}) — integration may use stale images")
+                tracker.set_phase(None)
+
+            # UX review phase: screenshot frontends, evaluate design
+            # via vision AI, dispatch code fixes. Runs after image
+            # rebuild and before integration tests.
+            if (
+                self._ux_designer_factory is not None
+                and service_results
+                and any(getattr(r, "success", False) for r in service_results)
+            ):
+                from bizniz.ux_designer.ux_designer import run_ux_review
+                tracker.set_phase("ux_review")
+                try:
+                    log("Architect: running UX review phase...")
+                    import subprocess as _sp2
+                    _sp2.run(
+                        ["docker", "compose", "-f", compose_path, "up", "-d"],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    from bizniz.integration.runner import _wait_http_ok
+                    for fe in [s for s in architecture.services if s.service_type == "frontend" and s.port]:
+                        _wait_http_ok(f"http://localhost:{fe.port}/", deadline_s=60)
+
+                    ux_results = run_ux_review(
+                        architecture=architecture,
+                        service_workspaces=service_workspaces,
+                        compose_path=compose_path,
+                        problem_statement=problem_statement,
+                        on_status=self._on_status_message,
+                        **self._ux_designer_factory(),
+                    )
+                    for ux_r in ux_results:
+                        log(
+                            f"Architect: UX review '{ux_r['service']}' — "
+                            f"score={ux_r.get('final_score')}/10, "
+                            f"fixes={ux_r.get('fixes_applied', 0)}"
+                        )
+                    if any(r.get("fixes_applied", 0) > 0 for r in ux_results):
+                        log("Architect: UX fixes applied — rebuilding frontend images...")
+                        fe_names = [s.name for s in architecture.services if s.service_type == "frontend"]
+                        _sp2.run(
+                            ["docker", "compose", "-f", compose_path, "build"] + fe_names,
+                            capture_output=True, text=True, timeout=300,
+                        )
+                    _sp2.run(
+                        ["docker", "compose", "-f", compose_path, "down"],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                except Exception as e:
+                    log(f"Architect: UX review phase raised ({e}) — continuing")
+                tracker.set_phase(None)
+
+            # Post-build integration phase: bring the stack up, capture
+            # backend contracts, dispatch HTTPApiTester for each
+            # backend to author + run real integration tests, fail any
+            # service whose tests don't pass. Replaces the framework-
+            # coupled smoke_verification with a generative tester that
+            # works across any HTTP backend skeleton. Skipped if no
+            # services passed engineering OR no tester factory was
+            # provided.
+            if (
+                self._http_api_tester_factory is not None
+                and service_results
+                and any(getattr(r, "success", False) for r in service_results)
+            ):
+                from bizniz.integration import run_integration_phase
+                tracker.set_phase("integration")
+                try:
+                    service_results = run_integration_phase(
+                        architecture=architecture,
+                        service_results=service_results,
+                        project_root=project.root,
+                        problem_statement=problem_statement,
+                        compose_path=compose_path,
+                        http_api_tester_factory=self._http_api_tester_factory,
+                        service_workspaces=service_workspaces,
+                        on_status=self._on_status_message,
+                        debugger_factory=self._integration_debugger_factory,
+                        web_ui_tester_factory=self._web_ui_tester_factory,
+                    )
+                    _captured_service_results = list(service_results)
+                except Exception as e:
+                    log(f"Architect: integration phase raised ({e}) — continuing without it")
+                tracker.set_phase(None)
+
+            # Determine job status from service results
+            if service_results and not all(getattr(r, "success", False) for r in service_results):
+                job_status = "failed"
+            return ArchitectResult(
+                project_name=project_name,
+                architecture=architecture,
+                service_results=service_results,
+                docker_compose_path=compose_path,
+                project_root=str(project.root),
+            )
+        except Exception:
+            job_status = "failed"
+            raise
+        finally:
+            tracker.set_service(None)
+            tracker.set_issue(None)
+            tracker.set_phase(None)
+            try:
+                tracker.finish_job(status=job_status)
+                summary = tracker.summary()
+                log(
+                    f"Architect: cost job {job_id[:8]}… {job_status} — "
+                    f"calls={summary.calls} cost=${summary.total_cost:.4f}"
+                )
+            except Exception as e:
+                log(f"Architect: cost job finish failed ({e})")
+                summary = None
+
+            # Per-run efficiency doc — best-effort. Skip when there's no
+            # project root (provisioner step never ran). Failures here
+            # never crash the build.
+            if _captured_project_root is not None:
+                try:
+                    from bizniz.run_report import write_run_report
+                    md_path = write_run_report(
+                        project_name=project_name,
+                        project_slug=(
+                            _captured_architecture.project_slug
+                            if _captured_architecture else provisional_slug
+                        ),
+                        project_root=_captured_project_root,
+                        job_id=job_id,
+                        started_at=run_started_at,
+                        finished_at=datetime.datetime.now(datetime.timezone.utc),
+                        status=job_status,
+                        architecture=_captured_architecture,
+                        service_results=_captured_service_results,
+                        cost_summary=summary if summary is not None else tracker.summary(),
+                        models=self._models_snapshot(),
+                        docker_compose_path=_captured_compose_path,
+                    )
+                    log(f"Architect: run report written to {md_path}")
+                except Exception as e:
+                    log(f"Architect: run report write failed ({e}) — continuing")
+
+    # ── Stack validation ────────────────────────────────────────────────────────
+
+    def _validate_and_repair_stack(
+        self,
+        architecture: SystemArchitecture,
+        compose_path: str,
+        project_root: Path,
+        port_remap: Optional[Dict] = None,
+        max_repair_iterations: int = 3,
+        keep_up: bool = False,
+        skip_compose_up: bool = False,
+    ) -> bool:
+        """Bring the stack up, health-check, and auto-repair on failure.
+
+        Returns True if the stack is healthy (possibly after repairs).
+        If unhealthy after all iterations, logs the failure and returns False
+        — the caller can decide whether to abort or continue.
+
+        skip_compose_up: if True, assume stack is already running (caller
+        did ``docker compose up --build``). Skip straight to health checks.
+        """
+        from bizniz.provisioner.stack_validator import validate_stack
+        from bizniz.integration.debug_loop import repair_integration_failure
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        validation = validate_stack(
+            architecture=architecture,
+            compose_path=compose_path,
+            on_status=self._on_status_message,
+            port_remap=port_remap,
+            teardown=not keep_up,
+            skip_compose_up=skip_compose_up,
+        )
+
+        if validation.healthy:
+            return True
+
+        # Stack is unhealthy — try to repair infrastructure files
+        if self._integration_debugger_factory is None:
+            log("Architect: stack unhealthy but no debugger factory — cannot auto-repair")
+            log(f"Architect: unhealthy services: {[s.name for s in validation.unhealthy_services]}")
+            return False
+
+        failure_output = validation.failure_summary()
+        log(f"Architect: stack unhealthy — {len(validation.unhealthy_services)} service(s) failed. Dispatching infra debugger...")
+
+        # Build a workspace rooted at the project for infra file access
+        from bizniz.workspace.local_workspace import LocalWorkspace
+        infra_workspace = LocalWorkspace(root=str(project_root), create=False)
+
+        def _debugger_factory():
+            return self._integration_debugger_factory(infra_workspace)
+
+        def _rerun_stack():
+            """Re-validate the stack after a repair attempt."""
+            revalidation = validate_stack(
+                architecture=architecture,
+                compose_path=compose_path,
+                on_status=self._on_status_message,
+                port_remap=port_remap,
+                service_timeout_s=45.0,
+            )
+            if revalidation.healthy:
+                return True, "Stack is healthy"
+            return False, revalidation.failure_summary()
+
+        def _capture_infra_logs():
+            """Capture logs from all unhealthy services."""
+            parts = []
+            for svc in validation.unhealthy_services:
+                from bizniz.provisioner.stack_validator import _capture_logs
+                logs = _capture_logs(compose_path, svc.name)
+                if logs.strip():
+                    parts.append(f"=== {svc.name} ===\n{logs}")
+            return "\n\n".join(parts)
+
+        # Use the first unhealthy service as the "service" for the debug loop
+        # (the debugger can edit any file in the project workspace)
+        from bizniz.architect.types import ServiceDefinition as _SD
+        infra_service = _SD(
+            name="infrastructure",
+            service_type="backend",
+            framework="docker",
+            language="yaml",
+            description="Docker infrastructure (Dockerfile, compose, init scripts)",
+            workspace_name=".",
+        )
+
+        repaired, final_output = repair_integration_failure(
+            service=infra_service,
+            workspace=infra_workspace,
+            failure_output=failure_output,
+            integration_test_rel="(infrastructure stack validation)",
+            debugger_factory=_debugger_factory,
+            rerun_tests=_rerun_stack,
+            on_status=self._on_status_message,
+            max_iterations=max_repair_iterations,
+            capture_logs=_capture_infra_logs,
+            compose_path=compose_path,
+        )
+
+        if repaired:
+            log("Architect: stack repaired — infrastructure is healthy")
+            # Rebuild images if Dockerfiles were modified
+            try:
+                import subprocess
+                subprocess.run(
+                    ["docker", "compose", "-f", compose_path, "build"],
+                    capture_output=True, text=True, timeout=300,
+                )
+            except Exception:
+                pass
+        else:
+            log("Architect: stack repair failed — infrastructure still unhealthy")
+            log(f"Architect: last failure:\n{final_output[-500:] if final_output else '(no output)'}")
+
+        return repaired
+
+    # ── Private helpers ────────────────────────────────────────────────────────
+
+    def _call_ai_for_decomposition(self, user_prompt: str) -> dict:
+        """Call AI for system decomposition and return parsed JSON."""
+        attempts = self.max_retries
+        last_error = None
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        self.clear_message_history()
+        self.add_messages_to_history([Message(role="user", content=user_prompt)])
+
+        for attempt in range(1, attempts + 1):
+            try:
+                log(f"Architect: AI decomposition call (attempt {attempt}/{attempts})...")
+                t0 = time.time()
+                text, job_id, output_messages = self._client.get_text(
+                    messages=self.message_history,
+                    response_format=ResponseFormat.JSON_SCHEMA,
+                    schema=ArchitectSchema,
+                )
+                elapsed = time.time() - t0
+                log(f"Architect: AI responded in {elapsed:.1f}s ({len(text or '')} chars)")
+                self.add_messages_to_history(output_messages)
+
+                if not text or not text.strip():
+                    last_error = "Empty response from AI"
+                    log(f"Architect: empty response on attempt {attempt}")
+                    continue
+
+                text = self.clean_llm_json(text)
+                return json.loads(text)
+
+            except AIInsufficientFunds:
+                raise
+            except Exception as e:
+                last_error = e
+                log(f"Architect: attempt {attempt} failed — {type(e).__name__}: {e}")
+                continue
+
+        raise ArchitectBadAIResponseError(
+            f"AI failed to produce system architecture after {attempts} attempts. "
+            f"Last error: {last_error}"
+        )
+
+    def _dispatch_engineers_sequential(
+        self,
+        app_services,
+        service_workspaces,
+        problem_statement,
+        architecture,
+        project,
+        layered: bool = True,
+    ) -> List[ServiceResult]:
+        """Dispatch engineers for services one at a time."""
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        service_results = []
+        for service in app_services:
+            workspace = service_workspaces[service.name]
+            service_prompt = self._build_service_prompt(
+                problem_statement, service, architecture,
+            )
+            log(f"Architect: engineering service '{service.name}' ({service.framework}/{service.language})...")
+
+            try:
+                result = self._dispatch_engineer(
+                    workspace=workspace,
+                    service=service,
+                    service_prompt=service_prompt,
+                    project=project,
+                    layered=layered,
+                    problem_statement=problem_statement,
+                )
+                service_results.append(result)
+                status = "PASS" if result.success else "FAIL"
+                log(
+                    f"Architect: service '{service.name}' — {status} "
+                    f"({result.issues_passed}/{result.issues_total} issues)"
+                )
+            except AIInsufficientFunds:
+                log("Architect: API account has insufficient funds — stopping.")
+                raise
+            except Exception as e:
+                log(f"Architect: service '{service.name}' failed — {type(e).__name__}: {e}")
+                service_results.append(ServiceResult(
+                    service_name=service.name,
+                    workspace_name=service.workspace_name,
+                    success=False,
+                    error=str(e),
+                ))
+        return service_results
+
+    def _dispatch_engineers_parallel(
+        self,
+        app_services,
+        service_workspaces,
+        problem_statement,
+        architecture,
+        project,
+        max_workers: int,
+        layered: bool = True,
+    ) -> List[ServiceResult]:
+        """Dispatch engineers for all application services in parallel."""
+        project_db_lock = threading.Lock()
+
+        def log(msg: str):
+            if self._on_status_message:
+                self._on_status_message(msg)
+
+        service_results = []
+        futures = {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for service in app_services:
+                workspace = service_workspaces[service.name]
+                service_prompt = self._build_service_prompt(
+                    problem_statement, service, architecture,
+                )
+                log(f"Architect: submitting service '{service.name}' to thread pool...")
+                future = executor.submit(
+                    self._dispatch_engineer,
+                    workspace=workspace,
+                    service=service,
+                    service_prompt=service_prompt,
+                    project=project,
+                    project_db_lock=project_db_lock,
+                    layered=layered,
+                    problem_statement=problem_statement,
+                )
+                futures[future] = service
+
+            for future in concurrent.futures.as_completed(futures):
+                service = futures[future]
+                try:
+                    result = future.result()
+                    service_results.append(result)
+                    status = "PASS" if result.success else "FAIL"
+                    log(
+                        f"Architect: service '{service.name}' — {status} "
+                        f"({result.issues_passed}/{result.issues_total} issues)"
+                    )
+                except AIInsufficientFunds:
+                    log("Architect: API account has insufficient funds — stopping.")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
+                except Exception as e:
+                    log(f"Architect: service '{service.name}' failed — {type(e).__name__}: {e}")
+                    service_results.append(ServiceResult(
+                        service_name=service.name,
+                        workspace_name=service.workspace_name,
+                        success=False,
+                        error=str(e),
+                    ))
+
+        return service_results
+
+    def _dispatch_engineer(
+        self,
+        workspace,
+        service: ServiceDefinition,
+        service_prompt: str,
+        project=None,
+        project_db_lock=None,
+        layered: bool = True,
+        problem_statement: str = "",
+    ) -> ServiceResult:
+        """Dispatch an Engineer for a single service."""
+        # Tag the cost tracker with the current service so every AI call
+        # made inside this dispatch attributes to the right service in the
+        # api_calls rollup.
+        from bizniz.cost import get_tracker
+        tracker = get_tracker()
+        tracker.set_service(service.name)
+        tracker.set_phase("engineer.analyze")
+        with self._engineer_factory(
+            workspace,
+            on_status_message=self._on_status_message,
+            image_name=service.image_name,
+            language=service.language,
+        ) as engineer:
+            if layered:
+                # Layered generation: batch issues by dependency layer
+                analysis = engineer.analyze(service_prompt)
+
+                # Log issues to project DB
+                if project:
+                    for issue in analysis.issues:
+                        if project_db_lock:
+                            with project_db_lock:
+                                project.db.log_issue(
+                                    service_name=service.name,
+                                    title=issue.title,
+                                    description=issue.description,
+                                )
+                        else:
+                            project.db.log_issue(
+                                service_name=service.name,
+                                title=issue.title,
+                                description=issue.description,
+                            )
+
+                # Three-phase strategy: cheap framing pass → escalation chain
+                # over all still-failing tickets → agentic debug on what's left.
+                results = engineer.run_three_phase(service_prompt, analysis=analysis)
+            else:
+                # Sequential per-issue dispatch (legacy behavior)
+                analysis = engineer.analyze(service_prompt)
+                results = []
+                for issue in analysis.issues:
+                    issue_db_id = None
+                    if project:
+                        if project_db_lock:
+                            with project_db_lock:
+                                issue_db_id = project.db.log_issue(
+                                    service_name=service.name,
+                                    title=issue.title,
+                                    description=issue.description,
+                                )
+                        else:
+                            issue_db_id = project.db.log_issue(
+                                service_name=service.name,
+                                title=issue.title,
+                                description=issue.description,
+                            )
+
+                    try:
+                        result = engineer.dispatch(issue.db_id)
+                        results.append(result)
+
+                        if project and issue_db_id:
+                            status = "closed" if result.success else "failed"
+                            if project_db_lock:
+                                with project_db_lock:
+                                    project.db.update_issue(
+                                        issue_db_id, status,
+                                        strategy_used=getattr(result, 'strategy_used', None),
+                                        iterations=result.iterations,
+                                    )
+                            else:
+                                project.db.update_issue(
+                                    issue_db_id, status,
+                                    strategy_used=getattr(result, 'strategy_used', None),
+                                    iterations=result.iterations,
+                                )
+                    except AIInsufficientFunds:
+                        raise
+                    except Exception as e:
+                        results.append(type('R', (), {
+                            'success': False, 'iterations': 0,
+                        })())
+                        if project and issue_db_id:
+                            if project_db_lock:
+                                with project_db_lock:
+                                    project.db.update_issue(issue_db_id, "failed")
+                            else:
+                                project.db.update_issue(issue_db_id, "failed")
+
+        successes = sum(1 for r in results if getattr(r, 'success', False))
+        total = len(results)
+
+        # Persist documenter output so downstream agents (Phase 6
+        # post-flight, Phase 7 evolve-mode architect, future
+        # debuggers/refactorers) can read the same artifact without
+        # re-extracting. Soft-fails — engineering completed
+        # regardless of whether docs persisted.
+        validator_error: Optional[str] = None
+        if project is not None and successes > 0:
+            from pathlib import Path as _Path
+            ws_root = _Path(workspace.root) if hasattr(workspace, "root") else None
+            try:
+                from bizniz.documenters.persist import write_service_docs
+                if ws_root and ws_root.is_dir():
+                    write_service_docs(
+                        service=service,
+                        workspace_root=ws_root,
+                        project_root=_Path(project.root),
+                        on_status=self._on_status_message,
+                    )
+            except Exception as e:
+                if self._on_status_message:
+                    self._on_status_message(
+                        f"Architect: doc persistence skipped for "
+                        f"'{service.name}' ({type(e).__name__}: {e})"
+                    )
+
+            # Phase 6 post-flight: run the language's type checker
+            # on the whole service. Catches cross-file consistency
+            # bugs (sync/async mismatch, wrong typed argument, missing
+            # await) at engineer time, before integration tests run.
+            # When the validator fails, dispatch the post-flight
+            # repair loop — same AgenticDebugger brain integration
+            # repair uses, just fed mypy/tsc errors instead of pytest
+            # output.
+            if ws_root and ws_root.is_dir():
+                try:
+                    from bizniz.validators import run_validator
+                    report = run_validator(service, ws_root)
+                    if self._on_status_message:
+                        self._on_status_message(
+                            f"Architect: post-flight {service.name} — "
+                            f"{report.summary}"
+                        )
+                    if not report.passed and not report.skipped_reason:
+                        # Try to repair before failing the service.
+                        repaired = False
+                        repair_specs = self._build_debugger_escalation_specs()
+                        if repair_specs:
+                            try:
+                                from bizniz.engineer.post_flight_repair import (
+                                    repair_post_flight_failure,
+                                )
+                                # Extract failing files from validator output
+                                failing_files = sorted({
+                                    line.split(":", 1)[0].strip()
+                                    for line in (report.stdout + "\n" + report.stderr).splitlines()
+                                    if ":" in line and (
+                                        line.split(":", 1)[0].endswith(".py")
+                                        or line.split(":", 1)[0].endswith((".ts", ".tsx"))
+                                    )
+                                })
+
+                                def _rerun_validator(_service=service, _ws=ws_root):
+                                    rr = run_validator(_service, _ws)
+                                    out = (rr.stderr or "") + "\n" + (rr.stdout or "")
+                                    return rr.passed, out
+
+                                if self._on_status_message:
+                                    self._on_status_message(
+                                        f"Architect: post-flight {service.name} "
+                                        f"FAILED — dispatching repair "
+                                        f"({len(failing_files)} file(s))"
+                                    )
+                                ok, _final = repair_post_flight_failure(
+                                    service_name=service.name,
+                                    workspace=workspace,
+                                    validator_output=(report.stderr or report.stdout)[:16000],
+                                    failing_files=list(failing_files),
+                                    rerun_validator=_rerun_validator,
+                                    escalation=repair_specs,
+                                    on_status=self._on_status_message,
+                                )
+                                repaired = ok
+                            except Exception as e:
+                                if self._on_status_message:
+                                    self._on_status_message(
+                                        f"Architect: post-flight repair raised "
+                                        f"({type(e).__name__}: {e}) — falling back to FAIL"
+                                    )
+
+                        if not repaired:
+                            # Truncate the error tail so the result blob
+                            # stays readable in DB/logs.
+                            err_tail = "\n".join(
+                                (report.stderr or report.stdout).splitlines()[-25:]
+                            )[:3000]
+                            validator_error = (
+                                f"post_flight_validation_failed: "
+                                f"{' '.join(report.command)}\n{err_tail}"
+                            )
+                        else:
+                            if self._on_status_message:
+                                self._on_status_message(
+                                    f"Architect: post-flight {service.name} "
+                                    f"REPAIRED — validator now clean"
+                                )
+                except Exception as e:
+                    if self._on_status_message:
+                        self._on_status_message(
+                            f"Architect: post-flight skipped for "
+                            f"'{service.name}' ({type(e).__name__}: {e})"
+                        )
+
+            # Code reviewer: structural integrity checks the type
+            # checker can't catch. Today: route duplication +
+            # doubled-prefix detection (the M1 /auth/auth/login bug).
+            # Future: SOLID violations, dead code, semantic
+            # duplication (AI-assisted). Runs deterministically;
+            # no AI calls.
+            if ws_root and ws_root.is_dir() and (service.language or "").lower() == "python":
+                try:
+                    from bizniz.reviewers import review_routes
+                    review = review_routes(ws_root)
+                    if self._on_status_message:
+                        if review.ok:
+                            self._on_status_message(
+                                f"Architect: route review {service.name} — "
+                                f"OK ({review.routes_seen} routes, "
+                                f"{review.files_scanned} files)"
+                            )
+                        else:
+                            self._on_status_message(
+                                f"Architect: route review {service.name} — "
+                                f"{len(review.issues)} ISSUE(S)"
+                            )
+                    if not review.ok:
+                        # Stack on top of any validator_error already set.
+                        review_msg = review.message()[:3000]
+                        if validator_error:
+                            validator_error = (
+                                f"{validator_error}\n\n"
+                                f"=== ALSO ===\n{review_msg}"
+                            )
+                        else:
+                            validator_error = (
+                                f"post_flight_review_failed:\n{review_msg}"
+                            )
+                except Exception as e:
+                    if self._on_status_message:
+                        self._on_status_message(
+                            f"Architect: route review skipped for "
+                            f"'{service.name}' ({type(e).__name__}: {e})"
+                        )
+
+            # Hallucination review (AI-driven, single LLM call). Replaces
+            # the old hardcoded path-token guard. Sees the full set of
+            # files the engineer just produced + the problem statement,
+            # and flags drift like grooming-routes-in-property-manager.
+            # Soft-skips on AI errors (we don't want a flaky reviewer to
+            # block an otherwise-good engineering pass).
+            if ws_root and ws_root.is_dir():
+                try:
+                    from bizniz.reviewers import (
+                        collect_changed_files,
+                        review_for_hallucinations,
+                    )
+                    files = collect_changed_files(ws_root)
+                    h_report = review_for_hallucinations(
+                        problem_statement=problem_statement,
+                        changed_files=files,
+                        ai_client=self._client,
+                        on_status=self._on_status_message,
+                    )
+                    if self._on_status_message:
+                        if h_report.skipped_reason:
+                            self._on_status_message(
+                                f"Architect: hallucination review {service.name} — "
+                                f"skipped ({h_report.skipped_reason})"
+                            )
+                        elif h_report.clean:
+                            self._on_status_message(
+                                f"Architect: hallucination review {service.name} — "
+                                f"clean ({len(files)} file(s))"
+                            )
+                        else:
+                            self._on_status_message(
+                                f"Architect: hallucination review {service.name} — "
+                                f"{len(h_report.suspicious_files)} flagged "
+                                f"({len(h_report.blockers)} blocker(s))"
+                            )
+                            for s in h_report.suspicious_files:
+                                self._on_status_message(
+                                    f"Architect: hallucination [{s.severity}] "
+                                    f"{s.filepath}: {s.reason}"
+                                )
+                    if h_report.has_blockers:
+                        msg_lines = [
+                            f"hallucination_review_blocked: "
+                            f"{len(h_report.blockers)} blocker(s)",
+                        ]
+                        for s in h_report.blockers[:5]:
+                            msg_lines.append(f"  ✗ {s.filepath}: {s.reason}")
+                        review_msg = "\n".join(msg_lines)
+                        if validator_error:
+                            validator_error = (
+                                f"{validator_error}\n\n"
+                                f"=== ALSO ===\n{review_msg}"
+                            )
+                        else:
+                            validator_error = review_msg
+                except Exception as e:
+                    if self._on_status_message:
+                        self._on_status_message(
+                            f"Architect: hallucination review skipped for "
+                            f"'{service.name}' ({type(e).__name__}: {e})"
+                        )
+
+        result = ServiceResult(
+            service_name=service.name,
+            workspace_name=service.workspace_name,
+            success=successes == total and total > 0 and validator_error is None,
+            issues_total=total,
+            issues_passed=successes,
+            error=validator_error,
+        )
+        return result
+
+    def _build_service_prompt(
+        self,
+        problem_statement: str,
+        service: ServiceDefinition,
+        architecture: SystemArchitecture,
+    ) -> str:
+        """Build a focused prompt for a single service.
+
+        ``problem_statement`` is the milestone-scoped slice when called
+        from the milestone walk, or the full project statement when
+        called from a one-shot ``build()``. Either way, it's labeled
+        as the SCOPE and the service description is downgraded to
+        "eventual scope" so the engineer doesn't engineer features
+        from future milestones.
+        """
+        other_services = [
+            f"- {s.name} ({s.framework}): {s.description}"
+            for s in architecture.services
+            if s.name != service.name
+        ]
+        other_services_text = "\n".join(other_services) if other_services else "(none)"
+
+        # Backend contracts captured from prior layers — present only
+        # for services dispatched after at least one backend has been
+        # built and verified. Frontends use this to know exactly which
+        # endpoints exist and what shapes they accept, so they don't
+        # have to guess.
+        contracts_section = self._format_contracts_for_prompt(architecture, service)
+
+        return (
+            f"━━━ SCOPE FOR THIS DISPATCH (THE ONLY SOURCE OF TRUTH FOR WHAT TO BUILD) ━━━\n"
+            f"{problem_statement}\n"
+            f"━━━ END SCOPE ━━━\n\n"
+            f"You are building the '{service.name}' service for the "
+            f"'{architecture.project_name}' project.\n\n"
+            f"Service details (the service's EVENTUAL shape across all milestones — "
+            f"do NOT implement everything described here; implement ONLY what the "
+            f"SCOPE above explicitly asks for. Treat anything in the description below "
+            f"that isn't covered by the SCOPE as a future-milestone concern):\n"
+            f"- Type: {service.service_type}\n"
+            f"- Framework: {service.framework}\n"
+            f"- Language: {service.language}\n"
+            f"- Description: {service.description}\n"
+            f"- Port: {service.port}\n\n"
+            f"Other services in the system (also describe eventual shape — same rule):\n"
+            f"{other_services_text}\n\n"
+            f"{contracts_section}"
+            f"Build ONLY this service AND ONLY what the SCOPE asks for. "
+            f"Use {service.language} with {service.framework}. "
+            f"Focus on clean, working code with tests. "
+            f"The service will run in a Docker container."
+        )
+
+    def _format_contracts_for_prompt(
+        self,
+        architecture: SystemArchitecture,
+        current_service: ServiceDefinition,
+    ) -> str:
+        """Render captured backend OpenAPI contracts as a prompt
+        section. Returns an empty string when no contracts have been
+        captured yet (first-layer services).
+
+        For frontends, this turns "guess what the backend looks like"
+        into "consume the spec the backend just published" — closing
+        the contract drift that integration tests would otherwise
+        have to catch reactively.
+        """
+        contracts = getattr(self, "_captured_contracts", None) or {}
+        if not contracts:
+            return ""
+        import json as _json
+        lines = [
+            "Backend contracts (already built and verified — call these "
+            "endpoints with the EXACT request/response shapes shown. Do "
+            "NOT guess field names; the integration tests will run "
+            "against these contracts and catch any drift):\n"
+        ]
+        for svc_name, doc in contracts.items():
+            if svc_name == current_service.name:
+                continue  # don't show a service its own contract
+            svc_def = next(
+                (s for s in architecture.services if s.name == svc_name), None,
+            )
+            base = f"http://{svc_name}:{svc_def.port}" if svc_def and svc_def.port else f"http://{svc_name}"
+            lines.append(f"### {svc_name} — base URL: {base}")
+            paths = doc.get("paths") or {}
+            for path, ops in sorted(paths.items()):
+                if not isinstance(ops, dict):
+                    continue
+                for method, op in sorted(ops.items()):
+                    if not isinstance(op, dict):
+                        continue
+                    line = f"  {method.upper():<6s} {path}"
+                    summary = op.get("summary") or op.get("description")
+                    if summary:
+                        line += f"  — {summary}"
+                    lines.append(line)
+                    # Request body shape (this is the field-name source
+                    # of truth — emitting it stops `username` vs
+                    # `email` style drift at the engineer step).
+                    rb = op.get("requestBody") or {}
+                    rb_schema = (
+                        rb.get("content", {}).get("application/json", {}).get("schema")
+                    )
+                    if rb_schema:
+                        resolved = _resolve_schema_ref(rb_schema, doc)
+                        lines.append(
+                            f"    requestBody: {_json.dumps(resolved, separators=(',', ':'))[:600]}"
+                        )
+                    # 2xx response shape so the frontend knows what
+                    # to expect back.
+                    for code, resp in (op.get("responses") or {}).items():
+                        if not str(code).startswith("2"):
+                            continue
+                        if not isinstance(resp, dict):
+                            continue
+                        resp_schema = (
+                            resp.get("content", {}).get("application/json", {}).get("schema")
+                        )
+                        if resp_schema:
+                            resolved = _resolve_schema_ref(resp_schema, doc)
+                            lines.append(
+                                f"    response[{code}]: {_json.dumps(resolved, separators=(',', ':'))[:600]}"
+                            )
+                            break
+            lines.append("")
+        return "\n".join(lines) + "\n"
+
+
+def _resolve_schema_ref(schema: dict, doc: dict, depth: int = 0) -> dict:
+    """Inline ``$ref`` references so the rendered contract doesn't
+    require the reader to chase #/components/schemas indirection.
+
+    Bounded recursion — schemas can be self-referential (e.g. tree
+    nodes), so we cap depth and leave the ref string in place beyond
+    that. Deep enough to make typical request/response shapes flat,
+    shallow enough to avoid infinite expansion.
+    """
+    if not isinstance(schema, dict) or depth > 4:
+        return schema
+    if "$ref" in schema and isinstance(schema["$ref"], str):
+        ref = schema["$ref"]
+        # Only handle local refs of the form "#/components/schemas/Name"
+        if ref.startswith("#/"):
+            parts = ref[2:].split("/")
+            target: object = doc
+            for p in parts:
+                if isinstance(target, dict) and p in target:
+                    target = target[p]
+                else:
+                    return schema  # broken ref — leave it
+            if isinstance(target, dict):
+                return _resolve_schema_ref(target, doc, depth + 1)
+        return schema
+    out: dict = {}
+    for k, v in schema.items():
+        if isinstance(v, dict):
+            out[k] = _resolve_schema_ref(v, doc, depth + 1)
+        elif isinstance(v, list):
+            out[k] = [
+                _resolve_schema_ref(item, doc, depth + 1) if isinstance(item, dict) else item
+                for item in v
+            ]
+        else:
+            out[k] = v
+    return out
+
+
+def _compose_up_and_capture_images(
+    compose_path: str,
+    on_status: Optional[Callable] = None,
+    timeout: int = 300,
+) -> Dict[str, str]:
+    """``docker compose up -d --build``, then capture image names from
+    running containers.
+
+    Returns a dict of {service_name: image_name} for every container
+    the compose project started.
+    """
+    import subprocess
+
+    def _log(msg: str) -> None:
+        if on_status:
+            on_status(msg)
+
+    _log("Stack: building and bringing up all services...")
+    try:
+        proc = subprocess.run(
+            ["docker", "compose", "-f", compose_path, "up", "-d", "--build"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if proc.returncode != 0:
+            _log(f"Stack: compose up --build failed (rc={proc.returncode})")
+    except subprocess.TimeoutExpired:
+        _log(f"Stack: compose up --build timed out after {timeout}s")
+
+    # Capture image names from running containers:
+    # docker compose ps --format json gives us service + image
+    image_map: Dict[str, str] = {}
+    try:
+        proc = subprocess.run(
+            ["docker", "compose", "-f", compose_path, "ps", "--format", "json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            import json as _json
+            # Output can be a JSON array or newline-delimited JSON objects
+            text = proc.stdout.strip()
+            if text.startswith("["):
+                containers = _json.loads(text)
+            else:
+                containers = [_json.loads(line) for line in text.splitlines() if line.strip()]
+            for c in containers:
+                svc = c.get("Service") or c.get("service", "")
+                img = c.get("Image") or c.get("image", "")
+                if svc and img:
+                    image_map[svc] = img
+    except Exception as e:
+        _log(f"Stack: failed to capture images from compose ps ({e})")
+
+    if image_map:
+        _log(f"Stack: captured {len(image_map)} image(s): {', '.join(f'{k}={v}' for k, v in image_map.items())}")
+    return image_map
+
+
+def _sort_services_by_dependency(services):
+    """
+    Sort services into dependency layers using topological sort.
+
+    Services with no dependencies (or only infrastructure dependencies) go first.
+    Services that depend on other app services go in later layers.
+    Services within the same layer can be dispatched in parallel.
+
+    Returns a list of layers, where each layer is a list of ServiceDefinition.
+    """
+    app_names = {s.name for s in services}
+    service_map = {s.name: s for s in services}
+
+    # Build adjacency: only track deps on other app services
+    deps = {}
+    for s in services:
+        deps[s.name] = [d for d in s.depends_on if d in app_names]
+
+    layers = []
+    resolved = set()
+
+    while len(resolved) < len(services):
+        # Find services whose deps are all resolved
+        layer = [
+            name for name in deps
+            if name not in resolved and all(d in resolved for d in deps[name])
+        ]
+        if not layer:
+            # Circular dependency — dump remaining services into one layer
+            layer = [name for name in deps if name not in resolved]
+        layers.append([service_map[name] for name in layer])
+        resolved.update(layer)
+
+    return layers
+
+
+def _save_architecture_docs(project_root: Path, architecture: SystemArchitecture):
+    """Save a human-readable architecture overview to docs/architecture.md."""
+    docs_dir = project_root / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    lines = [
+        f"# {architecture.project_name} — Architecture",
+        "",
+        architecture.description,
+        "",
+        f"## Services ({len(architecture.services)})",
+        "",
+    ]
+
+    for svc in architecture.services:
+        lines.append(f"### {svc.name}")
+        lines.append(f"- **Type:** {svc.service_type}")
+        lines.append(f"- **Framework:** {svc.framework}")
+        lines.append(f"- **Language:** {svc.language}")
+        if svc.port:
+            lines.append(f"- **Port:** {svc.port}")
+        if svc.depends_on:
+            lines.append(f"- **Depends on:** {', '.join(svc.depends_on)}")
+        lines.append(f"- **Description:** {svc.description}")
+        if svc.requirements:
+            lines.append(f"- **Packages:** {', '.join(svc.requirements)}")
+        lines.append("")
+
+    if architecture.docker_compose:
+        lines.append("## Docker Compose (AI preview)")
+        lines.append("")
+        lines.append(
+            "_Note: this is the architect's compose preview; the actual "
+            "compose used to run the project is generated deterministically "
+            "by the Provisioner._"
+        )
+        lines.append("")
+        lines.append("```yaml")
+        lines.append(architecture.docker_compose)
+        lines.append("```")
+        lines.append("")
+
+    (docs_dir / "architecture.md").write_text("\n".join(lines), encoding="utf-8")

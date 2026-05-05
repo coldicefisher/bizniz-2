@@ -37,26 +37,31 @@ IMPORTANT framework rules:
 
 Authentication (REQUIRED whenever the project has user accounts, login,
 or any concept of "user"):
-- The pipeline supports exactly TWO auth modes: **FusionAuth** or **none**.
-  No custom JWT signing, no Auth0/Cognito/Keycloak/Clerk, no DIY session
-  cookies, no application-side password hashing. If the problem implies
-  any user identity, you provision FusionAuth. If it doesn't, you skip
-  the auth service entirely. There is no third option.
-- When auth is needed: add an auth service with framework="fusionauth",
-  service_type="auth", language="yaml", workspace_name="fusionauth",
-  port=9011, skeleton="none".
+- The pipeline always delegates identity to a managed provider — never a
+  custom in-application auth implementation. No application-side password
+  hashing, no DIY session cookies, no hand-rolled JWT signing.
+- DEFAULT: add a FusionAuth service. Switch to a different managed
+  provider only when the problem statement names an EXPLICIT CONSTRAINT
+  (existing customer Okta tenant, regulatory requirement to use AWS
+  Cognito, vendor contract mandating Auth0, etc.). Without an explicit
+  constraint, default to FusionAuth.
+- When the problem doesn't imply any user identity, skip the auth service
+  entirely.
+- When auth is needed (FusionAuth default): add an auth service with
+  framework="fusionauth", service_type="auth", language="yaml",
+  workspace_name="fusionauth", port=9011, skeleton="none".
 - FusionAuth REQUIRES postgres. If you add a fusionauth service, you MUST
   also add a postgres service: framework="postgres", service_type="database",
   language="sql", workspace_name="postgres", port=5432, skeleton="none".
-- The Provisioner ships a kickstart.json rendered from the milestone's
-  cumulative AuthSpec (roles, applications, groups, test users seeded
-  from the planner's auth_delta deltas, plus an always-seeded admin
-  with passwordChangeRequired=true). You don't plan any FusionAuth
-  config yourself — the spec → kickstart pipeline handles it.
+- A separate AuthAgent runs after this Architect call. It reads the
+  milestone's problem_slice and materializes the identity state (roles,
+  applications, test users) via the configured auth provider's API. You
+  do NOT specify roles, applications, or test users in your output —
+  only that the auth service exists in the architecture.
 - Backend services that need auth should list "auth" in their depends_on.
-- Backend code validates FusionAuth-issued JWTs via JWKS and reads roles
-  from the JWT's ``roles`` claim. There is no local Role/UserRole table
-  in the skeleton — engineers MUST NOT introduce one.
+- Backend code validates JWTs issued by the auth provider via JWKS and
+  reads roles from the JWT's ``roles`` claim. There is no local
+  Role/UserRole table in the skeleton — engineers MUST NOT introduce one.
 
 Available skeletons (pre-built starter repos that come with auth, Docker, tests, README):
 {skeletons}
