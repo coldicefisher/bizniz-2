@@ -1,10 +1,14 @@
-"""Planner result types."""
+"""Planner result types.
+
+v2 simplification: ``Milestone`` no longer carries ``auth_delta``.
+The Planner is product-shaped — it decomposes user value into
+milestones and stops. Auth state per-milestone is handled by the
+dedicated AuthAgent later in the pipeline.
+"""
 from __future__ import annotations
 
 from typing import List, Optional
-from pydantic import BaseModel, Field
-
-from bizniz.auth.spec import AuthSpecDelta
+from pydantic import BaseModel
 
 
 class Milestone(BaseModel):
@@ -14,11 +18,6 @@ class Milestone(BaseModel):
     self-contained slice of user value — the Architect can take its
     ``problem_slice`` as a standalone problem statement and decompose
     it into services / issues just like a greenfield project.
-
-    The ``auth_delta`` field is the typed contract for auth changes in
-    this milestone. The Architect accumulates deltas across milestones
-    to produce the cumulative AuthSpec the provisioner materializes.
-    See ``bizniz/auth/spec.py``.
     """
     db_id: Optional[int] = None
     sequence_index: int = 0  # 0-based position in the plan
@@ -29,7 +28,6 @@ class Milestone(BaseModel):
     depends_on_names: List[str] = []  # other milestone names that must ship first
     estimated_effort: Optional[str] = None  # rough sizing (human review hint)
     status: str = "planned"   # planned | in_progress | completed | skipped
-    auth_delta: AuthSpecDelta = Field(default_factory=AuthSpecDelta)
 
 
 class ProjectPlan(BaseModel):

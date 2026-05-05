@@ -7,7 +7,11 @@ import os
 from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.clients.chatgpt.chatgpt_client import ChatGPTClient
 from bizniz.clients.chatgpt.chatgpt_client_config import ChatGPTClientConfig
-from bizniz.orchestrator.model_progression import ModelProgression
+# ModelProgression is a v1 vestige; the v2 ServiceImplementer uses
+# a single model per agent (no in-agent escalation). Keeping the
+# import + factory methods working until v2 entry points land so
+# the config module itself doesn't fail to load.
+from bizniz._deprecated.orchestrator.model_progression import ModelProgression
 
 
 CLAUDE_MODEL_PREFIXES = ("claude-",)
