@@ -299,19 +299,25 @@ def provision_fusionauth(
                          f"FusionAuth agent: materialize action FAILED — "
                          f"{a.operation}({a.target}): {a.error}")
 
-        # Smoke test: log in as the first non-admin test user (spec path).
+        # Smoke test: log in as the first test user via the typed
+        # orchestrator. We use orch.get_token() rather than the legacy
+        # fa.login(), which swallows error responses into {} and made
+        # earlier failures look like silent successes.
         smoke_passed = False
         if auth_spec.test_users:
             first = auth_spec.test_users[0]
             _log(on_status,
                  f"FusionAuth agent: smoke test — logging in as {first.email}...")
-            login_result = fa.login(application_id, first.email, first.password)
-            if "token" in login_result:
-                _log(on_status, "FusionAuth agent: smoke test PASS — got valid JWT")
-                smoke_passed = True
-            else:
-                _log(on_status,
-                     f"FusionAuth agent: smoke test FAIL — {login_result}")
+            try:
+                from bizniz.auth.types import FusionAuthError as _FAError
+                token = orch_for_materialize.get_token(
+                    application_id, first.email, first.password,
+                )
+                if token:
+                    _log(on_status, "FusionAuth agent: smoke test PASS — got valid JWT")
+                    smoke_passed = True
+            except _FAError as e:
+                _log(on_status, f"FusionAuth agent: smoke test FAIL — {e}")
     else:
         # ── Path 2: legacy AI-extraction (kept for backwards compat) ─
         # Step 1: Extract roles from problem statement
@@ -500,6 +506,10 @@ def provision_fusionauth(
         "contract_path": str(contract_path),
         "smoke_passed": smoke_passed,
         "spec_driven": spec_driven,
+        "validation_ok": validation.ok,
+        "validation": validation,           # ContractValidationResult
+        "auth_contract": auth_contract,     # the AuthContract object (for debugger)
+        "orchestrator": orch,               # for debugger to query FA directly
     }
 
 

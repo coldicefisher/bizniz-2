@@ -694,8 +694,73 @@ class Architect(BaseAIAgent):
                                 f"{len(fa_result['test_users'])} test user(s), "
                                 f"smoke={'PASS' if fa_result['smoke_passed'] else 'FAIL'}"
                             )
+
+                            # HARD GATE: AuthContract must validate before
+                            # engineering. If it doesn't, dispatch the
+                            # FusionAuth debugger BEFORE the stack tears
+                            # down — auth being broken means everything
+                            # downstream is broken, so we'd rather fix it
+                            # here than chase symptoms through engineering
+                            # and integration tests.
+                            if not fa_result.get("validation_ok", True):
+                                from bizniz.auth.debugger import repair_fusionauth_state
+                                log(
+                                    f"Architect: FusionAuth validation FAILED — "
+                                    f"dispatching FA debugger before engineering"
+                                )
+                                tracker.set_phase("fusionauth_debug")
+                                final_validation = repair_fusionauth_state(
+                                    auth_spec=current_auth_spec,
+                                    auth_contract=fa_result["auth_contract"],
+                                    validation_result=fa_result["validation"],
+                                    orchestrator=fa_result["orchestrator"],
+                                    application_id=fa_app_id,
+                                    project_root=project.root,
+                                    compose_path=compose_path,
+                                    on_status=self._on_status_message,
+                                    max_iterations=3,
+                                )
+                                if final_validation.ok:
+                                    # Re-write contract now that it's valid
+                                    fa_result["auth_contract"].write_to(project.root)
+                                    log(
+                                        f"Architect: FA debugger SUCCEEDED — "
+                                        f"contract now valid "
+                                        f"({len(final_validation.checks)} checks pass)"
+                                    )
+                                else:
+                                    log(
+                                        f"Architect: FA debugger COULD NOT REPAIR — "
+                                        f"{len(final_validation.failed_checks)} "
+                                        f"check(s) still failing. ABORTING milestone "
+                                        f"before engineering — auth must be valid "
+                                        f"before code generation."
+                                    )
+                                    tracker.set_phase(None)
+                                    if not continue_on_failure:
+                                        job_status = "failed"
+                                        results.append(ArchitectResult(
+                                            project_name=project_name,
+                                            architecture=evolved_arch,
+                                            service_results=[],
+                                            project_root=str(project.root),
+                                        ))
+                                        # Tear down stack since we're bailing
+                                        from bizniz.provisioner.stack_validator import teardown_stack
+                                        teardown_stack(compose_path, self._on_status_message)
+                                        break
+                                tracker.set_phase(None)
                         except Exception as e:
-                            log(f"Architect: FusionAuth provisioning failed ({e}) — continuing")
+                            log(f"Architect: FusionAuth provisioning raised ({e}) — aborting milestone")
+                            if not continue_on_failure:
+                                job_status = "failed"
+                                results.append(ArchitectResult(
+                                    project_name=project_name,
+                                    architecture=evolved_arch,
+                                    service_results=[],
+                                    project_root=str(project.root),
+                                ))
+                                break
                         tracker.set_phase(None)
 
                     # Tear down stack after FusionAuth setup (or after validation

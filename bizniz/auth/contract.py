@@ -229,32 +229,35 @@ class AuthContract:
                 ))
                 continue  # can't check roles without a token
 
-            # 3c. Token contains stated roles
+            # 3c. Token contains stated roles.
+            # We decode the JWT directly rather than calling /oauth2/userinfo,
+            # which is OIDC-only and rejects FusionAuth's proprietary access
+            # tokens minted by /api/login. The skeleton's auth path uses the
+            # same JWT decode + claims["roles"] path, so this matches what
+            # production code will see at runtime.
             try:
-                info = orchestrator.get_user_info(token)
-                # FusionAuth puts roles on the registration; userinfo
-                # may or may not — try a few common locations.
-                token_roles = (
-                    info.get("roles")
-                    or info.get("application_roles")
-                    or []
-                )
+                from jose import jwt as _jose_jwt
+                claims = _jose_jwt.get_unverified_claims(token)
+                token_roles = claims.get("roles") or []
                 if not isinstance(token_roles, list):
                     token_roles = [str(token_roles)]
                 missing = set(user.roles) - set(token_roles)
                 if missing:
                     checks.append(ValidationCheck(
                         f"user_roles:{user.email}", False,
-                        f"missing roles in token: {sorted(missing)} "
-                        f"(token has: {token_roles})",
+                        f"missing roles in JWT claim: {sorted(missing)} "
+                        f"(JWT roles: {token_roles}). FusionAuth's "
+                        f"access token claim policy may not include roles "
+                        f"for this application.",
                     ))
                 else:
                     checks.append(ValidationCheck(
                         f"user_roles:{user.email}", True,
                     ))
-            except FusionAuthError as e:
+            except Exception as e:
                 checks.append(ValidationCheck(
-                    f"user_roles:{user.email}", False, str(e),
+                    f"user_roles:{user.email}", False,
+                    f"JWT decode failed: {type(e).__name__}: {e}",
                 ))
 
         # 4. JWKS reachable (sanity for the runtime contract)
