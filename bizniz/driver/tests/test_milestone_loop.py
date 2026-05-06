@@ -141,6 +141,7 @@ class TestHappyPath:
         cr.review.return_value = _code_review(approved=True)
         ip = MagicMock()
         ip.run_api.return_value = _integration_result(passed=True, phase="api")
+        ip.run_worker.return_value = _integration_result(passed=True, phase="worker")
         ip.run_web.return_value = _integration_result(passed=True, phase="web")
 
         loop = _build_loop(engineer=eng, qe=qe, cr=cr, integration=ip)
@@ -178,6 +179,7 @@ class TestRepairLoop:
         cr.review.side_effect = [_code_review(approved=False, critical=True), _code_review(approved=True)]
         ip = MagicMock()
         ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_worker.return_value = _integration_result(phase="worker")
         ip.run_web.return_value = _integration_result(phase="web")
 
         loop = _build_loop(engineer=eng, qe=qe, cr=cr, integration=ip)
@@ -241,6 +243,7 @@ class TestRepairLoop:
         ]
         ip = MagicMock()
         ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_worker.return_value = _integration_result(phase="worker")
         ip.run_web.return_value = _integration_result(phase="web")
 
         loop = _build_loop(
@@ -278,6 +281,7 @@ class TestResume:
         cr.review.return_value = _code_review(approved=True)
         ip = MagicMock()
         ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_worker.return_value = _integration_result(phase="worker")
         ip.run_web.return_value = _integration_result(phase="web")
 
         loop = _build_loop(engineer=eng, qe=qe, cr=cr, integration=ip)
@@ -308,6 +312,7 @@ class TestResume:
             "code_review": _code_review(approved=True).model_dump(),
         })
         state.mark_phase(SubPhase.INTEGRATION_API, _integration_result(phase="api").model_dump())
+        state.mark_phase(SubPhase.INTEGRATION_WORKER, _integration_result(phase="worker").model_dump())
         state.mark_phase(SubPhase.INTEGRATION_WEB, _integration_result(phase="web").model_dump())
 
         eng = MagicMock()
@@ -362,6 +367,7 @@ class TestIntegrationGates:
         cr.review.return_value = _code_review(approved=True)
         ip = MagicMock()
         ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_worker.return_value = _integration_result(phase="worker")
         ip.run_web.return_value = _integration_result(passed=False, phase="web")
 
         loop = _build_loop(engineer=eng, qe=qe, cr=cr, integration=ip)
@@ -391,6 +397,7 @@ class TestCostTagging:
         cr.review.return_value = _code_review(approved=True)
         ip = MagicMock()
         ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_worker.return_value = _integration_result(phase="worker")
         ip.run_web.return_value = _integration_result(phase="web")
 
         loop = _build_loop(engineer=eng, qe=qe, cr=cr, integration=ip, tracker=None)
@@ -412,6 +419,7 @@ class TestCostTagging:
         cr.review.return_value = _code_review(approved=True)
         ip = MagicMock()
         ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_worker.return_value = _integration_result(phase="worker")
         ip.run_web.return_value = _integration_result(phase="web")
 
         loop = _build_loop(
@@ -445,6 +453,7 @@ class TestCostTagging:
         cr.review.side_effect = [_code_review(approved=False, critical=True), _code_review(approved=True)]
         ip = MagicMock()
         ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_worker.return_value = _integration_result(phase="worker")
         ip.run_web.return_value = _integration_result(phase="web")
 
         loop = _build_loop(
@@ -472,6 +481,7 @@ class TestCostTagging:
         cr.review.return_value = _code_review(approved=True)
         ip = MagicMock()
         ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_worker.return_value = _integration_result(phase="worker")
         ip.run_web.return_value = _integration_result(phase="web")
 
         loop = _build_loop(
@@ -575,6 +585,7 @@ class TestSinglePhase:
 
         ip = MagicMock()
         ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_worker.return_value = _integration_result(phase="worker")
         loop = _build_loop(integration=ip)
 
         outcome = loop.run(

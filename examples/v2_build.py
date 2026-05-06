@@ -41,6 +41,7 @@ from bizniz.engineer.agent import Engineer
 from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
 from bizniz.integration.http_api_tester import HTTPApiTester
 from bizniz.integration.web_ui_tester import WebUITester
+from bizniz.integration.worker_tester import WorkerTester
 from bizniz.planner.planner import Planner
 from bizniz.provisioner.provisioner import Provisioner
 from bizniz.quality_engineer.agent import QualityEngineer
@@ -145,6 +146,9 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     def web_tester_factory(workspace):
         return WebUITester(client=tester_client, workspace=workspace)
 
+    def worker_tester_factory(workspace):
+        return WorkerTester(client=tester_client, workspace=workspace)
+
     debugger_client = _client_for(
         getattr(config, "debugger_model", config.architect_model), "debugger",
     )
@@ -176,6 +180,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     integration_phase = IntegrationPhase(
         http_tester_factory=http_tester_factory,
         web_tester_factory=web_tester_factory,
+        worker_tester_factory=worker_tester_factory,
         debugger_factory=debugger_factory,
         debugger_max_iterations=3,
         problem_statement=args.problem or "",

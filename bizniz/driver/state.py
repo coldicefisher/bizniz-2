@@ -52,6 +52,7 @@ class SubPhase(str, Enum):
     REPAIR_ITER_2 = "repair_iter_2"
     REVIEW_FINAL = "review_final"
     INTEGRATION_API = "integration_api"
+    INTEGRATION_WORKER = "integration_worker"
     INTEGRATION_WEB = "integration_web"
     DONE = "done"
 

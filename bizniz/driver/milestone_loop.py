@@ -46,6 +46,7 @@ class MilestoneOutcome(BaseModel):
     coverage: Optional[CoverageReport] = None
     repair_iterations: int = 0
     integration_api: Optional[Dict] = None
+    integration_worker: Optional[Dict] = None
     integration_web: Optional[Dict] = None
     error_summary: Optional[str] = None
 
@@ -163,6 +164,7 @@ class MilestoneLoop:
         code_review: Optional[CodeReviewReport] = self._load_review_if_done(state)
         repair_iterations = 0
         integration_api: Optional[IntegrationPhaseResult] = None
+        integration_worker: Optional[IntegrationPhaseResult] = None
         integration_web: Optional[IntegrationPhaseResult] = None
 
         # Walk the phases in order; each branch skips if already done.
@@ -269,7 +271,7 @@ class MilestoneLoop:
                 })
                 break
 
-        # Integration phases.
+        # Integration phases (api → worker → web).
         if not _has(state, SubPhase.INTEGRATION_API):
             self._tag(state.milestone_index, SubPhase.INTEGRATION_API)
             integration_api = self._integration.run_api(
@@ -288,6 +290,29 @@ class MilestoneLoop:
                 self._gates.hard(
                     "integration_api_failed",
                     integration_api.error_summary or "API integration tests failed",
+                )
+
+        if not _has(state, SubPhase.INTEGRATION_WORKER):
+            self._tag(state.milestone_index, SubPhase.INTEGRATION_WORKER)
+            api_artifact = state.read_artifact(SubPhase.INTEGRATION_API) or {}
+            backend_contracts = api_artifact.get("backend_contracts") or {}
+            integration_worker = self._integration.run_worker(
+                milestone=milestone,
+                architecture=architecture,
+                project_root=self._project_root,
+                compose_path=self._compose_path,
+                service_workspaces={
+                    s.name: self._workspace_for_service(s.name)
+                    for s in architecture.services
+                },
+                backend_contracts=backend_contracts,
+                auth_contract=auth_contract,
+            )
+            state.mark_phase(SubPhase.INTEGRATION_WORKER, integration_worker)
+            if not integration_worker.passed:
+                self._gates.hard(
+                    "integration_worker_failed",
+                    integration_worker.error_summary or "Worker integration tests failed",
                 )
 
         if not _has(state, SubPhase.INTEGRATION_WEB):
@@ -328,6 +353,7 @@ class MilestoneLoop:
             coverage=coverage,
             repair_iterations=repair_iterations,
             integration_api=integration_api.model_dump() if integration_api else None,
+            integration_worker=integration_worker.model_dump() if integration_worker else None,
             integration_web=integration_web.model_dump() if integration_web else None,
         )
 
@@ -360,13 +386,15 @@ class MilestoneLoop:
         if target in (SubPhase.REVIEW_INITIAL, SubPhase.REPAIR_ITER_0,
                       SubPhase.REPAIR_ITER_1, SubPhase.REPAIR_ITER_2,
                       SubPhase.REVIEW_FINAL,
-                      SubPhase.INTEGRATION_API, SubPhase.INTEGRATION_WEB):
+                      SubPhase.INTEGRATION_API, SubPhase.INTEGRATION_WORKER,
+                      SubPhase.INTEGRATION_WEB):
             result = self._reload_required(state, SubPhase.IMPLEMENT, EngineerResult)
 
         # Dispatch.
         coverage: Optional[CoverageReport] = None
         code_review: Optional[CodeReviewReport] = None
         integration_api: Optional[IntegrationPhaseResult] = None
+        integration_worker: Optional[IntegrationPhaseResult] = None
         integration_web: Optional[IntegrationPhaseResult] = None
         repair_iterations = 0
 
@@ -439,6 +467,21 @@ class MilestoneLoop:
             )
             state.mark_phase(target, integration_api)
 
+        elif target == SubPhase.INTEGRATION_WORKER:
+            api_artifact = state.read_artifact(SubPhase.INTEGRATION_API) or {}
+            backend_contracts = api_artifact.get("backend_contracts") or {}
+            integration_worker = self._integration.run_worker(
+                milestone=milestone, architecture=architecture,
+                project_root=self._project_root, compose_path=self._compose_path,
+                service_workspaces={
+                    s.name: self._workspace_for_service(s.name)
+                    for s in architecture.services
+                },
+                backend_contracts=backend_contracts,
+                auth_contract=auth_contract,
+            )
+            state.mark_phase(target, integration_worker)
+
         elif target == SubPhase.INTEGRATION_WEB:
             api_artifact = state.read_artifact(SubPhase.INTEGRATION_API) or {}
             backend_contracts = api_artifact.get("backend_contracts") or {}
@@ -469,6 +512,7 @@ class MilestoneLoop:
             coverage=coverage,
             repair_iterations=repair_iterations,
             integration_api=integration_api.model_dump() if integration_api else None,
+            integration_worker=integration_worker.model_dump() if integration_worker else None,
             integration_web=integration_web.model_dump() if integration_web else None,
         )
 

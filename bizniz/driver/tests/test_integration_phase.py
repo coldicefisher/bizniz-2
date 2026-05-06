@@ -237,6 +237,126 @@ class TestRunApi:
         assert "tester broke" in (result.error_summary or "")
 
 
+def _worker(name="consumer", framework="redis-streams", port=None):
+    return ServiceDefinition(
+        name=name, service_type="worker", framework=framework,
+        language="python", description="Worker",
+        workspace_name=name, port=port, depends_on=["redis", "database"],
+    )
+
+
+class TestRunWorker:
+    def test_no_workers_passes(self, tmp_path):
+        ip = IntegrationPhase(
+            http_tester_factory=MagicMock(),
+            web_tester_factory=MagicMock(),
+            worker_tester_factory=MagicMock(),
+        )
+        result = ip.run_worker(
+            milestone=_milestone(), architecture=_arch(_backend()),
+            project_root=tmp_path, compose_path="/p/c.yml",
+            service_workspaces={}, backend_contracts={},
+        )
+        assert result.passed is True
+        assert result.phase == "worker"
+
+    def test_no_factory_skips(self, tmp_path):
+        ip = IntegrationPhase(
+            http_tester_factory=MagicMock(),
+            web_tester_factory=MagicMock(),
+            worker_tester_factory=None,
+        )
+        result = ip.run_worker(
+            milestone=_milestone(),
+            architecture=_arch(_worker()),
+            project_root=tmp_path, compose_path="/p/c.yml",
+            service_workspaces={"consumer": _make_workspace(tmp_path, "consumer")},
+            backend_contracts={},
+        )
+        # Skips with passed=True so it doesn't block; error_summary explains.
+        assert result.passed is True
+        assert "no worker tester factory" in (result.error_summary or "")
+
+    def test_passes_when_pytest_passes(self, tmp_path):
+        tester = MagicMock()
+        tester.generate_test_file.return_value = "def test_x(): assert True"
+        ip = IntegrationPhase(
+            http_tester_factory=MagicMock(),
+            web_tester_factory=MagicMock(),
+            worker_tester_factory=MagicMock(return_value=tester),
+        )
+        ws = _make_workspace(tmp_path, "consumer")
+        with patch("bizniz.driver.integration_phase._run_pytest_in_sidecar") as pyt:
+            pyt.return_value = (True, "passed 1 test")
+            result = ip.run_worker(
+                milestone=_milestone(),
+                architecture=_arch(_backend(), _worker()),
+                project_root=tmp_path, compose_path="/p/c.yml",
+                service_workspaces={
+                    "backend": _make_workspace(tmp_path, "backend"),
+                    "consumer": ws,
+                },
+                backend_contracts={"backend": {"paths": {"/x": {}}}},
+            )
+        assert result.passed is True
+        # Tester was given backend_contracts + depends_on_services.
+        kwargs = tester.generate_test_file.call_args.kwargs
+        assert "backend_contracts" in kwargs
+        assert "depends_on_services" in kwargs
+        # The consumer's workspace got the test file written.
+        ws.write_text.assert_called_once()
+        path_arg, source_arg = ws.write_text.call_args.args
+        assert path_arg == "tests/integration/test_worker.py"
+
+    def test_consumer_service_type_alias(self, tmp_path):
+        """``service_type='consumer'`` should be picked up alongside
+        ``service_type='worker'``."""
+        consumer_svc = ServiceDefinition(
+            name="ingester", service_type="consumer", framework="kafka",
+            language="python", description="Kafka consumer",
+            workspace_name="ingester", port=None,
+        )
+        tester = MagicMock()
+        tester.generate_test_file.return_value = "y"
+        ip = IntegrationPhase(
+            http_tester_factory=MagicMock(),
+            web_tester_factory=MagicMock(),
+            worker_tester_factory=MagicMock(return_value=tester),
+        )
+        with patch("bizniz.driver.integration_phase._run_pytest_in_sidecar") as pyt:
+            pyt.return_value = (True, "ok")
+            result = ip.run_worker(
+                milestone=_milestone(), architecture=_arch(consumer_svc),
+                project_root=tmp_path, compose_path="/p/c.yml",
+                service_workspaces={"ingester": _make_workspace(tmp_path, "ingester")},
+                backend_contracts={},
+            )
+        assert result.passed is True
+
+    def test_failed_pytest_marks_failed(self, tmp_path):
+        tester = MagicMock()
+        tester.generate_test_file.return_value = "y"
+        ip = IntegrationPhase(
+            http_tester_factory=MagicMock(),
+            web_tester_factory=MagicMock(),
+            worker_tester_factory=MagicMock(return_value=tester),
+        )
+        with patch("bizniz.driver.integration_phase._run_pytest_in_sidecar") as pyt:
+            pyt.return_value = (False, "AssertionError: queue empty")
+            result = ip.run_worker(
+                milestone=_milestone(),
+                architecture=_arch(_backend(), _worker()),
+                project_root=tmp_path, compose_path="/p/c.yml",
+                service_workspaces={
+                    "backend": _make_workspace(tmp_path, "backend"),
+                    "consumer": _make_workspace(tmp_path, "consumer"),
+                },
+                backend_contracts={},
+            )
+        assert result.passed is False
+        assert "AssertionError" in (result.error_summary or "")
+
+
 class TestRunWeb:
     def test_no_frontends_passes(self, tmp_path):
         ip = IntegrationPhase(

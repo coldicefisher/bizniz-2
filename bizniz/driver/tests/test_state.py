@@ -19,7 +19,8 @@ class TestNextSubphase:
         assert next_subphase(SubPhase.REPAIR_ITER_0) == SubPhase.REPAIR_ITER_1
         assert next_subphase(SubPhase.REPAIR_ITER_2) == SubPhase.REVIEW_FINAL
         assert next_subphase(SubPhase.REVIEW_FINAL) == SubPhase.INTEGRATION_API
-        assert next_subphase(SubPhase.INTEGRATION_API) == SubPhase.INTEGRATION_WEB
+        assert next_subphase(SubPhase.INTEGRATION_API) == SubPhase.INTEGRATION_WORKER
+        assert next_subphase(SubPhase.INTEGRATION_WORKER) == SubPhase.INTEGRATION_WEB
         assert next_subphase(SubPhase.INTEGRATION_WEB) == SubPhase.DONE
 
     def test_done_is_terminal(self):

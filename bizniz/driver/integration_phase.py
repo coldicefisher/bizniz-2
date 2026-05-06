@@ -67,6 +67,7 @@ class IntegrationPhase:
         self,
         http_tester_factory: Callable[..., object],
         web_tester_factory: Callable[..., object],
+        worker_tester_factory: Optional[Callable[..., object]] = None,
         debugger_factory: Optional[Callable[..., object]] = None,
         debugger_max_iterations: int = 3,
         backend_wait_s: float = 60.0,
@@ -83,6 +84,7 @@ class IntegrationPhase:
         """
         self._http_factory = http_tester_factory
         self._web_factory = web_tester_factory
+        self._worker_factory = worker_tester_factory
         self._debugger_factory = debugger_factory
         self._debugger_max_iterations = debugger_max_iterations
         self._backend_wait_s = backend_wait_s
@@ -187,6 +189,104 @@ class IntegrationPhase:
             service_results=[r.model_dump() if hasattr(r, "model_dump") else dict(r.__dict__) for r in results],
             duration_s=time.time() - t0,
             backend_contracts=contracts,
+            error_summary=None if all_passed else _summarize_failures(results),
+        )
+
+    def run_worker(
+        self,
+        milestone: Milestone,
+        architecture: SystemArchitecture,
+        project_root: Path,
+        compose_path: str,
+        service_workspaces: Dict[str, BaseWorkspace],
+        backend_contracts: Dict[str, Dict],
+        auth_contract: Optional[str] = None,
+    ) -> IntegrationPhaseResult:
+        """Run integration tests for every worker service.
+
+        Workers don't have an HTTP surface — tests exercise them
+        through their queue/stream/websocket interface. Per-service
+        pytest sidecar; debugger dispatched on failure (same
+        ``repair_integration_failure`` path as run_api).
+        """
+        t0 = time.time()
+        workers = _list_workers(architecture)
+        if not workers:
+            self._log("IntegrationPhase: no workers in architecture; skipping Worker phase")
+            return IntegrationPhaseResult(
+                phase="worker", passed=True, duration_s=time.time() - t0,
+            )
+        if self._worker_factory is None:
+            self._log(
+                f"IntegrationPhase: {len(workers)} worker(s) but no "
+                f"worker_tester_factory configured — skipping Worker phase"
+            )
+            return IntegrationPhaseResult(
+                phase="worker", passed=True, duration_s=time.time() - t0,
+                error_summary="(no worker tester factory configured)",
+            )
+
+        results: List[ServiceResult] = []
+        all_passed = True
+        depends_lookup = {s.name: s for s in architecture.services}
+
+        for worker in workers:
+            ws = service_workspaces.get(worker.name)
+            if ws is None:
+                results.append(_failed_result(
+                    worker.name, f"no workspace for worker '{worker.name}'",
+                ))
+                all_passed = False
+                continue
+
+            depends_on_services = {
+                dep: depends_lookup[dep] for dep in worker.depends_on
+                if dep in depends_lookup
+            }
+
+            self._log(f"IntegrationPhase Worker: writing tests for '{worker.name}'")
+            tester = self._worker_factory(workspace=ws)
+            try:
+                source = tester.generate_test_file(
+                    problem_statement=milestone.problem_slice,
+                    service=worker,
+                    backend_contracts=backend_contracts,
+                    depends_on_services=depends_on_services,
+                    target_filepath="tests/integration/test_worker.py",
+                    auth_contract=auth_contract,
+                )
+            except Exception as e:
+                results.append(_failed_result(
+                    worker.name,
+                    f"WorkerTester raised {type(e).__name__}: {e}",
+                ))
+                all_passed = False
+                continue
+
+            ws.write_text("tests/integration/test_worker.py", source)
+
+            passed, output = self._run_pytest_with_repair(
+                backend=worker, workspace=ws, compose_path=compose_path,
+                project_root=project_root, auth_contract=auth_contract,
+                openapi_doc={},  # workers don't have an OpenAPI doc
+            )
+            if passed:
+                results.append(_passed_result(worker.name, _log_tail(output, 60)))
+            else:
+                results.append(_failed_result(
+                    worker.name,
+                    f"worker integration tests failed: {_log_tail(output, 30)}",
+                ))
+                all_passed = False
+
+        return IntegrationPhaseResult(
+            phase="worker",
+            passed=all_passed,
+            service_results=[
+                r.model_dump() if hasattr(r, "model_dump") else dict(r.__dict__)
+                for r in results
+            ],
+            duration_s=time.time() - t0,
             error_summary=None if all_passed else _summarize_failures(results),
         )
 
@@ -363,6 +463,16 @@ class IntegrationPhase:
 
 
 # ── helpers ─────────────────────────────────────────────────────────────
+
+
+def _list_workers(arch: SystemArchitecture) -> List[ServiceDefinition]:
+    """Architecture services whose service_type is ``worker`` or
+    ``consumer``. Both names are accepted because skeletons disagree."""
+    out: List[ServiceDefinition] = []
+    for s in arch.services:
+        if (s.service_type or "").lower() in ("worker", "consumer"):
+            out.append(s)
+    return out
 
 
 def _failed_result(name: str, error: str) -> ServiceResult:

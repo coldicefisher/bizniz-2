@@ -162,13 +162,15 @@ class GeminiClient(BaseAIClient):
                     usage = getattr(response, "usage_metadata", None)
                     in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
                     out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
-                    if in_tok or out_tok:
+                    img_count = self._count_image_parts(response)
+                    if in_tok or out_tok or img_count:
                         get_tracker().record(
                             agent=getattr(self, "_caller_agent", "unknown"),
                             model=self._model_name,
                             input_tokens=in_tok,
                             output_tokens=out_tok,
                             duration_ms=_duration_ms,
+                            image_count=img_count,
                         )
                 except Exception:
                     # Cost tracking is best-effort; never break a real call.
@@ -311,13 +313,15 @@ class GeminiClient(BaseAIClient):
                     usage = getattr(response, "usage_metadata", None)
                     in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
                     out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
-                    if in_tok or out_tok:
+                    img_count = self._count_image_parts(response)
+                    if in_tok or out_tok or img_count:
                         get_tracker().record(
                             agent=getattr(self, "_caller_agent", "unknown"),
                             model=self._model_name,
                             input_tokens=in_tok,
                             output_tokens=out_tok,
                             duration_ms=_duration_ms,
+                            image_count=img_count,
                         )
                 except Exception:
                     pass
@@ -428,6 +432,34 @@ class GeminiClient(BaseAIClient):
                 merged.append(content)
 
         return merged
+
+    @staticmethod
+    def _count_image_parts(response) -> int:
+        """Count image parts in a Gemini response.
+
+        Walks ``response.candidates[*].content.parts[*]`` and counts any
+        part with ``inline_data.mime_type`` starting with ``image/``.
+        Returns 0 on any error (cost tracking is best-effort and the
+        SDK shape varies across versions).
+        """
+        try:
+            count = 0
+            candidates = getattr(response, "candidates", None) or []
+            for cand in candidates:
+                content = getattr(cand, "content", None)
+                if content is None:
+                    continue
+                parts = getattr(content, "parts", None) or []
+                for part in parts:
+                    inline = getattr(part, "inline_data", None)
+                    if inline is None:
+                        continue
+                    mime = getattr(inline, "mime_type", "") or ""
+                    if str(mime).lower().startswith("image/"):
+                        count += 1
+            return count
+        except Exception:
+            return 0
 
     @staticmethod
     def _sanitize_json(text: str) -> str:
