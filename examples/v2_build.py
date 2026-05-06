@@ -30,6 +30,7 @@ from bizniz.auth_agent.agent import AuthAgent
 from bizniz.auth_orchestrators.fusionauth_orchestrator import FusionAuthOrchestrator
 from bizniz.code_reviewer.agent import CodeReviewer
 from bizniz.config.bizniz_config import BiznizConfig
+from bizniz.cost import get_tracker
 from bizniz.driver.gates import GatePolicy
 from bizniz.driver.integration_phase import IntegrationPhase
 from bizniz.driver.milestone_loop import MilestoneLoop
@@ -46,16 +47,24 @@ from bizniz.quality_engineer.agent import QualityEngineer
 from bizniz.workspace.local_workspace import LocalWorkspace
 
 
-def _client_for(model: str):
-    """Build a client for ``model`` using the prefix-routing convention."""
+def _client_for(model: str, agent_label: str = "unknown"):
+    """Build a client for ``model`` using the prefix-routing convention.
+
+    ``agent_label`` is stamped onto the client as ``_caller_agent`` so
+    the cost tracker can group records per agent (clients auto-record
+    on every call and read this attribute).
+    """
     if model.startswith("claude"):
         from bizniz.clients.claude.claude_client import ClaudeClient
-        return ClaudeClient(model=model)
-    if model.startswith("gemini"):
+        client = ClaudeClient(model=model)
+    elif model.startswith("gemini"):
         from bizniz.clients.gemini.gemini_client import GeminiClient
-        return GeminiClient(model=model)
-    from bizniz.clients.chatgpt.chatgpt_client import ChatGPTClient
-    return ChatGPTClient(model=model)
+        client = GeminiClient(model=model)
+    else:
+        from bizniz.clients.chatgpt.chatgpt_client import ChatGPTClient
+        client = ChatGPTClient(model=model)
+    client._caller_agent = agent_label
+    return client
 
 
 def _on_status(prefix: str = ""):
@@ -80,12 +89,13 @@ def _new_job_id() -> str:
 def _build_pipeline(args, on_status) -> V2Pipeline:
     config = BiznizConfig.load()
 
-    planner_client = _client_for(config.planner_model or config.architect_model)
-    architect_client = _client_for(config.architect_model)
-    engineer_client = _client_for(config.engineer_model)
-    qe_client = _client_for(config.architect_model)
-    cr_client = _client_for(config.architect_model)
-    tester_client = _client_for(getattr(config, "tester_model", config.architect_model))
+    planner_client = _client_for(config.planner_model or config.architect_model, "planner")
+    architect_client = _client_for(config.architect_model, "architect")
+    engineer_client = _client_for(config.engineer_model, "engineer")
+    qe_client = _client_for(config.architect_model, "quality_engineer")
+    cr_client = _client_for(config.architect_model, "code_reviewer")
+    tester_client = _client_for(getattr(config, "tester_model", config.architect_model), "integration_tester")
+    auth_client = _client_for(config.architect_model, "auth_agent")
 
     # Repair tier escalation: read from config if present, else default to
     # [engineer_model, engineer_model, gemini-pro].
@@ -122,7 +132,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     def repair_engineer_factory(iteration: int) -> Engineer:
         tier_model = repair_tiers[min(iteration, len(repair_tiers) - 1)]
         return Engineer(
-            client=_client_for(tier_model),
+            client=_client_for(tier_model, f"engineer_repair_t{iteration}"),
             workspace=primary_workspace,
             compose_path=compose_path,
             target_service="backend",
@@ -135,7 +145,9 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     def web_tester_factory(workspace):
         return WebUITester(client=tester_client, workspace=workspace)
 
-    debugger_client = _client_for(getattr(config, "debugger_model", config.architect_model))
+    debugger_client = _client_for(
+        getattr(config, "debugger_model", config.architect_model), "debugger",
+    )
 
     def debugger_factory(workspace, service):
         """Build a fresh AgenticDebugger bound to ``service``'s container.
@@ -177,6 +189,18 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     job_id = args.resume_job_id or _new_job_id()
     run_state = RunState(runs_root / job_id)
 
+    # Cost tracker: start a job so every recorded call carries the
+    # job_id; phase + milestone tags are set per-call by V2Pipeline +
+    # MilestoneLoop. The run_status's job_id is reused so the cost log
+    # and run state agree.
+    cost_tracker = get_tracker()
+    if cost_tracker.current_job_id is None:
+        cost_tracker.start_job(
+            project_slug=project_slug,
+            problem_statement=args.problem or "",
+            metadata={"run_state_job_id": job_id, "gate_mode": gate_mode},
+        )
+
     milestone_loop = MilestoneLoop(
         engineer=engineer,
         quality_engineer=qe,
@@ -189,14 +213,14 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         project_root=project_root,
         repair_budget=len(repair_tiers),
         repair_engineer_factory=repair_engineer_factory,
+        cost_tracker=cost_tracker,
         on_status=on_status,
     )
 
     def auth_agent_factory(architecture):
-        from bizniz.workspace.local_workspace import LocalWorkspace
         fa_orch = FusionAuthOrchestrator()
         return AuthAgent(
-            client=_client_for(config.architect_model),
+            client=auth_client,
             workspace=primary_workspace,
             fa_orchestrator=fa_orch,
             on_status=on_status,
@@ -211,7 +235,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     def provision_callable(architecture, project_name):
         return provisioner.provision(architecture, project_name)
 
-    return V2Pipeline(
+    pipeline = V2Pipeline(
         planner=planner,
         architect=architect,
         auth_agent_factory=auth_agent_factory,
@@ -221,8 +245,14 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         run_state=run_state,
         project_name=project_slug,
         compose_path_for_arch=lambda _arch: compose_path,
+        cost_tracker=cost_tracker,
         on_status=on_status,
     )
+    # Attach cost tracker + run_state to the pipeline-build closure so
+    # main() can write the cost report on exit.
+    pipeline._build_runs_dir = run_state.root
+    pipeline._build_cost_tracker = cost_tracker
+    return pipeline
 
 
 def main():
@@ -269,6 +299,25 @@ def main():
         plan_only=args.plan_only,
         target_milestone=args.milestone,
     )
+
+    # Finish the cost tracker job + write a summary to docs/runs/<job>/cost.md.
+    tracker = getattr(pipeline, "_build_cost_tracker", None)
+    runs_dir = getattr(pipeline, "_build_runs_dir", None)
+    if tracker is not None:
+        try:
+            tracker.finish_job(
+                status="halted" if result.halted_at else "succeeded",
+            )
+        except Exception:
+            pass
+        if runs_dir is not None:
+            try:
+                summary = tracker.summary()
+                cost_md = runs_dir / "cost.md"
+                cost_md.write_text(str(summary))
+                on_status(f"Cost report written to {cost_md}")
+            except Exception as e:
+                on_status(f"Cost report write failed: {type(e).__name__}: {e}")
 
     if result.halted_at:
         on_status(f"HALTED at {result.halted_at}: {result.halt_reason}")

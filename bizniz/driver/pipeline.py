@@ -57,6 +57,7 @@ class V2Pipeline:
         run_state: RunState,
         project_name: str,
         compose_path_for_arch: Callable[[SystemArchitecture], str],
+        cost_tracker=None,
         on_status: Optional[Callable[[str], None]] = None,
     ):
         self._planner = planner
@@ -68,7 +69,19 @@ class V2Pipeline:
         self._state = run_state
         self._project_name = project_name
         self._compose_path_for_arch = compose_path_for_arch
+        self._cost_tracker = cost_tracker
         self._on_status = on_status
+
+    def _tag_top(self, phase: TopPhase) -> None:
+        if self._cost_tracker is None:
+            return
+        try:
+            # Top phases are not milestone-scoped — clear milestone tag
+            # so records aren't accidentally grouped under a prior M.
+            self._cost_tracker.set_milestone(None)
+            self._cost_tracker.set_phase(phase.value)
+        except Exception:
+            pass
 
     # ── Public ─────────────────────────────────────────────────────────
 
@@ -162,6 +175,7 @@ class V2Pipeline:
                 return ProjectPlan.model_validate(raw)
             except Exception as e:
                 self._gates.hard("plan_reload_failed", f"could not reload plan.json: {e}")
+        self._tag_top(TopPhase.PLAN)
         plan = self._planner.plan(
             problem_statement=problem_statement,
             project_name=self._project_name,
@@ -180,6 +194,7 @@ class V2Pipeline:
                 return SystemArchitecture.model_validate(raw)
             except Exception as e:
                 self._gates.hard("architecture_reload_failed", f"could not reload architecture.json: {e}")
+        self._tag_top(TopPhase.ARCHITECT)
         architecture = self._architect.decompose(
             problem_statement=problem_statement,
             project_name=self._project_name,
@@ -191,6 +206,7 @@ class V2Pipeline:
         if self._state.is_top_phase_done(TopPhase.PROVISION):
             self._log("V2Pipeline: PROVISION already done — skipping (idempotent re-provision is safe but not auto-run)")
             return None
+        self._tag_top(TopPhase.PROVISION)
         result = self._provision(architecture, self._project_name)
         self._state.mark_top_phase(TopPhase.PROVISION, _result_payload(result))
         return result
@@ -210,6 +226,7 @@ class V2Pipeline:
             except Exception as e:
                 self._gates.hard("auth_reload_failed", f"could not reload auth.json: {e}")
 
+        self._tag_top(TopPhase.AUTH)
         agent = self._auth_agent_factory(architecture=architecture)
         # Caller-injected factory builds the agent already loaded with
         # client + workspace + orchestrator. We just call configure with

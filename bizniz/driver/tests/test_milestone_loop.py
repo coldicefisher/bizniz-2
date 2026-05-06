@@ -102,7 +102,7 @@ def _integration_result(passed=True, phase="api"):
 def _build_loop(
     *,
     engineer=None, qe=None, cr=None, integration=None,
-    workspace=None, gates=None, factory=None,
+    workspace=None, gates=None, factory=None, tracker=None,
 ):
     eng = engineer or MagicMock()
     qe_m = qe or MagicMock()
@@ -123,6 +123,7 @@ def _build_loop(
         project_root=Path("/p"),
         repair_budget=3,
         repair_engineer_factory=factory,
+        cost_tracker=tracker,
     )
 
 
@@ -374,6 +375,115 @@ class TestIntegrationGates:
 
 
 # ── Merge helper ────────────────────────────────────────────────────────
+
+
+class TestCostTagging:
+    """Verify the cost tracker is tagged before each phase fires."""
+
+    def test_no_tracker_is_safe(self, tmp_path):
+        # Already covered by happy-path tests, but be explicit.
+        eng = MagicMock()
+        eng.implement.return_value = _engineer_result()
+        qe = MagicMock()
+        qe.enrich.return_value = _spec()
+        qe.review.return_value = _coverage(approved=True)
+        cr = MagicMock()
+        cr.review.return_value = _code_review(approved=True)
+        ip = MagicMock()
+        ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_web.return_value = _integration_result(phase="web")
+
+        loop = _build_loop(engineer=eng, qe=qe, cr=cr, integration=ip, tracker=None)
+        state = MilestoneState(tmp_path / "m1", 1)
+        loop.run(
+            milestone=_milestone(), architecture=_arch(),
+            prior_specs=[], auth_contract=None, state=state,
+        )
+        # No exception; loop runs fine without a tracker.
+
+    def test_tags_each_phase(self, tmp_path):
+        tracker = MagicMock()
+        eng = MagicMock()
+        eng.implement.return_value = _engineer_result()
+        qe = MagicMock()
+        qe.enrich.return_value = _spec()
+        qe.review.return_value = _coverage(approved=True)
+        cr = MagicMock()
+        cr.review.return_value = _code_review(approved=True)
+        ip = MagicMock()
+        ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_web.return_value = _integration_result(phase="web")
+
+        loop = _build_loop(
+            engineer=eng, qe=qe, cr=cr, integration=ip, tracker=tracker,
+        )
+        state = MilestoneState(tmp_path / "m1", 1)
+        loop.run(
+            milestone=_milestone(), architecture=_arch(),
+            prior_specs=[], auth_contract=None, state=state,
+        )
+        # set_milestone called with our milestone index for every phase.
+        ms_calls = [c.args[0] for c in tracker.set_milestone.call_args_list]
+        assert all(arg == 1 for arg in ms_calls)
+        # set_phase called with each completed phase's value.
+        phases_set = [c.args[0] for c in tracker.set_phase.call_args_list]
+        assert "enrich" in phases_set
+        assert "implement" in phases_set
+        assert "review_initial" in phases_set
+        assert "integration_api" in phases_set
+        assert "integration_web" in phases_set
+
+    def test_tag_phase_during_repair(self, tmp_path):
+        tracker = MagicMock()
+        eng = MagicMock()
+        eng.implement.return_value = _engineer_result()
+        eng.repair.return_value = _engineer_result()
+        qe = MagicMock()
+        qe.enrich.return_value = _spec()
+        qe.review.side_effect = [_coverage(approved=False), _coverage(approved=True)]
+        cr = MagicMock()
+        cr.review.side_effect = [_code_review(approved=False, critical=True), _code_review(approved=True)]
+        ip = MagicMock()
+        ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_web.return_value = _integration_result(phase="web")
+
+        loop = _build_loop(
+            engineer=eng, qe=qe, cr=cr, integration=ip, tracker=tracker,
+        )
+        state = MilestoneState(tmp_path / "m1", 1)
+        loop.run(
+            milestone=_milestone(), architecture=_arch(),
+            prior_specs=[], auth_contract=None, state=state,
+        )
+        phases_set = [c.args[0] for c in tracker.set_phase.call_args_list]
+        # Repair phase 0 was tagged.
+        assert "repair_iter_0" in phases_set
+
+    def test_tracker_exception_does_not_break_run(self, tmp_path):
+        # Tracker raising on set_phase should NOT break the milestone.
+        tracker = MagicMock()
+        tracker.set_phase.side_effect = RuntimeError("tracker broke")
+        eng = MagicMock()
+        eng.implement.return_value = _engineer_result()
+        qe = MagicMock()
+        qe.enrich.return_value = _spec()
+        qe.review.return_value = _coverage(approved=True)
+        cr = MagicMock()
+        cr.review.return_value = _code_review(approved=True)
+        ip = MagicMock()
+        ip.run_api.return_value = _integration_result(phase="api")
+        ip.run_web.return_value = _integration_result(phase="web")
+
+        loop = _build_loop(
+            engineer=eng, qe=qe, cr=cr, integration=ip, tracker=tracker,
+        )
+        state = MilestoneState(tmp_path / "m1", 1)
+        # Should NOT raise.
+        outcome = loop.run(
+            milestone=_milestone(), architecture=_arch(),
+            prior_specs=[], auth_contract=None, state=state,
+        )
+        assert outcome.final_subphase == SubPhase.DONE
 
 
 class TestMergeRepairReport:

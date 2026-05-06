@@ -79,6 +79,7 @@ class MilestoneLoop:
         project_root: Path,
         repair_budget: int = 3,
         repair_engineer_factory: Optional[Callable[[int], Engineer]] = None,
+        cost_tracker=None,
         on_status: Optional[Callable[[str], None]] = None,
     ):
         self._engineer = engineer
@@ -92,7 +93,20 @@ class MilestoneLoop:
         self._project_root = project_root
         self._repair_budget = max(0, min(3, repair_budget))
         self._repair_engineer_factory = repair_engineer_factory
+        self._cost_tracker = cost_tracker
         self._on_status = on_status
+
+    def _tag(self, milestone_index: int, phase: SubPhase) -> None:
+        """Tag the cost tracker with the current milestone + phase so
+        per-call records land in the right bucket."""
+        if self._cost_tracker is None:
+            return
+        try:
+            self._cost_tracker.set_milestone(milestone_index)
+            self._cost_tracker.set_phase(phase.value)
+        except Exception:
+            # Cost tracking is best-effort; never break a real run.
+            pass
 
     # ── Public ─────────────────────────────────────────────────────────
 
@@ -128,11 +142,13 @@ class MilestoneLoop:
         # Walk the phases in order; each branch skips if already done.
 
         if not _has(state, SubPhase.ENRICH):
+            self._tag(state.milestone_index, SubPhase.ENRICH)
             spec = self._phase_enrich(milestone, architecture, auth_contract, prior_list)
             state.mark_phase(SubPhase.ENRICH, spec)
         spec = spec or self._reload_required(state, SubPhase.ENRICH, EnrichedSpec)
 
         if not _has(state, SubPhase.IMPLEMENT):
+            self._tag(state.milestone_index, SubPhase.IMPLEMENT)
             result = self._phase_implement(milestone, architecture, spec, auth_contract, prior_list)
             state.mark_phase(SubPhase.IMPLEMENT, result)
         result = result or self._reload_required(state, SubPhase.IMPLEMENT, EngineerResult)
@@ -150,6 +166,7 @@ class MilestoneLoop:
             if _has(state, phase):
                 continue
             if phase == SubPhase.REVIEW_INITIAL:
+                self._tag(state.milestone_index, phase)
                 coverage, code_review = self._phase_review(
                     milestone, architecture, spec, result, auth_contract, prior_list,
                 )
@@ -196,6 +213,7 @@ class MilestoneLoop:
                 f"MilestoneLoop: repair iteration {iter_idx} "
                 f"(model escalation tier {iter_idx})"
             )
+            self._tag(state.milestone_index, phase)
             engineer_for_repair = self._engineer_for_repair(iter_idx)
             report_for_repair = _merge_to_repair_report(
                 milestone.name, coverage, code_review,
@@ -227,6 +245,7 @@ class MilestoneLoop:
 
         # Integration phases.
         if not _has(state, SubPhase.INTEGRATION_API):
+            self._tag(state.milestone_index, SubPhase.INTEGRATION_API)
             integration_api = self._integration.run_api(
                 milestone=milestone,
                 architecture=architecture,
@@ -246,6 +265,7 @@ class MilestoneLoop:
                 )
 
         if not _has(state, SubPhase.INTEGRATION_WEB):
+            self._tag(state.milestone_index, SubPhase.INTEGRATION_WEB)
             api_artifact = state.read_artifact(SubPhase.INTEGRATION_API) or {}
             backend_contracts = api_artifact.get("backend_contracts") or {}
             integration_web = self._integration.run_web(
