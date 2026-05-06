@@ -71,14 +71,13 @@ class Engineer(ToolLoopAgent):
         tool_iterations: int = 60,
         timeout_seconds: int = 1800,
         base_url: Optional[str] = None,
-        history_window: int = 12,
+        history_window: int = 0,
     ):
-        """``history_window`` (default 12) bounds per-call input growth
-        via sliding-window compaction (lever B from cost analysis). The
-        Engineer keeps the system prompt + initial user message + the
-        last 12 assistant/user pairs. Older tool results get dropped
-        with a synthetic "compacted, use discovery tools to re-fetch"
-        note. Set to 0 to disable (legacy unbounded growth)."""
+        """``history_window`` (default 0 = unbounded). Smoke runs showed
+        sliding-window compaction made the Engineer churn more
+        iterations and degraded final quality more than it saved cost.
+        Disabled by default; left as an opt-in knob for callers who
+        want to experiment per-agent."""
         super().__init__(
             client=client,
             workspace=workspace,

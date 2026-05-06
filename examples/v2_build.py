@@ -167,13 +167,20 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     tester_client = _client_for(getattr(config, "tester_model", config.architect_model), "integration_tester")
     auth_client = _client_for(config.architect_model, "auth_agent")
 
-    # Repair tier escalation: read from config if present, else default to
-    # [engineer_model, engineer_model, gemini-pro].
-    repair_tiers = list(getattr(config, "repair_escalation", []) or [
-        config.engineer_model,
-        config.engineer_model,
-        "gemini-pro",
-    ])
+    # Engineer escalation chain. Used by:
+    #   - MilestoneLoop.implement: when the Engineer stalls (same action
+    #     3+ times in last 5 iterations), bump to next tier.
+    #   - MilestoneLoop.repair: each repair iteration uses the next tier.
+    # Read engineer_escalation from config if present; fall back to a
+    # cheap-to-expensive default.
+    engineer_tiers = list(
+        getattr(config, "engineer_escalation", []) or [
+            config.engineer_model,
+            "gemini-flash-top",
+            "gemini-pro",
+        ]
+    )
+    repair_tiers = list(getattr(config, "repair_escalation", []) or engineer_tiers)
 
     planner = Planner(client=planner_client, on_status=on_status)
     architect = Architect(client=architect_client, on_status=on_status)
@@ -207,6 +214,20 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         tier_model = repair_tiers[min(iteration, len(repair_tiers) - 1)]
         return Engineer(
             client=_client_for(tier_model, f"engineer_repair_t{iteration}"),
+            workspace=primary_workspace,
+            compose_path=compose_path,
+            target_service="backend",
+            on_status=on_status,
+        )
+
+    def engineer_escalation_factory(tier: int) -> Engineer:
+        """Returns a fresh Engineer at ``tier`` of the engineer_escalation
+        chain. Tier 0 = default; raises IndexError when chain exhausted."""
+        if tier >= len(engineer_tiers):
+            raise IndexError(f"escalation tier {tier} exceeds chain length {len(engineer_tiers)}")
+        tier_model = engineer_tiers[tier]
+        return Engineer(
+            client=_client_for(tier_model, f"engineer_t{tier}"),
             workspace=primary_workspace,
             compose_path=compose_path,
             target_service="backend",
@@ -297,6 +318,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         project_root=project_root,
         repair_budget=len(repair_tiers),
         repair_engineer_factory=repair_engineer_factory,
+        engineer_escalation_factory=engineer_escalation_factory,
         cost_tracker=cost_tracker,
         workspace_summary=workspace_summary,
         on_status=on_status,
@@ -426,16 +448,28 @@ def main():
                 cost_md = runs_dir / "cost.md"
                 cost_md.write_text(str(summary))
 
-                # Append a dated entry to costs.md so we keep a per-gate
-                # history. Phase label derives from CLI args so the entry
-                # is greppable: "phase=architect", "milestone=1 phase=enrich",
-                # "plan-only", or "full" for a full --milestone N run.
+                # Append a dated entry to costs.md with per-call breakdown.
                 phase_label = _phase_label_for_log(args)
                 ts = time.strftime("%Y-%m-%d %H:%M:%S")
                 halt_note = f" — HALTED@{result.halted_at}" if result.halted_at else ""
+
+                # Per-call detail (one line per LLM call) — lets you
+                # grep for "which agent burned the input tokens?"
+                detail_lines: list[str] = []
+                for rec in tracker.records():
+                    detail_lines.append(
+                        f"  {rec.agent:24s} {rec.model:32s} "
+                        f"in={rec.input_tokens:>7,d} out={rec.output_tokens:>5,d}  "
+                        f"${rec.cost.total_cost:.4f}"
+                        + (f"  cached_in={rec.cached_input_tokens:,d}"
+                           if getattr(rec, "cached_input_tokens", 0) else "")
+                    )
+                detail_block = "\n".join(detail_lines) if detail_lines else "  (no calls)"
+
                 entry = (
                     f"## {ts} — {phase_label}{halt_note}\n\n"
                     f"{summary}\n\n"
+                    f"### Per-call breakdown\n```\n{detail_block}\n```\n\n"
                     f"---\n\n"
                 )
                 costs_md = runs_dir / "costs.md"

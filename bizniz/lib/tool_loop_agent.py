@@ -64,6 +64,18 @@ class ToolLoopAgentNoTerminalError(ToolLoopAgentError):
     not return a terminal action."""
 
 
+class ToolLoopAgentStalledError(ToolLoopAgentError):
+    """The agent emitted the same action signature too many times in
+    its recent window (default: 3 of the last 5). Caller should
+    escalate to a higher-tier model rather than continue spinning.
+
+    ``last_action`` carries the repeated action's signature so the
+    caller can include it in escalation logs."""
+    def __init__(self, message: str, last_action: str = ""):
+        super().__init__(message)
+        self.last_action = last_action
+
+
 # A tool handler takes the parsed action dict and returns the result
 # string that will be appended to the conversation as the next user
 # message. Handlers are responsible for their own error formatting —
@@ -101,14 +113,18 @@ class ToolLoopAgent(ABC):
         tool_iterations: int = 40,
         timeout_seconds: int = 600,
         history_window: int = 0,
+        stall_window: int = 5,
+        stall_threshold: int = 3,
     ):
         """``history_window``: when > 0, sliding-window compaction kicks in.
-        We always keep the system prompt + initial user message, then keep
-        the most recent ``history_window`` assistant/user PAIRS. Older
-        tool-result turns get dropped between calls. This bounds the
-        per-call input growth (which was the dominant cost lever in M1
-        smoke runs — Engineer used 1.68M input tokens across 44 calls).
-        Set to 0 (default) to keep entire history (legacy behavior).
+        Default 0 = full history (smoke runs showed compaction made the
+        Engineer churn more iterations than it saved cost).
+
+        ``stall_window`` / ``stall_threshold`` (default 5/3): if the
+        agent emits the same action signature ``stall_threshold`` times
+        within the last ``stall_window`` iterations, raise
+        ``ToolLoopAgentStalledError`` so the caller can escalate to a
+        higher-tier model rather than burn iterations on a stuck loop.
         """
         self._client = client
         self._workspace = workspace
@@ -116,6 +132,8 @@ class ToolLoopAgent(ABC):
         self._tool_iterations = tool_iterations
         self._timeout_seconds = timeout_seconds
         self._history_window = max(0, history_window)
+        self._stall_window = max(2, stall_window)
+        self._stall_threshold = max(2, stall_threshold)
 
     # ── Subclass contract ────────────────────────────────────────────────────
 
@@ -192,6 +210,13 @@ class ToolLoopAgent(ABC):
         parse_failures = 0
         max_parse_failures = 3
 
+        # Stall detection: deque of recent action signatures. If any
+        # signature appears ``stall_threshold`` times in the last
+        # ``stall_window`` actions, raise ToolLoopAgentStalledError so
+        # the caller can escalate models rather than burn iterations.
+        from collections import deque
+        recent_actions: deque = deque(maxlen=self._stall_window)
+
         for turn in range(1, self._tool_iterations + 1):
             elapsed = time.time() - start_time
             if elapsed > self._timeout_seconds:
@@ -252,6 +277,31 @@ class ToolLoopAgent(ABC):
                 continue
 
             self._log_action(agent_name, action_type, action)
+
+            # Stall detection. Signature is the action dict minus
+            # ``thinking`` (free-text reasoning that varies legitimately
+            # call-to-call). All other fields participate so identical
+            # actions with different payloads don't collide.
+            try:
+                sig = json.dumps(
+                    {k: v for k, v in action.items() if k != "thinking"},
+                    sort_keys=True, default=str,
+                )
+            except Exception:
+                sig = action_type
+            recent_actions.append(sig)
+            sig_count = sum(1 for s in recent_actions if s == sig)
+            if sig_count >= self._stall_threshold:
+                self._log(
+                    f"{agent_name}: STALL — same action {sig_count}x in "
+                    f"last {len(recent_actions)} iterations: {sig}"
+                )
+                raise ToolLoopAgentStalledError(
+                    f"{agent_name}: stalled — same action repeated "
+                    f"{sig_count}x in last {len(recent_actions)} iterations",
+                    last_action=str(sig),
+                )
+
             try:
                 result = handler(action)
             except Exception as e:

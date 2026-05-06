@@ -30,6 +30,7 @@ from bizniz.driver.integration_phase import IntegrationPhase, IntegrationPhaseRe
 from bizniz.driver.state import MilestoneState, SubPhase, next_subphase
 from bizniz.engineer.agent import Engineer
 from bizniz.engineer.types import EngineerResult
+from bizniz.lib.tool_loop_agent import ToolLoopAgentStalledError
 from bizniz.planner.types import Milestone
 from bizniz.quality_engineer.agent import QualityEngineer
 from bizniz.quality_engineer.types import CoverageReport, EnrichedSpec
@@ -80,6 +81,7 @@ class MilestoneLoop:
         project_root: Path,
         repair_budget: int = 3,
         repair_engineer_factory: Optional[Callable[[int], Engineer]] = None,
+        engineer_escalation_factory: Optional[Callable[[int], Engineer]] = None,
         cost_tracker=None,
         workspace_summary: Optional[str] = None,
         on_status: Optional[Callable[[str], None]] = None,
@@ -93,8 +95,11 @@ class MilestoneLoop:
         self._primary_workspace = primary_workspace
         self._compose_path = compose_path
         self._project_root = project_root
-        self._repair_budget = max(0, min(3, repair_budget))
+        self._repair_budget = max(0, min(5, repair_budget))
         self._repair_engineer_factory = repair_engineer_factory
+        # Escalation factory for IMPLEMENT (called on stall detection).
+        # Tier 0 = the default engineer; tier N>0 = next-tier model.
+        self._engineer_escalation_factory = engineer_escalation_factory
         self._cost_tracker = cost_tracker
         self._workspace_summary = workspace_summary
         self._on_status = on_status
@@ -179,7 +184,9 @@ class MilestoneLoop:
 
         if not _has(state, SubPhase.IMPLEMENT):
             self._tag(state.milestone_index, SubPhase.IMPLEMENT)
-            result = self._phase_implement(milestone, architecture, spec, auth_contract, prior_list)
+            result = self._phase_implement_with_escalation(
+                milestone, architecture, spec, auth_contract, prior_list,
+            )
             state.mark_phase(SubPhase.IMPLEMENT, result)
         result = result or self._reload_required(state, SubPhase.IMPLEMENT, EngineerResult)
 
@@ -533,14 +540,55 @@ class MilestoneLoop:
     def _phase_implement(
         self, milestone, architecture, spec, auth_contract, prior_list,
     ) -> EngineerResult:
-        return self._engineer.implement(
-            milestone=milestone,
-            architecture=architecture,
-            enriched_spec=spec,
-            auth_contract=auth_contract,
-            prior_specs=prior_list,
-            workspace_summary=self._workspace_summary,
+        return self._phase_implement_with_escalation(
+            milestone, architecture, spec, auth_contract, prior_list,
         )
+
+    def _phase_implement_with_escalation(
+        self, milestone, architecture, spec, auth_contract, prior_list,
+    ) -> EngineerResult:
+        """Try implement on the default Engineer. On stall, escalate
+        through ``engineer_escalation_factory`` tiers (1, 2, ...) until
+        one converges or we exhaust the chain.
+        """
+        # Tier 0 = self._engineer (default model).
+        attempt = 0
+        last_engineer = self._engineer
+        while True:
+            try:
+                return last_engineer.implement(
+                    milestone=milestone,
+                    architecture=architecture,
+                    enriched_spec=spec,
+                    auth_contract=auth_contract,
+                    prior_specs=prior_list,
+                    workspace_summary=self._workspace_summary,
+                )
+            except ToolLoopAgentStalledError as e:
+                attempt += 1
+                self._log(
+                    f"MilestoneLoop: implement stalled "
+                    f"({e.last_action}); escalating to tier {attempt}"
+                )
+                if self._engineer_escalation_factory is None:
+                    self._gates.hard(
+                        "engineer_stalled_no_escalation",
+                        f"implement stalled and no escalation factory configured",
+                    )
+                try:
+                    last_engineer = self._engineer_escalation_factory(attempt)
+                except IndexError:
+                    self._gates.hard(
+                        "engineer_escalation_exhausted",
+                        f"implement stalled at top tier {attempt}; "
+                        f"giving up (no higher tier)",
+                    )
+                except Exception as e2:
+                    self._gates.hard(
+                        "engineer_escalation_factory_failed",
+                        f"escalation factory raised "
+                        f"{type(e2).__name__}: {e2}",
+                    )
 
     def _phase_review(
         self, milestone, architecture, spec, result, auth_contract, prior_list,

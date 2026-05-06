@@ -16,8 +16,18 @@
 # routing to a generic default.
 
 # The Engineer plans the work for each service: requirements, use cases,
-# domain models, issues. Quality here cascades — bad issues = bad code.
-engineer_model: gemini-flash-top
+# domain models, issues. Starts on the cheapest model; escalates via
+# engineer_escalation on repetition-detected stalls or repair iterations.
+engineer_model: gemini-flash-lite
+
+# Escalation chain when Engineer detects a repetition stall (same
+# action three of the last five iterations) or when repair iteration
+# escalates a tier. Indexed by tier 0, 1, 2... — Engineer.implement
+# starts at tier 0 (= engineer_model above). Repair iter N uses tier N.
+engineer_escalation:
+  - gemini-flash-lite
+  - gemini-flash-top
+  - gemini-pro
 
 # The Architect decomposes the project into services and orchestrates
 # the milestone walk. One call per milestone, so quality > cost.
