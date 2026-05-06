@@ -270,10 +270,23 @@ def main():
                    help="Push through soft gates (warn + continue)")
     p.add_argument("--interactive", action="store_true",
                    help="Halt at every gate for human review")
+    p.add_argument(
+        "--phase",
+        default=None,
+        help=(
+            "Run ONE phase only and exit. "
+            "Top phases: plan|architect|provision|auth. "
+            "Sub phases (require --milestone): "
+            "enrich|implement|review_initial|review_final|"
+            "repair_iter_0|repair_iter_1|repair_iter_2|"
+            "integration_api|integration_web. "
+            "Aliases: review→review_initial, repair→repair_iter_0."
+        ),
+    )
     args = p.parse_args()
 
-    if not args.problem and not args.resume:
-        p.error("either provide a problem statement or pass --resume")
+    if not args.problem and not args.resume and not args.phase:
+        p.error("provide a problem statement, --resume, or --phase")
 
     if args.resume and args.resume_job_id is None:
         runs_root = _resolve_runs_root(args.project)
@@ -298,6 +311,7 @@ def main():
         problem_statement=args.problem or "",
         plan_only=args.plan_only,
         target_milestone=args.milestone,
+        target_phase=args.phase,
     )
 
     # Finish the cost tracker job + write a summary to docs/runs/<job>/cost.md.

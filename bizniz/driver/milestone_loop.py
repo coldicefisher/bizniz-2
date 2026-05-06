@@ -117,6 +117,33 @@ class MilestoneLoop:
         prior_specs: Iterable[EnrichedSpec],
         auth_contract: Optional[str],
         state: MilestoneState,
+        only_phase: Optional[SubPhase] = None,
+    ) -> MilestoneOutcome:
+        """Run (or resume) milestone ``milestone`` to completion.
+
+        ``only_phase``: when set, run ONLY that sub-phase (re-running
+        even if marked done) and return immediately. Loads required
+        prerequisites from disk; halts if a prerequisite phase is
+        missing. Useful for ``--phase review --milestone N``-style
+        re-entry after editing the spec or prior artifact.
+        """
+        if only_phase is not None:
+            return self._run_single_phase(
+                milestone, architecture, list(prior_specs or []),
+                auth_contract, state, only_phase,
+            )
+        return self._run_full(
+            milestone, architecture, list(prior_specs or []),
+            auth_contract, state,
+        )
+
+    def _run_full(
+        self,
+        milestone: Milestone,
+        architecture: SystemArchitecture,
+        prior_list,
+        auth_contract,
+        state: MilestoneState,
     ) -> MilestoneOutcome:
         """Run (or resume) milestone ``milestone`` to completion.
 
@@ -128,7 +155,6 @@ class MilestoneLoop:
             f"MilestoneLoop: M{state.milestone_index} "
             f"'{milestone.name}' (resume from {state.last_completed()})"
         )
-        prior_list = list(prior_specs or [])
 
         # Phase artifacts assembled in-memory as the loop progresses.
         spec: Optional[EnrichedSpec] = self._load_spec_if_done(state)
@@ -296,6 +322,147 @@ class MilestoneLoop:
         return MilestoneOutcome(
             milestone_name=milestone.name,
             final_subphase=SubPhase.DONE,
+            enriched_spec=spec,
+            engineer_result=result,
+            code_review=code_review,
+            coverage=coverage,
+            repair_iterations=repair_iterations,
+            integration_api=integration_api.model_dump() if integration_api else None,
+            integration_web=integration_web.model_dump() if integration_web else None,
+        )
+
+    # ── Single-phase re-entry (for --phase flag) ────────────────────────
+
+    def _run_single_phase(
+        self,
+        milestone: Milestone,
+        architecture: SystemArchitecture,
+        prior_list,
+        auth_contract: Optional[str],
+        state: MilestoneState,
+        target: SubPhase,
+    ) -> MilestoneOutcome:
+        """Run only ``target`` for this milestone, loading prerequisite
+        artifacts from disk. Re-runs the phase even if already marked
+        done. Does NOT mark DONE at the end.
+
+        Halts via gates if a required prerequisite is missing.
+        """
+        self._log(
+            f"MilestoneLoop: M{state.milestone_index} '{milestone.name}' "
+            f"single-phase re-entry: {target.value}"
+        )
+
+        # Load prerequisites from disk for any phase that needs them.
+        spec = self._reload_required(state, SubPhase.ENRICH, EnrichedSpec) \
+            if target != SubPhase.ENRICH else None
+        result = None
+        if target in (SubPhase.REVIEW_INITIAL, SubPhase.REPAIR_ITER_0,
+                      SubPhase.REPAIR_ITER_1, SubPhase.REPAIR_ITER_2,
+                      SubPhase.REVIEW_FINAL,
+                      SubPhase.INTEGRATION_API, SubPhase.INTEGRATION_WEB):
+            result = self._reload_required(state, SubPhase.IMPLEMENT, EngineerResult)
+
+        # Dispatch.
+        coverage: Optional[CoverageReport] = None
+        code_review: Optional[CodeReviewReport] = None
+        integration_api: Optional[IntegrationPhaseResult] = None
+        integration_web: Optional[IntegrationPhaseResult] = None
+        repair_iterations = 0
+
+        self._tag(state.milestone_index, target)
+
+        if target == SubPhase.ENRICH:
+            spec = self._phase_enrich(milestone, architecture, auth_contract, prior_list)
+            state.mark_phase(target, spec)
+
+        elif target == SubPhase.IMPLEMENT:
+            result = self._phase_implement(
+                milestone, architecture, spec, auth_contract, prior_list,
+            )
+            state.mark_phase(target, result)
+
+        elif target in (SubPhase.REVIEW_INITIAL, SubPhase.REVIEW_FINAL):
+            coverage, code_review = self._phase_review(
+                milestone, architecture, spec, result, auth_contract, prior_list,
+            )
+            state.mark_phase(target, {
+                "coverage": coverage.model_dump(),
+                "code_review": code_review.model_dump(),
+            })
+
+        elif target in (SubPhase.REPAIR_ITER_0, SubPhase.REPAIR_ITER_1, SubPhase.REPAIR_ITER_2):
+            iter_idx = {
+                SubPhase.REPAIR_ITER_0: 0,
+                SubPhase.REPAIR_ITER_1: 1,
+                SubPhase.REPAIR_ITER_2: 2,
+            }[target]
+            # Need the latest review verdict to feed the repair report.
+            latest_cov = self._load_coverage_if_done(state)
+            latest_cr = self._load_review_if_done(state)
+            if latest_cov is None or latest_cr is None:
+                self._gates.hard(
+                    "missing_review_for_repair",
+                    f"cannot run {target.value} without a prior review on disk",
+                )
+            engineer_for_repair = self._engineer_for_repair(iter_idx)
+            report_for_repair = _merge_to_repair_report(
+                milestone.name, latest_cov, latest_cr,
+            )
+            result = engineer_for_repair.repair(
+                milestone=milestone,
+                architecture=architecture,
+                code_review_report=report_for_repair,
+                enriched_spec=spec,
+                auth_contract=auth_contract,
+                prior_specs=prior_list,
+            )
+            repair_iterations = 1
+            coverage, code_review = self._phase_review(
+                milestone, architecture, spec, result, auth_contract, prior_list,
+            )
+            state.mark_phase(target, {
+                "engineer_result": result.model_dump(),
+                "coverage": coverage.model_dump(),
+                "code_review": code_review.model_dump(),
+            })
+
+        elif target == SubPhase.INTEGRATION_API:
+            integration_api = self._integration.run_api(
+                milestone=milestone, architecture=architecture,
+                project_root=self._project_root, compose_path=self._compose_path,
+                service_workspaces={
+                    s.name: self._workspace_for_service(s.name)
+                    for s in architecture.services
+                },
+                auth_contract=auth_contract,
+            )
+            state.mark_phase(target, integration_api)
+
+        elif target == SubPhase.INTEGRATION_WEB:
+            api_artifact = state.read_artifact(SubPhase.INTEGRATION_API) or {}
+            backend_contracts = api_artifact.get("backend_contracts") or {}
+            integration_web = self._integration.run_web(
+                milestone=milestone, architecture=architecture,
+                project_root=self._project_root, compose_path=self._compose_path,
+                service_workspaces={
+                    s.name: self._workspace_for_service(s.name)
+                    for s in architecture.services
+                },
+                backend_contracts=backend_contracts,
+                auth_contract=auth_contract,
+            )
+            state.mark_phase(target, integration_web)
+
+        else:
+            self._gates.hard(
+                "invalid_target_phase",
+                f"--phase {target.value} is not addressable as a single phase",
+            )
+
+        return MilestoneOutcome(
+            milestone_name=milestone.name,
+            final_subphase=target,
             enriched_spec=spec,
             engineer_result=result,
             code_review=code_review,

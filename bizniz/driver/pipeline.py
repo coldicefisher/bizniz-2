@@ -25,6 +25,13 @@ from bizniz.auth_agent.types import AuthAgentResult
 from bizniz.driver.gates import GatePolicy, GateViolation
 from bizniz.driver.milestone_loop import MilestoneLoop, MilestoneOutcome
 from bizniz.driver.state import RunState, SubPhase, TopPhase
+
+# Friendly --phase aliases for the CLI; expand to canonical SubPhase values.
+PHASE_ALIASES: dict = {
+    "review": SubPhase.REVIEW_INITIAL,
+    "review_final": SubPhase.REVIEW_FINAL,
+    "repair": SubPhase.REPAIR_ITER_0,
+}
 from bizniz.planner.planner import Planner
 from bizniz.planner.types import Milestone, ProjectPlan
 from bizniz.quality_engineer.types import EnrichedSpec
@@ -90,14 +97,30 @@ class V2Pipeline:
         problem_statement: str,
         plan_only: bool = False,
         target_milestone: Optional[int] = None,
+        target_phase: Optional[str] = None,
     ) -> V2PipelineResult:
-        """Run the full pipeline (or up through ``target_milestone``).
+        """Run the full pipeline (or a slice of it).
 
         ``plan_only=True`` runs only the Planner + persists the plan,
-        then exits. ``target_milestone=N`` runs through milestone N
-        (1-indexed) inclusive and stops; default is all milestones.
+        then exits.
+
+        ``target_milestone=N`` runs through milestone N (1-indexed)
+        inclusive and stops.
+
+        ``target_phase`` (string name of a TopPhase or SubPhase, plus
+        friendly aliases ``review``, ``repair``, ``review_final``)
+        runs ONLY that phase:
+          - top phases (plan/architect/provision/auth) run independently
+          - sub phases require ``target_milestone`` to identify which
+            milestone's instance to run
+        Single-phase mode loads prerequisite artifacts from disk and
+        re-runs the requested phase, even if already marked done.
         """
         try:
+            if target_phase is not None:
+                return self._run_single_phase(
+                    problem_statement, target_phase, target_milestone,
+                )
             return self._run_inner(problem_statement, plan_only, target_milestone)
         except GateViolation as gv:
             self._log(f"V2Pipeline halted at gate '{gv.gate_name}': {gv.reason}")
@@ -105,6 +128,141 @@ class V2Pipeline:
                 project_slug=self._architect_project_slug() or "",
                 halted_at=gv.gate_name,
                 halt_reason=gv.reason,
+            )
+
+    def _run_single_phase(
+        self,
+        problem_statement: str,
+        target_phase: str,
+        target_milestone: Optional[int],
+    ) -> V2PipelineResult:
+        """Dispatch ``target_phase`` to the right top/sub-phase runner."""
+        normalized = (target_phase or "").lower()
+
+        # Top phase?
+        for tp in TopPhase:
+            if normalized == tp.value:
+                return self._run_only_top_phase(tp, problem_statement)
+
+        # Sub phase (with alias resolution)?
+        sub: Optional[SubPhase] = PHASE_ALIASES.get(normalized)
+        if sub is None:
+            try:
+                sub = SubPhase(normalized)
+            except ValueError:
+                self._gates.hard(
+                    "invalid_phase",
+                    f"unknown --phase '{target_phase}'. Valid: "
+                    + ", ".join(
+                        [tp.value for tp in TopPhase]
+                        + [sp.value for sp in SubPhase if sp != SubPhase.DONE]
+                        + sorted(PHASE_ALIASES.keys())
+                    ),
+                )
+
+        if target_milestone is None:
+            self._gates.hard(
+                "missing_milestone",
+                f"--phase {normalized} requires --milestone N",
+            )
+        return self._run_only_sub_phase(sub, target_milestone, problem_statement)
+
+    def _run_only_top_phase(
+        self, phase: TopPhase, problem_statement: str,
+    ) -> V2PipelineResult:
+        """Run a single top phase and exit. Other top phases must
+        already be done if this phase depends on them (architect
+        depends on plan, etc.); we don't auto-chain in single-phase mode.
+        """
+        self._log(f"V2Pipeline: single top-phase mode — running '{phase.value}'")
+        if phase == TopPhase.PLAN:
+            self._top_plan(problem_statement)
+        elif phase == TopPhase.ARCHITECT:
+            plan = self._reload_top(TopPhase.PLAN, ProjectPlan, "plan")
+            self._top_architect(problem_statement, plan)
+        elif phase == TopPhase.PROVISION:
+            arch = self._reload_top(TopPhase.ARCHITECT, SystemArchitecture, "architecture")
+            self._top_provision(arch)
+        elif phase == TopPhase.AUTH:
+            arch = self._reload_top(TopPhase.ARCHITECT, SystemArchitecture, "architecture")
+            plan = self._reload_top(TopPhase.PLAN, ProjectPlan, "plan")
+            self._top_auth(arch, plan)
+        return V2PipelineResult(project_slug=self._architect_project_slug() or "")
+
+    def _run_only_sub_phase(
+        self,
+        phase: SubPhase,
+        milestone_index: int,
+        problem_statement: str,
+    ) -> V2PipelineResult:
+        """Run a single sub-phase for milestone ``milestone_index``.
+
+        Loads plan + architecture from disk; assumes provision + auth
+        are already done. Compose stack must already be up.
+        """
+        self._log(
+            f"V2Pipeline: single sub-phase mode — M{milestone_index}/{phase.value}"
+        )
+        plan = self._reload_top(TopPhase.PLAN, ProjectPlan, "plan")
+        architecture = self._reload_top(TopPhase.ARCHITECT, SystemArchitecture, "architecture")
+
+        if milestone_index < 1 or milestone_index > len(plan.milestones):
+            self._gates.hard(
+                "milestone_out_of_range",
+                f"milestone {milestone_index} not in plan "
+                f"(plan has {len(plan.milestones)} milestone(s))",
+            )
+
+        # Build prior_specs by loading earlier milestones' EnrichedSpec from disk.
+        prior_specs: List[EnrichedSpec] = []
+        for i in range(1, milestone_index):
+            ms_state_i = self._state.milestone(i)
+            art = ms_state_i.read_artifact(SubPhase.ENRICH)
+            if art is not None:
+                try:
+                    prior_specs.append(EnrichedSpec.model_validate(art))
+                except Exception:
+                    pass
+
+        # Auth contract from disk (best effort).
+        auth_contract = None
+        try:
+            import json
+            auth_art = json.loads((self._state.root / f"{TopPhase.AUTH.value}.json").read_text())
+            auth_contract = auth_art.get("contract_markdown")
+        except Exception:
+            pass
+
+        ms_state = self._state.milestone(milestone_index)
+        milestone = plan.milestones[milestone_index - 1]
+        self._milestone_loop.run(
+            milestone=milestone,
+            architecture=architecture,
+            prior_specs=prior_specs,
+            auth_contract=auth_contract,
+            state=ms_state,
+            only_phase=phase,
+        )
+        return V2PipelineResult(
+            project_slug=architecture.project_slug,
+            architecture=architecture,
+        )
+
+    def _reload_top(self, phase: TopPhase, cls, label: str):
+        """Load a top-phase artifact from disk; halt if missing."""
+        art_path = self._state.root / f"{phase.value}.json"
+        if not art_path.exists():
+            self._gates.hard(
+                f"{label}_missing",
+                f"single-phase mode needs {label}.json on disk; run --phase {phase.value} first",
+            )
+        try:
+            import json
+            return cls.model_validate(json.loads(art_path.read_text()))
+        except Exception as e:
+            self._gates.hard(
+                f"{label}_corrupt",
+                f"could not reload {label}.json: {e}",
             )
 
     # ── Internals ──────────────────────────────────────────────────────

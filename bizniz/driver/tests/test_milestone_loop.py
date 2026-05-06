@@ -486,6 +486,107 @@ class TestCostTagging:
         assert outcome.final_subphase == SubPhase.DONE
 
 
+class TestSinglePhase:
+    """only_phase=X runs only that phase, loading prereqs from disk."""
+
+    def test_only_review_initial_runs_review_only(self, tmp_path):
+        # Pre-populate ENRICH + IMPLEMENT.
+        state = MilestoneState(tmp_path / "m1", 1)
+        state.mark_phase(SubPhase.ENRICH, _spec())
+        state.mark_phase(SubPhase.IMPLEMENT, _engineer_result())
+
+        eng = MagicMock()
+        qe = MagicMock()
+        qe.review.return_value = _coverage(approved=True)
+        cr = MagicMock()
+        cr.review.return_value = _code_review(approved=True)
+        ip = MagicMock()
+        loop = _build_loop(engineer=eng, qe=qe, cr=cr, integration=ip)
+
+        outcome = loop.run(
+            milestone=_milestone(), architecture=_arch(),
+            prior_specs=[], auth_contract=None, state=state,
+            only_phase=SubPhase.REVIEW_INITIAL,
+        )
+        assert outcome.final_subphase == SubPhase.REVIEW_INITIAL
+        # Review fired.
+        qe.review.assert_called_once()
+        cr.review.assert_called_once()
+        # Enrich/implement NOT re-run.
+        qe.enrich.assert_not_called()
+        eng.implement.assert_not_called()
+        # No integration phase.
+        ip.run_api.assert_not_called()
+        ip.run_web.assert_not_called()
+        # State updated for the target phase.
+        s2 = MilestoneState(tmp_path / "m1", 1)
+        assert SubPhase.REVIEW_INITIAL in s2.completed_phases()
+        # DONE not auto-marked.
+        assert not s2.is_done()
+
+    def test_only_enrich_skips_implement(self, tmp_path):
+        state = MilestoneState(tmp_path / "m1", 1)
+        eng = MagicMock()
+        qe = MagicMock()
+        qe.enrich.return_value = _spec()
+        cr = MagicMock()
+        ip = MagicMock()
+        loop = _build_loop(engineer=eng, qe=qe, cr=cr, integration=ip)
+
+        outcome = loop.run(
+            milestone=_milestone(), architecture=_arch(),
+            prior_specs=[], auth_contract=None, state=state,
+            only_phase=SubPhase.ENRICH,
+        )
+        assert outcome.final_subphase == SubPhase.ENRICH
+        qe.enrich.assert_called_once()
+        eng.implement.assert_not_called()
+
+    def test_only_review_without_prereqs_halts(self, tmp_path):
+        # No ENRICH or IMPLEMENT pre-populated.
+        state = MilestoneState(tmp_path / "m1", 1)
+        loop = _build_loop()
+        with pytest.raises(GateViolation) as exc:
+            loop.run(
+                milestone=_milestone(), architecture=_arch(),
+                prior_specs=[], auth_contract=None, state=state,
+                only_phase=SubPhase.REVIEW_INITIAL,
+            )
+        assert "missing_state_artifact" in exc.value.gate_name
+
+    def test_only_repair_without_review_halts(self, tmp_path):
+        state = MilestoneState(tmp_path / "m1", 1)
+        state.mark_phase(SubPhase.ENRICH, _spec())
+        state.mark_phase(SubPhase.IMPLEMENT, _engineer_result())
+        # No review on disk.
+        loop = _build_loop()
+        with pytest.raises(GateViolation) as exc:
+            loop.run(
+                milestone=_milestone(), architecture=_arch(),
+                prior_specs=[], auth_contract=None, state=state,
+                only_phase=SubPhase.REPAIR_ITER_0,
+            )
+        assert "missing_review_for_repair" == exc.value.gate_name
+
+    def test_only_integration_api_runs_only_api(self, tmp_path):
+        state = MilestoneState(tmp_path / "m1", 1)
+        state.mark_phase(SubPhase.ENRICH, _spec())
+        state.mark_phase(SubPhase.IMPLEMENT, _engineer_result())
+
+        ip = MagicMock()
+        ip.run_api.return_value = _integration_result(phase="api")
+        loop = _build_loop(integration=ip)
+
+        outcome = loop.run(
+            milestone=_milestone(), architecture=_arch(),
+            prior_specs=[], auth_contract=None, state=state,
+            only_phase=SubPhase.INTEGRATION_API,
+        )
+        assert outcome.final_subphase == SubPhase.INTEGRATION_API
+        ip.run_api.assert_called_once()
+        ip.run_web.assert_not_called()
+
+
 class TestMergeRepairReport:
     def test_includes_critical_findings(self):
         cr = _code_review(approved=False, critical=True)
