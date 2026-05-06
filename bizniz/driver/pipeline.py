@@ -517,15 +517,58 @@ def _resolve_fa_app_id() -> str:
 def _resolve_fa_tenant_id() -> str:
     """Resolve FusionAuth tenant UUID.
 
-    Order: env var override → the FA default tenant UUID
-    (``00000000-0000-0000-0000-000000000000``) the provisioner's
-    template uses by default.
+    Order:
+      1. ``FUSIONAUTH_TENANT_ID`` env var (explicit override)
+      2. Live query against the FA host (``FUSIONAUTH_HOST_URL`` +
+         ``FUSIONAUTH_API_KEY``) — picks the tenant named "Default", or
+         the first tenant if no "Default" exists. The CLI seeds these
+         env vars from the project's generated ``infra/.env`` before
+         the pipeline runs, so this path works in normal flows.
+      3. Template constant fallback (``00000000-...``) — kept only as a
+         last resort since the comment in fusionauth.py claiming this
+         is FA's "built-in default" turned out to be wrong: a
+         real-world FA assigns the default tenant a random UUID.
     """
     import os
     if os.environ.get("FUSIONAUTH_TENANT_ID"):
         return os.environ["FUSIONAUTH_TENANT_ID"]
+    queried = _query_fa_default_tenant_id(
+        os.environ.get("FUSIONAUTH_HOST_URL"),
+        os.environ.get("FUSIONAUTH_API_KEY"),
+    )
+    if queried:
+        return queried
     try:
         from bizniz.provisioner.templates.fusionauth import FusionAuthTemplate
         return FusionAuthTemplate.DEFAULT_TENANT_ID
     except Exception:
         return ""
+
+
+def _query_fa_default_tenant_id(
+    base_url: Optional[str], api_key: Optional[str],
+) -> Optional[str]:
+    """GET /api/tenant against a live FA, return the UUID of the
+    "Default" tenant (or the first listed). Returns None on any
+    failure — caller falls back to the template constant.
+    """
+    if not base_url or not api_key:
+        return None
+    import json as _json
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            f"{base_url.rstrip('/')}/api/tenant",
+            headers={"Authorization": api_key},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.loads(r.read())
+        tenants = data.get("tenants") or []
+        for t in tenants:
+            if (t.get("name") or "").lower() == "default":
+                return t.get("id")
+        if tenants:
+            return tenants[0].get("id")
+    except Exception:
+        return None
+    return None

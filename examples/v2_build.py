@@ -77,6 +77,40 @@ def _on_status(prefix: str = ""):
     return cb
 
 
+def _resolve_fa_endpoint(project_root: Path) -> tuple[str, str]:
+    """Read FUSIONAUTH_HOST_URL + FUSIONAUTH_API_KEY from the project's
+    generated infra/.env. Falls back to env vars if the file isn't there
+    (e.g., in tests). The provisioner emits these every run.
+    """
+    env_path = project_root / "infra" / "development" / ".env"
+    url = ""
+    key = ""
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if line.startswith("FUSIONAUTH_HOST_URL="):
+                url = line.split("=", 1)[1].strip()
+            elif line.startswith("FUSIONAUTH_API_KEY="):
+                key = line.split("=", 1)[1].strip()
+    return (
+        url or os.environ.get("FUSIONAUTH_HOST_URL", "http://localhost:9011"),
+        key or os.environ.get("FUSIONAUTH_API_KEY", ""),
+    )
+
+
+def _seed_fa_env_from_project(project_root: Path) -> None:
+    """Export FUSIONAUTH_* vars from the project's infra/.env into the
+    process env so pipeline-internal helpers (``_resolve_fa_tenant_id``)
+    can query the running FA without explicit args.
+    """
+    env_path = project_root / "infra" / "development" / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text().splitlines():
+        if line.startswith("FUSIONAUTH_") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k, v.strip())
+
+
 def _resolve_runs_root(project_slug: str) -> Path:
     base = Path(os.environ.get("BIZNIZ_PROJECTS_ROOT") or
                 str(Path.home() / "bizniz_projects"))
@@ -117,6 +151,10 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     compose_path = str(project_root / "infra" / "development" / "docker-compose.yml")
 
     primary_workspace = LocalWorkspace(root=project_root)
+
+    # Seed FUSIONAUTH_* env vars so pipeline FA-ID resolvers can query
+    # the running FA. No-op if the project hasn't been provisioned yet.
+    _seed_fa_env_from_project(project_root)
 
     def workspace_for_service(name: str) -> LocalWorkspace:
         # Service workspaces live at <project>/<workspace_name>/
@@ -223,7 +261,12 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     )
 
     def auth_agent_factory(architecture):
-        fa_orch = FusionAuthOrchestrator()
+        fa_url, fa_key = _resolve_fa_endpoint(project_root)
+        fa_orch = FusionAuthOrchestrator(
+            base_url=fa_url,
+            api_key=fa_key,
+            on_status=on_status,
+        )
         return AuthAgent(
             client=auth_client,
             workspace=primary_workspace,
