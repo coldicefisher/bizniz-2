@@ -186,6 +186,11 @@ class V2Pipeline:
         elif phase == TopPhase.AUTH:
             arch = self._reload_top(TopPhase.ARCHITECT, SystemArchitecture, "architecture")
             plan = self._reload_top(TopPhase.PLAN, ProjectPlan, "plan")
+            # AuthAgent talks to live FA — caller must have stack up first.
+            # We don't bring it up here so single-phase auth re-runs can
+            # be done against an already-running stack without a tear-down/
+            # bring-up cycle. If FA isn't reachable, AuthAgent raises +
+            # the gate halts.
             self._top_auth(arch, plan)
         return V2PipelineResult(project_slug=self._architect_project_slug() or "")
 
@@ -284,11 +289,13 @@ class V2Pipeline:
         compose_path = self._compose_path_for_arch(architecture)
 
         provision_result = self._top_provision(architecture)
-        auth_contract = self._top_auth(architecture, plan)
 
-        # Bring the stack up before milestone work — MilestoneLoop's
-        # integration phase assumes the stack is up + healthy.
+        # Bring the stack up BEFORE auth — AuthAgent talks to the live
+        # FusionAuth API to configure roles/users; FA must be reachable.
+        # MilestoneLoop's integration phase also assumes the stack is up.
         self._compose_up(compose_path)
+
+        auth_contract = self._top_auth(architecture, plan)
 
         milestones_done: List[str] = []
         prior_specs: List[EnrichedSpec] = []
@@ -374,7 +381,13 @@ class V2Pipeline:
         architecture: SystemArchitecture,
         plan: ProjectPlan,
     ) -> Optional[str]:
-        """Run AuthAgent.configure and return the AUTH_CONTRACT.md text."""
+        """Run AuthAgent.configure and return the AUTH_CONTRACT.md text.
+
+        Skipped when the architecture has no auth service — projects
+        without auth (e.g., a static-content site) shouldn't be required
+        to deploy FusionAuth. The AUTH phase is still marked done with
+        a sentinel artifact so resume sees the same "no auth" verdict.
+        """
         if self._state.is_top_phase_done(TopPhase.AUTH):
             self._log("V2Pipeline: AUTH already done — loading contract from disk")
             try:
@@ -383,6 +396,15 @@ class V2Pipeline:
                 return raw.get("contract_markdown")
             except Exception as e:
                 self._gates.hard("auth_reload_failed", f"could not reload auth.json: {e}")
+
+        if not _has_auth_service(architecture):
+            self._log("V2Pipeline: no auth service in architecture — skipping AUTH phase")
+            self._state.mark_top_phase(TopPhase.AUTH, {
+                "skipped": True,
+                "reason": "no auth service in architecture",
+                "contract_markdown": None,
+            })
+            return None
 
         self._tag_top(TopPhase.AUTH)
         agent = self._auth_agent_factory(architecture=architecture)
@@ -464,13 +486,46 @@ def _result_payload(result) -> dict:
     return {"value": str(result)}
 
 
+def _has_auth_service(architecture: SystemArchitecture) -> bool:
+    """True if the architecture declares any service with type ``auth``."""
+    for s in architecture.services:
+        if (s.service_type or "").lower() == "auth":
+            return True
+    return False
+
+
 def _resolve_fa_app_id() -> str:
-    """Resolve FusionAuth primary application UUID from env."""
+    """Resolve FusionAuth primary application UUID.
+
+    Order: env var override (for non-default deployments) → the constant
+    the provisioner's FA template hardcodes into kickstart. The
+    chicken-and-egg the env-var-only approach implied wasn't real:
+    every bizniz project gets the same well-known UUID baked into its
+    kickstart YAML at provision time, so we can resolve it without
+    reading a generated .env file.
+    """
     import os
-    return os.environ.get("FUSIONAUTH_APPLICATION_ID") or ""
+    if os.environ.get("FUSIONAUTH_APPLICATION_ID"):
+        return os.environ["FUSIONAUTH_APPLICATION_ID"]
+    try:
+        from bizniz.provisioner.templates.fusionauth import FusionAuthTemplate
+        return FusionAuthTemplate.APPLICATION_ID
+    except Exception:
+        return ""
 
 
 def _resolve_fa_tenant_id() -> str:
-    """Resolve FusionAuth tenant UUID from env."""
+    """Resolve FusionAuth tenant UUID.
+
+    Order: env var override → the FA default tenant UUID
+    (``00000000-0000-0000-0000-000000000000``) the provisioner's
+    template uses by default.
+    """
     import os
-    return os.environ.get("FUSIONAUTH_TENANT_ID") or ""
+    if os.environ.get("FUSIONAUTH_TENANT_ID"):
+        return os.environ["FUSIONAUTH_TENANT_ID"]
+    try:
+        from bizniz.provisioner.templates.fusionauth import FusionAuthTemplate
+        return FusionAuthTemplate.DEFAULT_TENANT_ID
+    except Exception:
+        return ""
