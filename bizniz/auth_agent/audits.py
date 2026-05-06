@@ -47,13 +47,26 @@ from bizniz.workspace.base_workspace import BaseWorkspace
 
 
 _TEST_USER_RE = re.compile(
-    # `- email / password — role role_name` or
-    # `- email / password — roles role_a, role_b`
+    # Accepts any of these surface forms (all observed in the wild
+    # across smoke runs of the AuthAgent — the AuthAgent doesn't
+    # produce a stable format, so the audit is permissive):
+    #   - email / password — role role_name
+    #   - email / password — roles a, b
+    #   - email / password (Role: role_name)
+    #   - email / password (Roles: a, b)
+    #   - email / password / ["RoleA", "RoleB"]
     r"^\s*[-*]\s+"
     r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"   # email
-    r"\s*/\s*(\S+)"                                          # password
-    r"\s*[—–-]\s*"
-    r"roles?\s+([\w,\s_-]+?)\s*$",
+    r"\s*/\s*(\S+?)"                                         # password (non-greedy so `/` can terminate it)
+    r"\s*"
+    r"(?:"
+    r"[—–-]\s*roles?\s+([\w,\s_-]+?)"                       # dash form
+    r"|"
+    r"\(\s*roles?\s*:\s*([\w,\s_-]+?)\s*\)"                 # parens form
+    r"|"
+    r"/\s*\[\s*([^\]]*?)\s*\]"                              # bracket-list form
+    r")"
+    r"\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -72,8 +85,14 @@ def _parse_test_users(contract_md: str) -> List[Tuple[str, str, List[str]]]:
     for m in _TEST_USER_RE.finditer(contract_md or ""):
         email = m.group(1).strip()
         password = m.group(2).strip()
-        roles_raw = m.group(3).strip()
-        roles = [r.strip() for r in re.split(r"[,\s]+", roles_raw) if r.strip()]
+        # Exactly one of group(3..5) carries the roles list per line.
+        roles_raw = (m.group(3) or m.group(4) or m.group(5) or "").strip()
+        # Strip stray quotes (bracket-list form has "Role" entries).
+        roles = [
+            r.strip().strip('"').strip("'")
+            for r in re.split(r"[,\s]+", roles_raw)
+            if r.strip()
+        ]
         out.append((email, password, roles))
     return out
 

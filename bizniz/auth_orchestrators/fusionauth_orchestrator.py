@@ -1163,8 +1163,27 @@ class FusionAuthOrchestrator:
                     app.role_names if app.role_names
                     else [r.name for r in spec.roles]
                 )
-                grants_for_app = sorted(granted & app_role_names)
+                # Case-insensitive intersection, preserving the app-side
+                # canonical case. Real-world specs sometimes have
+                # "landlord" on users vs "Landlord" on app roles; a
+                # silent skip here was the root cause of v2 smoke runs
+                # producing AUTH_CONTRACT.md with phantom test users.
+                granted_lc = {r.lower() for r in granted}
+                grants_for_app = sorted(
+                    arn for arn in app_role_names if arn.lower() in granted_lc
+                )
                 if not grants_for_app:
+                    # Emit an explicit skip action so callers (AuthAgent,
+                    # provisioner) see WHY the user wasn't created.
+                    report.actions.append(ReconcileAction(
+                        operation="skip_user",
+                        target=f"user:{user.email}@{app.name}",
+                        detail=(
+                            f"no role overlap (case-insensitive) — "
+                            f"user.roles={sorted(granted)}, "
+                            f"app.roles={sorted(app_role_names)}"
+                        ),
+                    ))
                     continue
 
                 ua = ReconcileAction(

@@ -181,11 +181,23 @@ def test_test_user_only_registered_on_apps_with_matching_roles(fa):
         ],
     )
     report = orch.materialize(spec)
-    alice_actions = [a for a in report.actions if "alice@x" in a.target]
-    targets = {a.target for a in alice_actions}
-    # Alice is registered on Admin only — not Reader
+    # Filter to alice's ensure_user actions only — skip_user actions
+    # are also emitted now (with explicit reason) for apps where she
+    # has no role overlap.
+    alice_ensures = [
+        a for a in report.actions
+        if a.operation == "ensure_user" and "alice@x" in a.target
+    ]
+    targets = {a.target for a in alice_ensures}
     assert any("@Admin" in t for t in targets)
     assert not any("@Reader" in t for t in targets)
+    # ALSO assert the skip_user action exists for visibility.
+    skips = [
+        a for a in report.actions
+        if a.operation == "skip_user" and "alice@x" in a.target
+    ]
+    assert any("@Reader" in s.target for s in skips), \
+        "expected explicit skip_user action for alice@Reader"
 
 
 def test_deprecated_roles_are_soft_deleted(fa):
