@@ -57,13 +57,13 @@ def _client_for(model: str, agent_label: str = "unknown"):
     """
     if model.startswith("claude"):
         from bizniz.clients.claude.claude_client import ClaudeClient
-        client = ClaudeClient(model=model)
+        client = ClaudeClient(model_name=model)
     elif model.startswith("gemini"):
         from bizniz.clients.gemini.gemini_client import GeminiClient
-        client = GeminiClient(model=model)
+        client = GeminiClient(model_name=model)
     else:
-        from bizniz.clients.chatgpt.chatgpt_client import ChatGPTClient
-        client = ChatGPTClient(model=model)
+        from bizniz.clients.openai.chatgpt_client import ChatGPTClient
+        client = ChatGPTClient(model_name=model)
     client._caller_agent = agent_label
     return client
 
@@ -88,7 +88,7 @@ def _new_job_id() -> str:
 
 
 def _build_pipeline(args, on_status) -> V2Pipeline:
-    config = BiznizConfig.load()
+    config = BiznizConfig.find_and_load()
 
     planner_client = _client_for(config.planner_model or config.architect_model, "planner")
     architect_client = _client_for(config.architect_model, "architect")
@@ -234,7 +234,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     provisioner = Provisioner(
         project_parent=Path(os.environ.get("BIZNIZ_PROJECTS_ROOT") or
                              str(Path.home() / "bizniz_projects")),
-        on_status=on_status,
+        on_status_message=on_status,
     )
 
     def provision_callable(architecture, project_name):
