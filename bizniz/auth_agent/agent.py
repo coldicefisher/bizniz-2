@@ -249,13 +249,39 @@ class AuthAgent(ToolLoopAgent):
         tenant_id: str,
         contract_markdown: str,
     ) -> AuditReport:
-        """Deterministic post-loop audit battery.
+        """Deterministic post-loop audit battery. Same battery for both
+        ``configure`` and ``audit`` modes.
 
-        Implemented in the second commit of the AuthAgent build —
-        this stub returns an empty report so the rest of the agent
-        wires up cleanly. When the battery lands, this is where the
-        token validation matrix, role enforcement, JWT signing,
-        credential exposure, idempotency, and contract drift checks
-        plug in.
+        See ``bizniz/auth_agent/audits.py`` for the individual checks.
+        v2.0 ships 5 checks: jwks_reachable, jwt_signing,
+        token_validation (per test user), test_users_in_fa,
+        credential_exposure. Two more (role_enforcement,
+        idempotency_replay) are queued for v2.1.
         """
-        return AuditReport(checks=[])
+        from bizniz.auth_agent.audits import run_audit_battery
+        try:
+            report = run_audit_battery(
+                orch=self._fa_orchestrator,
+                workspace=self._workspace,
+                architecture=architecture,
+                primary_app_id=primary_app_id,
+                tenant_id=tenant_id,
+                contract_markdown=contract_markdown,
+            )
+        except Exception as e:
+            # Audits are best-effort: a battery crash shouldn't kill
+            # the whole AuthAgent run. Log + return an empty report.
+            self._log(
+                f"AuthAgent: audit battery raised "
+                f"({type(e).__name__}: {e}) — returning empty report"
+            )
+            return AuditReport(checks=[])
+
+        passed = sum(1 for c in report.checks if c.passed)
+        total = len(report.checks)
+        self._log(
+            f"AuthAgent: audit battery — {passed}/{total} checks passed"
+        )
+        for c in report.failed:
+            self._log(f"AuthAgent: audit FAIL [{c.name}] — {c.detail}")
+        return report
