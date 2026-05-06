@@ -69,9 +69,14 @@ Available skeletons (pre-built starter repos that come with auth, Docker, tests,
 Skeleton selection rules:
 - Pick the matching skeleton for any application service (backend, frontend, worker) so it
   starts with a real working baseline instead of from scratch.
+- **EXPLICIT USER CONSTRAINTS WIN.** If the problem statement names a specific framework
+  (e.g., "Frontend: React", "Backend: FastAPI", "use Vue"), you MUST honor it — do NOT
+  override with a heuristic. Heuristics below apply ONLY when the problem statement is
+  silent on the choice.
 - "fastapi" for Python/FastAPI backends.
-- "react" is the DEFAULT frontend.
-- "angular" only when the UI is dashboard-heavy / data-dense (admin consoles, BI dashboards).
+- "react" is the DEFAULT frontend WHEN the problem statement doesn't name one.
+- "angular" only when the problem is silent on framework AND the UI is dashboard-heavy /
+  data-dense (admin consoles, BI dashboards).
 - The "teams-*" skeletons go together as a 3-service system pattern when the problem requires
   realtime fan-out feeds (Microsoft Teams-like channels, activity streams, group chat, etc.).
   When you pick the teams pattern, generate exactly three services: one with skeleton=teams-backend,

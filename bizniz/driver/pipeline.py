@@ -179,7 +179,13 @@ class V2Pipeline:
             self._top_plan(problem_statement)
         elif phase == TopPhase.ARCHITECT:
             plan = self._reload_top(TopPhase.PLAN, ProjectPlan, "plan")
-            self._top_architect(problem_statement, plan)
+            # In --phase architect mode the CLI usually doesn't pass a
+            # problem statement; fall back to the one persisted by the
+            # plan so the architect doesn't have to infer the project
+            # purpose from project_name alone.
+            self._top_architect(
+                problem_statement or plan.problem_statement, plan,
+            )
         elif phase == TopPhase.PROVISION:
             arch = self._reload_top(TopPhase.ARCHITECT, SystemArchitecture, "architecture")
             self._top_provision(arch)

@@ -64,8 +64,12 @@ infrastructure templates.
 For NEW services, follow the same rules as a fresh decompose:
 
 IMPORTANT framework rules:
-- Backend: ALWAYS Python with FastAPI unless explicitly otherwise.
-- Frontend: React with TypeScript by default, Angular for dashboards.
+- **EXPLICIT USER CONSTRAINTS WIN.** If the problem statement names a
+  specific framework (e.g., "Frontend: React", "use FastAPI"), honor
+  it — defaults below apply ONLY when the problem is silent.
+- Backend: Python with FastAPI by default.
+- Frontend: React with TypeScript by default; Angular only when the
+  problem is silent AND the UI is dashboard-heavy.
 - Never Node.js for backends; never C#/.NET for new projects.
 
 Authentication is REQUIRED whenever the milestone involves user
@@ -80,8 +84,8 @@ Available skeletons:
 Skeleton selection rules (for NEW services only — existing services
 keep their original skeleton):
 - "fastapi" for Python/FastAPI backends.
-- "react" is the default frontend.
-- "angular" only when UI is dashboard-heavy.
+- "react" is the default frontend WHEN the problem is silent on framework.
+- "angular" only when the problem is silent AND the UI is dashboard-heavy.
 - "teams-*" only when the system needs realtime fan-out feeds.
 - Infrastructure (database/cache/proxy/auth): always "none" — the
   Provisioner has dedicated templates.
