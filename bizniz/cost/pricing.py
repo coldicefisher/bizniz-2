@@ -10,18 +10,26 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 
-# USD per 1M tokens. {input, output}
+# USD per 1M tokens. {input, output, cached_input?, image?}
+# Source: https://ai.google.dev/gemini-api/docs/pricing  (verified 2026-05)
+# Pro models have a 200k-token tier doubling rates — text uses the
+# ≤200k rate here; the >200k rate is documented on the pricing page
+# but not encoded yet (Engineer never hits 200k input).
 MODEL_PRICING: Dict[str, Dict[str, float]] = {
     # ── Google Gemini ─────────────────────────────────────────────────────────
-    "gemini-2.5-flash-lite":            {"input": 0.10,  "output": 0.40},
-    "gemini-2.5-flash":                 {"input": 0.30,  "output": 2.50},
-    "gemini-2.5-pro":                   {"input": 1.25,  "output": 10.00},
-    "gemini-3.1-flash-lite-preview":    {"input": 0.25,  "output": 1.50},
-    "gemini-3-flash-preview":           {"input": 0.50,  "output": 3.00},
-    "gemini-3.1-pro-preview":           {"input": 2.05,  "output": 12.00},
-    "gemini-3.1-flash-image-preview":   {"input": 0.50,  "output": 3.00, "image": 60.00},
-    "gemini-3-pro-image-preview":       {"input": 2.00,  "output": 12.00, "image": 120.00},
-    "gemini-2.5-flash-image":           {"input": 0.30,  "output": 0.039, "image": 30.00},
+    "gemini-2.5-flash-lite":            {"input": 0.10,  "output": 0.40,  "cached_input": 0.01},
+    "gemini-2.5-flash":                 {"input": 0.30,  "output": 2.50,  "cached_input": 0.03},
+    "gemini-2.5-pro":                   {"input": 1.25,  "output": 10.00, "cached_input": 0.125},
+    "gemini-3.1-flash-lite-preview":    {"input": 0.25,  "output": 1.50,  "cached_input": 0.025},
+    "gemini-3-flash-preview":           {"input": 0.50,  "output": 3.00,  "cached_input": 0.05},
+    "gemini-3.1-pro-preview":           {"input": 2.00,  "output": 12.00, "cached_input": 0.20},
+    "gemini-3.1-flash-image-preview":   {"input": 0.50,  "output": 3.00,  "cached_input": 0.05, "image": 60.00},
+    "gemini-3-pro-image-preview":       {"input": 2.00,  "output": 12.00, "cached_input": 0.20, "image": 120.00},
+    # Note: gemini-2.5-flash-image has unusual pricing — text input
+    # at \$0.30/M, image OUTPUT at \$30/M tokens (NOT per image). Our
+    # ``image`` slot is per-image; for token-priced image output the
+    # output rate carries it. Verify against your actual usage.
+    "gemini-2.5-flash-image":           {"input": 0.30,  "output": 30.00, "cached_input": 0.03, "image": 30.00},
 
 
     # ── OpenAI ────────────────────────────────────────────────────────────────
@@ -90,12 +98,12 @@ def price_call(
 
     ``cached_input_tokens`` is the portion of ``input_tokens`` that was
     served from a provider-side prompt cache. These tokens are billed
-    at a discount (Gemini 2.5+ charges 25% of the normal input rate
-    for cached tokens; if a model has no explicit ``cached_input`` rate
-    we apply that 25% multiplier as a conservative default). The total
-    ``input_tokens`` MUST include the cached portion — the caller
-    reports the gross count and the cached subset; this function
-    discounts the cached subset internally.
+    at 10% of the normal input rate for Gemini 2.5+ models (per
+    https://ai.google.dev/gemini-api/docs/pricing). Per-model override
+    allowed via the ``cached_input`` key on the pricing entry. The
+    total ``input_tokens`` MUST include the cached portion — the
+    caller reports the gross count and the cached subset; this
+    function discounts the cached subset internally.
     """
     resolved = resolve_model(model)
     pricing = MODEL_PRICING.get(resolved)
@@ -105,7 +113,11 @@ def price_call(
 
     cached = max(0, min(int(cached_input_tokens or 0), int(input_tokens or 0)))
     uncached = max(0, int(input_tokens or 0) - cached)
-    cached_rate = pricing.get("cached_input", pricing["input"] * 0.25)
+    # Gemini context caching: cached tokens billed at 10% of standard
+    # input rate per https://ai.google.dev/gemini-api/docs/pricing
+    # (verified 2026-05). Per-model override allowed via the
+    # ``cached_input`` key on the pricing entry.
+    cached_rate = pricing.get("cached_input", pricing["input"] * 0.10)
     input_cost = (
         (uncached / 1_000_000.0) * pricing["input"]
         + (cached / 1_000_000.0) * cached_rate
