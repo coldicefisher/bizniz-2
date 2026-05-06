@@ -1,0 +1,358 @@
+"""Integration phase orchestrator (v2).
+
+Runs after Engineer/Reviewer have approved a milestone. Drives:
+
+  run_api  → for each backend in the milestone's architecture:
+              capture openapi contract → dispatch HTTPApiTester →
+              run pytest sidecar → on fail, dispatch debugger
+  run_web  → for each frontend: dispatch WebUITester → run Playwright
+              sidecar → on fail, dispatch debugger
+
+Topology: API tests must pass before web tests run. Web tests against a
+broken backend are noise. The pipeline calls run_api() first, then
+run_web() only if api passed.
+
+This is a thin v2 wrapper over v1 building blocks (HTTPApiTester,
+WebUITester, the sidecar pytest/playwright runners, the agentic
+debugger). The v1 ``run_integration_phase`` top-level orchestrator
+isn't called — its behavior is split across run_api/run_web here so
+sub-phase resume can pick up between them.
+
+Stack management is the pipeline's job — IntegrationPhase assumes the
+stack is up + healthy before run_api/run_web are called.
+"""
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+from pydantic import BaseModel, Field
+
+from bizniz.architect.types import ServiceDefinition, ServiceResult, SystemArchitecture
+from bizniz.integration.contracts import capture_backend_contracts
+from bizniz.integration.runner import (
+    _capture_container_logs,
+    _frontends,
+    _backends,
+    _log_tail,
+    _run_pytest_in_sidecar,
+    _run_playwright_in_sidecar,
+)
+from bizniz.planner.types import Milestone
+from bizniz.workspace.base_workspace import BaseWorkspace
+
+
+class IntegrationPhaseResult(BaseModel):
+    """Per-phase summary returned to the milestone loop."""
+    phase: str  # "api" or "web"
+    passed: bool
+    service_results: List[Dict] = Field(default_factory=list)
+    duration_s: float = 0.0
+    error_summary: Optional[str] = None
+    backend_contracts: Dict[str, Dict] = Field(default_factory=dict)
+
+
+class IntegrationPhase:
+    """Milestone-scoped integration test driver.
+
+    Construction is one-time per pipeline run (factories closed over
+    LLM clients, debugger config, etc.). ``run_api`` and ``run_web``
+    are the two callable entry points; either may be skipped on resume.
+    """
+
+    def __init__(
+        self,
+        http_tester_factory: Callable[..., object],
+        web_tester_factory: Callable[..., object],
+        debugger_factory: Optional[Callable[..., object]] = None,
+        debugger_max_iterations: int = 3,
+        backend_wait_s: float = 60.0,
+        on_status: Optional[Callable[[str], None]] = None,
+    ):
+        self._http_factory = http_tester_factory
+        self._web_factory = web_tester_factory
+        self._debugger_factory = debugger_factory
+        self._debugger_max_iterations = debugger_max_iterations
+        self._backend_wait_s = backend_wait_s
+        self._on_status = on_status
+
+    # ── Public ─────────────────────────────────────────────────────────
+
+    def run_api(
+        self,
+        milestone: Milestone,
+        architecture: SystemArchitecture,
+        project_root: Path,
+        compose_path: str,
+        service_workspaces: Dict[str, BaseWorkspace],
+        auth_contract: Optional[str] = None,
+    ) -> IntegrationPhaseResult:
+        """Run API integration tests for every backend in the architecture.
+
+        Returns a result with per-service status. ``passed`` is True only
+        if every backend passed.
+        """
+        t0 = time.time()
+        backends = _backends(architecture)
+        if not backends:
+            self._log("IntegrationPhase: no backends in architecture; skipping API phase")
+            return IntegrationPhaseResult(
+                phase="api", passed=True, duration_s=time.time() - t0,
+            )
+
+        self._log(
+            f"IntegrationPhase API: {len(backends)} backend(s), "
+            f"capturing contracts..."
+        )
+        contracts = capture_backend_contracts(
+            architecture=architecture,
+            project_root=project_root,
+            compose_path=compose_path,
+            on_status=self._on_status,
+            backend_wait_s=self._backend_wait_s,
+        )
+
+        results: List[ServiceResult] = []
+        all_passed = True
+
+        for backend in backends:
+            ws = service_workspaces.get(backend.name)
+            if ws is None:
+                results.append(_failed_result(
+                    backend.name,
+                    f"no workspace for backend '{backend.name}'",
+                ))
+                all_passed = False
+                continue
+
+            openapi = contracts.get(backend.name)
+            if openapi is None:
+                results.append(_failed_result(
+                    backend.name,
+                    f"failed to capture /openapi.json for '{backend.name}'",
+                ))
+                all_passed = False
+                continue
+
+            self._log(f"IntegrationPhase API: writing tests for '{backend.name}'")
+            tester = self._http_factory(workspace=ws)
+            try:
+                source = tester.generate_test_file(
+                    problem_statement=milestone.problem_slice,
+                    service=backend,
+                    openapi_doc=openapi,
+                    target_filepath="tests/integration/test_api.py",
+                    auth_contract=auth_contract,
+                )
+            except Exception as e:
+                results.append(_failed_result(
+                    backend.name,
+                    f"HTTPApiTester raised {type(e).__name__}: {e}",
+                ))
+                all_passed = False
+                continue
+
+            ws.write_text("tests/integration/test_api.py", source)
+
+            passed, output = self._run_pytest_with_repair(
+                backend=backend, workspace=ws, compose_path=compose_path,
+                project_root=project_root, auth_contract=auth_contract,
+                openapi_doc=openapi,
+            )
+            if passed:
+                results.append(_passed_result(backend.name, _log_tail(output, 60)))
+            else:
+                results.append(_failed_result(
+                    backend.name,
+                    f"integration tests failed: {_log_tail(output, 30)}",
+                ))
+                all_passed = False
+
+        return IntegrationPhaseResult(
+            phase="api",
+            passed=all_passed,
+            service_results=[r.model_dump() if hasattr(r, "model_dump") else dict(r.__dict__) for r in results],
+            duration_s=time.time() - t0,
+            backend_contracts=contracts,
+            error_summary=None if all_passed else _summarize_failures(results),
+        )
+
+    def run_web(
+        self,
+        milestone: Milestone,
+        architecture: SystemArchitecture,
+        project_root: Path,
+        compose_path: str,
+        service_workspaces: Dict[str, BaseWorkspace],
+        backend_contracts: Dict[str, Dict],
+        auth_contract: Optional[str] = None,
+    ) -> IntegrationPhaseResult:
+        """Run Web integration tests for every frontend service.
+
+        Assumes ``run_api`` already passed (pipeline gates this).
+        ``backend_contracts`` from run_api's result feeds the web tester.
+        """
+        t0 = time.time()
+        frontends = _frontends(architecture)
+        if not frontends:
+            self._log("IntegrationPhase: no frontends in architecture; skipping Web phase")
+            return IntegrationPhaseResult(
+                phase="web", passed=True, duration_s=time.time() - t0,
+            )
+
+        results: List[ServiceResult] = []
+        all_passed = True
+
+        for frontend in frontends:
+            ws = service_workspaces.get(frontend.name)
+            if ws is None:
+                results.append(_failed_result(
+                    frontend.name,
+                    f"no workspace for frontend '{frontend.name}'",
+                ))
+                all_passed = False
+                continue
+
+            self._log(f"IntegrationPhase Web: writing tests for '{frontend.name}'")
+            tester = self._web_factory(workspace=ws)
+            try:
+                source = tester.generate_test_file(
+                    problem_statement=milestone.problem_slice,
+                    service=frontend,
+                    backend_contracts=backend_contracts,
+                    target_filepath="tests/integration/ui.spec.cjs",
+                    auth_contract=auth_contract,
+                )
+            except Exception as e:
+                results.append(_failed_result(
+                    frontend.name,
+                    f"WebUITester raised {type(e).__name__}: {e}",
+                ))
+                all_passed = False
+                continue
+
+            ws.write_text("tests/integration/ui.spec.cjs", source)
+
+            passed, output = _run_playwright_in_sidecar(
+                service=frontend,
+                workspace_path=Path(ws.root) if hasattr(ws, "root") else project_root,
+                compose_path=compose_path,
+                on_status=self._on_status,
+            )
+            if passed:
+                results.append(_passed_result(frontend.name, _log_tail(output, 60)))
+            else:
+                results.append(_failed_result(
+                    frontend.name,
+                    f"web integration tests failed: {_log_tail(output, 30)}",
+                ))
+                all_passed = False
+
+        return IntegrationPhaseResult(
+            phase="web",
+            passed=all_passed,
+            service_results=[r.model_dump() if hasattr(r, "model_dump") else dict(r.__dict__) for r in results],
+            duration_s=time.time() - t0,
+            error_summary=None if all_passed else _summarize_failures(results),
+        )
+
+    # ── Internals ──────────────────────────────────────────────────────
+
+    def _run_pytest_with_repair(
+        self,
+        backend: ServiceDefinition,
+        workspace: BaseWorkspace,
+        compose_path: str,
+        project_root: Path,
+        auth_contract: Optional[str],
+        openapi_doc: Dict,
+    ) -> tuple[bool, str]:
+        """Run pytest in the sidecar; on fail, dispatch the debugger up
+        to ``debugger_max_iterations`` times.
+        """
+        passed, output = _run_pytest_in_sidecar(
+            service=backend,
+            workspace_path=Path(workspace.root) if hasattr(workspace, "root") else project_root,
+            compose_path=compose_path,
+            on_status=self._on_status,
+        )
+        if passed or self._debugger_factory is None:
+            return passed, output
+
+        self._log(
+            f"IntegrationPhase API: '{backend.name}' tests failed; "
+            f"dispatching debugger (max {self._debugger_max_iterations} iterations)"
+        )
+        for i in range(self._debugger_max_iterations):
+            try:
+                debugger = self._debugger_factory(
+                    workspace=workspace,
+                    compose_path=compose_path,
+                    service_name=backend.name,
+                )
+            except Exception as e:
+                self._log(
+                    f"IntegrationPhase API: debugger factory raised "
+                    f"{type(e).__name__}: {e} — bailing"
+                )
+                return False, output
+            try:
+                # Debugger interface (v1 AgenticDebugger): debug(error_output, ...)
+                debugger.debug(
+                    error_output=output,
+                    auth_contract=auth_contract,
+                )
+            except Exception as e:
+                self._log(
+                    f"IntegrationPhase API: debugger iteration {i} raised "
+                    f"{type(e).__name__}: {e}"
+                )
+                continue
+            # Re-run after debugger applied fixes.
+            passed, output = _run_pytest_in_sidecar(
+                service=backend,
+                workspace_path=Path(workspace.root) if hasattr(workspace, "root") else project_root,
+                compose_path=compose_path,
+                on_status=self._on_status,
+            )
+            if passed:
+                self._log(
+                    f"IntegrationPhase API: '{backend.name}' passed after "
+                    f"debugger iteration {i}"
+                )
+                return True, output
+        return False, output
+
+    def _log(self, msg: str) -> None:
+        if self._on_status:
+            self._on_status(msg)
+
+
+# ── helpers ─────────────────────────────────────────────────────────────
+
+
+def _failed_result(name: str, error: str) -> ServiceResult:
+    return ServiceResult(
+        service_name=name,
+        workspace_name=name,
+        success=False,
+        error=f"integration_failed: {error}",
+    )
+
+
+def _passed_result(name: str, output_tail: str) -> ServiceResult:
+    return ServiceResult(
+        service_name=name,
+        workspace_name=name,
+        success=True,
+        error=None,
+    )
+
+
+def _summarize_failures(results: List[ServiceResult]) -> str:
+    failed = [r for r in results if not r.success]
+    if not failed:
+        return ""
+    parts = [f"{r.service_name}: {r.error or '(no detail)'}" for r in failed]
+    return " | ".join(parts)
