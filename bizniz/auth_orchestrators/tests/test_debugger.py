@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from bizniz.auth.contract import (
+from bizniz.auth_orchestrators.contract import (
     AuthContract,
     ContractRole,
     ContractTestUser,
@@ -20,8 +20,8 @@ from bizniz.auth.contract import (
     RuntimeContract,
     ValidationCheck,
 )
-from bizniz.auth.debugger import _apply_typed_fixes, repair_fusionauth_state
-from bizniz.auth.spec import AuthSpec, RoleSpec, AppSpec, UserSpec
+from bizniz.auth_orchestrators.debugger import _apply_typed_fixes, repair_fusionauth_state
+from bizniz.auth_orchestrators.spec import AuthSpec, RoleSpec, AppSpec, UserSpec
 
 
 def _make_contract(app_id: str = "app-1") -> AuthContract:
@@ -229,7 +229,7 @@ def test_repair_gives_up_after_max_iterations(monkeypatch):
     monkeypatch.setattr(contract, "validate", always_failing)
 
     # Avoid the actual restart subprocess on the last iteration
-    import bizniz.auth.debugger as dbg
+    import bizniz.auth_orchestrators.debugger as dbg
     monkeypatch.setattr(dbg, "_restart_fusionauth", lambda *a, **kw: True)
 
     initial = ContractValidationResult(

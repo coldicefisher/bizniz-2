@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from bizniz.architect.types import SystemArchitecture
-from bizniz.auth.fusionauth_orchestrator import FusionAuthOrchestrator
+from bizniz.auth_orchestrators.fusionauth_orchestrator import FusionAuthOrchestrator
 from bizniz.auth_agent.fa_tools import build_fa_handlers
 from bizniz.auth_agent.prompt import build_auth_agent_system_prompt
 from bizniz.auth_agent.schema import AUTH_AGENT_ACTION_SCHEMA

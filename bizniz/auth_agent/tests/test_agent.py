@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from bizniz.architect.types import ServiceDefinition, SystemArchitecture
-from bizniz.auth.fusionauth_orchestrator import FusionAuthOrchestrator
+from bizniz.auth_orchestrators.fusionauth_orchestrator import FusionAuthOrchestrator
 from bizniz.auth_agent.agent import AuthAgent
 from bizniz.auth_agent.types import AuthAgentResult
 from bizniz.clients.base_ai_client import BaseAIClient

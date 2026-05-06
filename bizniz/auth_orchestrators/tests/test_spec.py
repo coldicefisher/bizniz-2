@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from bizniz.auth.spec import (
+from bizniz.auth_orchestrators.spec import (
     AppSpec,
     AuthSpec,
     AuthSpecDelta,

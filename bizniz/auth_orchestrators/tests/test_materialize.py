@@ -11,8 +11,8 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from bizniz.auth import FusionAuthOrchestrator
-from bizniz.auth.spec import (
+from bizniz.auth_orchestrators import FusionAuthOrchestrator
+from bizniz.auth_orchestrators.spec import (
     AppSpec,
     AuthSpec,
     AuthSpecDelta,
@@ -123,7 +123,7 @@ class _FakeFA:
 def fa():
     fake = _FakeFA()
     orch = FusionAuthOrchestrator(base_url="http://fa", api_key="k")
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request", side_effect=fake):
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request", side_effect=fake):
         yield orch, fake
 
 

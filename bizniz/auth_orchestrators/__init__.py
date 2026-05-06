@@ -13,7 +13,7 @@ provisioning AND from runtime app code that needs to add roles
 at runtime. A generic ``request()`` escape hatch lets callers
 hit FusionAuth endpoints we haven't typed yet.
 """
-from bizniz.auth.types import (
+from bizniz.auth_orchestrators.types import (
     ApplicationId,
     RoleId,
     UserId,
@@ -24,8 +24,8 @@ from bizniz.auth.types import (
     ReconcileReport,
     FusionAuthError,
 )
-from bizniz.auth.fusionauth_orchestrator import FusionAuthOrchestrator
-from bizniz.auth.contract import (
+from bizniz.auth_orchestrators.fusionauth_orchestrator import FusionAuthOrchestrator
+from bizniz.auth_orchestrators.contract import (
     AuthContract,
     ContractRole,
     ContractTestUser,

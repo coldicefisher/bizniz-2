@@ -164,7 +164,7 @@ class AuthContract:
         in place. Returns the full result for callers that want to
         display individual check details.
         """
-        from bizniz.auth.types import FusionAuthError
+        from bizniz.auth_orchestrators.types import FusionAuthError
         checks: List[ValidationCheck] = []
 
         # 1. Application exists

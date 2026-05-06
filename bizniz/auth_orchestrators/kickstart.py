@@ -17,7 +17,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Dict, List
 
-from bizniz.auth.spec import AuthSpec, AppSpec, RoleSpec, UserSpec
+from bizniz.auth_orchestrators.spec import AuthSpec, AppSpec, RoleSpec, UserSpec
 
 
 def _deterministic_uuid(namespace: str, name: str) -> str:

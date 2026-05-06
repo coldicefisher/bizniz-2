@@ -33,11 +33,11 @@ import time
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from bizniz.auth.contract import AuthContract, ContractValidationResult, ValidationCheck
-from bizniz.auth.fusionauth_orchestrator import FusionAuthOrchestrator
-from bizniz.auth.kickstart import render_kickstart
-from bizniz.auth.spec import AuthSpec
-from bizniz.auth.types import FusionAuthError
+from bizniz.auth_orchestrators.contract import AuthContract, ContractValidationResult, ValidationCheck
+from bizniz.auth_orchestrators.fusionauth_orchestrator import FusionAuthOrchestrator
+from bizniz.auth_orchestrators.kickstart import render_kickstart
+from bizniz.auth_orchestrators.spec import AuthSpec
+from bizniz.auth_orchestrators.types import FusionAuthError
 
 
 def _log(on_status: Optional[Callable[[str], None]], msg: str) -> None:
@@ -125,7 +125,7 @@ def _apply_typed_fixes(
             )
             if user_def is None and email == auth_spec.seeded_admin.email:
                 # Synth a UserSpec for the seeded admin
-                from bizniz.auth.spec import UserSpec
+                from bizniz.auth_orchestrators.spec import UserSpec
                 user_def = UserSpec(
                     email=auth_spec.seeded_admin.email,
                     password=auth_spec.seeded_admin.password,

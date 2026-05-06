@@ -27,9 +27,9 @@ import base64
 import json
 from typing import Callable, Dict
 
-from bizniz.auth.fusionauth_orchestrator import FusionAuthOrchestrator
-from bizniz.auth.spec import AuthSpec
-from bizniz.auth.types import FusionAuthError
+from bizniz.auth_orchestrators.fusionauth_orchestrator import FusionAuthOrchestrator
+from bizniz.auth_orchestrators.spec import AuthSpec
+from bizniz.auth_orchestrators.types import FusionAuthError
 
 
 ToolHandler = Callable[[Dict], str]

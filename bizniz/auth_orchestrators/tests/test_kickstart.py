@@ -1,8 +1,8 @@
 """Unit tests for render_kickstart()."""
 from __future__ import annotations
 
-from bizniz.auth.kickstart import _deterministic_uuid, render_kickstart
-from bizniz.auth.spec import (
+from bizniz.auth_orchestrators.kickstart import _deterministic_uuid, render_kickstart
+from bizniz.auth_orchestrators.spec import (
     AppSpec,
     AuthSpec,
     AuthSpecDelta,

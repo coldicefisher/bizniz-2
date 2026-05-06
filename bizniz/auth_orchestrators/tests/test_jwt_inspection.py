@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from bizniz.auth import FusionAuthOrchestrator
+from bizniz.auth_orchestrators import FusionAuthOrchestrator
 
 
 def _resp(status, json_data=None, text=""):
@@ -23,7 +23,7 @@ def orch():
 
 
 def test_get_jwks_returns_body(orch):
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.get") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.get") as m:
         m.return_value = _resp(200, {"keys": [{"kid": "abc", "alg": "RS256"}]})
         result = orch.get_jwks()
     assert result["keys"][0]["kid"] == "abc"
@@ -31,7 +31,7 @@ def test_get_jwks_returns_body(orch):
 
 def test_get_jwks_raises_on_unreachable(orch):
     import requests as _requests
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.get") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.get") as m:
         m.side_effect = _requests.RequestException("connection refused")
         with pytest.raises(Exception):
             orch.get_jwks()
@@ -39,7 +39,7 @@ def test_get_jwks_raises_on_unreachable(orch):
 
 def test_generate_signing_key_skips_when_already_exists(orch):
     """Idempotent: if a key already exists at this ID, don't recreate."""
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = _resp(200, {"key": {"id": "k1", "algorithm": "RS256"}})
         kid = orch.generate_signing_key(key_id="k1")
     assert kid == "k1"
@@ -50,7 +50,7 @@ def test_generate_signing_key_skips_when_already_exists(orch):
 
 
 def test_generate_signing_key_creates_when_missing(orch):
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         # First call: GET key/k1 → 404. Second: POST generate → 200.
         m.side_effect = [_resp(404, {}), _resp(200, {"key": {"id": "k1"}})]
         kid = orch.generate_signing_key(
@@ -67,7 +67,7 @@ def test_generate_signing_key_creates_when_missing(orch):
 def test_set_tenant_signing_key_patches_jwt_config_without_name(orch):
     """First-attempt PATCH omits name (works on mature tenants and
     avoids FA's duplicate-name trap on fresh tenants)."""
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = _resp(200, {})
         orch.set_tenant_signing_key(tenant_id="t1", key_id="k1")
 
@@ -82,7 +82,7 @@ def test_patch_tenant_retries_with_name_on_blank_name_error(orch):
     """When FA rejects a name-less PATCH with a tenant.name error,
     we re-fetch the tenant's actual name and retry with it included.
     Covers the fresh-tenant case where FA's validator demands name."""
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.side_effect = [
             # First PATCH (no name) → 400 with tenant.name error
             _resp(400, {}, text='{"fieldErrors":{"tenant.name":[{"code":"[blank]tenant.name"}]}}'),
@@ -104,8 +104,8 @@ def test_patch_tenant_retries_with_name_on_blank_name_error(orch):
 def test_patch_tenant_does_not_retry_on_unrelated_400(orch):
     """A 400 that isn't a tenant.name issue should propagate, not
     trigger a retry."""
-    from bizniz.auth.types import FusionAuthError
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    from bizniz.auth_orchestrators.types import FusionAuthError
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = _resp(400, {}, text="some other validation error")
         with pytest.raises(FusionAuthError):
             orch.patch_tenant("t1", {"foo": "bar"})
@@ -114,8 +114,8 @@ def test_patch_tenant_does_not_retry_on_unrelated_400(orch):
 
 def test_diagnose_jwt_setup_flags_empty_jwks(orch):
     """The motivating bug: HS256 default → JWKS exposes 0 keys."""
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.get") as gm, \
-         patch("bizniz.auth.fusionauth_orchestrator.requests.request") as rm:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.get") as gm, \
+         patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as rm:
         gm.return_value = _resp(200, {"keys": []})
         # GET tenant: returns a tenant with HS256 access token key
         rm.return_value = _resp(200, {
@@ -136,8 +136,8 @@ def test_diagnose_jwt_setup_flags_empty_jwks(orch):
 
 
 def test_diagnose_jwt_setup_passes_when_keys_present(orch):
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.get") as gm, \
-         patch("bizniz.auth.fusionauth_orchestrator.requests.request") as rm:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.get") as gm, \
+         patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as rm:
         gm.return_value = _resp(200, {"keys": [
             {"kid": "abc", "alg": "RS256", "kty": "RSA"},
         ]})

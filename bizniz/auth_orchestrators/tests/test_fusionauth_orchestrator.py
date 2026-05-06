@@ -9,7 +9,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from bizniz.auth import (
+from bizniz.auth_orchestrators import (
     FusionAuthError,
     FusionAuthOrchestrator,
     FusionAuthState,
@@ -38,14 +38,14 @@ def orch():
 
 
 def test_request_returns_json_on_2xx(orch):
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = _resp(200, {"ok": True})
         result = orch.request("GET", "/api/status")
     assert result == {"ok": True}
 
 
 def test_request_raises_on_4xx_unless_in_ok_statuses(orch):
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = _resp(404, {}, text="not found")
         with pytest.raises(FusionAuthError) as exc:
             orch.request("GET", "/api/role/missing")
@@ -53,7 +53,7 @@ def test_request_raises_on_4xx_unless_in_ok_statuses(orch):
 
 
 def test_request_accepts_widened_ok_statuses(orch):
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = _resp(404, {})
         # Caller explicitly tolerates 404 (e.g. delete-on-missing)
         result = orch.request("DELETE", "/api/user/x", ok_statuses=[200, 204, 404])
@@ -62,7 +62,7 @@ def test_request_accepts_widened_ok_statuses(orch):
 
 def test_request_raises_on_unreachable(orch):
     import requests as _r
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.side_effect = _r.ConnectionError("refused")
         with pytest.raises(FusionAuthError) as exc:
             orch.request("GET", "/api/status")
@@ -70,7 +70,7 @@ def test_request_raises_on_unreachable(orch):
 
 
 def test_ensure_application_skips_when_exists(orch):
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = _resp(200, {"application": {"id": "app-1", "name": "X"}})
         result = orch.ensure_application("app-1", name="X")
     # Single request — only the GET, no POST to create.
@@ -80,7 +80,7 @@ def test_ensure_application_skips_when_exists(orch):
 
 def test_ensure_application_creates_when_missing(orch):
     responses = [_resp(404, {}), _resp(200, {"application": {"id": "app-1"}})]
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.side_effect = responses
         result = orch.ensure_application("app-1", name="X")
     assert result == "app-1"
@@ -99,7 +99,7 @@ def test_ensure_role_idempotent(orch):
             ],
         }
     })
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = app_response
         result = orch.ensure_role("app-1", name="landlord")
     assert result == "role-1"
@@ -114,7 +114,7 @@ def test_ensure_role_creates_when_missing(orch):
         }),
         _resp(200, {"role": {"id": "role-2"}}),
     ]
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.side_effect = responses
         role_id = orch.ensure_role("app-1", name="tenant", description="renter")
     assert role_id == "role-2"
@@ -125,14 +125,14 @@ def test_ensure_role_creates_when_missing(orch):
 
 
 def test_get_token_extracts_token_from_response(orch):
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = _resp(200, {"token": "jwt-abc"})
         token = orch.get_token("app-1", "u@example.com", "pw")
     assert token == "jwt-abc"
 
 
 def test_get_token_raises_when_token_missing(orch):
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = _resp(200, {"twoFactorId": "abc"})
         with pytest.raises(FusionAuthError) as exc:
             orch.get_token("app-1", "u@example.com", "pw")
@@ -140,7 +140,7 @@ def test_get_token_raises_when_token_missing(orch):
 
 
 def test_delete_user_tolerates_404(orch):
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = _resp(404, {})
         # Should not raise
         orch.delete_user("user-id")
@@ -156,7 +156,7 @@ def test_assign_role_idempotent_when_already_present(orch):
             ],
         }
     })
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = user_get
         orch.assign_role("app-1", "user-1", "landlord")
     # Single GET — no PUT since role already present.
@@ -175,7 +175,7 @@ def test_assign_role_adds_new_role(orch):
         }),
         _resp(200, {}),
     ]
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.side_effect = responses
         orch.assign_role("app-1", "user-1", "admin")
     # GET + PUT
@@ -196,7 +196,7 @@ def test_unassign_role_idempotent_when_absent(orch):
             ],
         }
     })
-    with patch("bizniz.auth.fusionauth_orchestrator.requests.request") as m:
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
         m.return_value = user_get
         orch.unassign_role("app-1", "user-1", "admin")
     # Only the GET — no PUT since role wasn't there.

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from bizniz.auth import (
+from bizniz.auth_orchestrators import (
     AuthContract,
     ContractRole,
     ContractTestUser,
@@ -133,7 +133,7 @@ def test_validate_passes_when_everything_matches(monkeypatch):
         userinfo_roles=["landlord"],  # used for both login attempts
     )
     # Stub out the JWKS HTTP fetch
-    import bizniz.auth.contract as contract_mod
+    import bizniz.auth_orchestrators.contract as contract_mod
 
     class _MockResp:
         status_code = 200

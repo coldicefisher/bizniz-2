@@ -8,8 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from bizniz.architect.types import SystemArchitecture
-from bizniz.auth.fusionauth_orchestrator import FusionAuthOrchestrator
-from bizniz.auth.types import FusionAuthError
+from bizniz.auth_orchestrators.fusionauth_orchestrator import FusionAuthOrchestrator
+from bizniz.auth_orchestrators.types import FusionAuthError
 from bizniz.auth_agent.audits import (
     _parse_test_users,
     _parse_issuer,

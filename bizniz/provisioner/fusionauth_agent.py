@@ -276,7 +276,7 @@ def provision_fusionauth(
     frontend_port: int = 5173,
     ai_client=None,
     on_status: Optional[Callable[[str], None]] = None,
-    auth_spec=None,  # bizniz.auth.spec.AuthSpec | None
+    auth_spec=None,  # bizniz.auth_orchestrators.spec.AuthSpec | None
 ) -> dict:
     """Configure FusionAuth for the project and write AUTH_CONTRACT.md.
 
@@ -354,7 +354,7 @@ def provision_fusionauth(
             tenancy_model = "roles"
 
         # Materialize via orchestrator (idempotent reconcile against live FA).
-        from bizniz.auth import FusionAuthOrchestrator
+        from bizniz.auth_orchestrators import FusionAuthOrchestrator
         orch_for_materialize = FusionAuthOrchestrator(
             base_url=fusionauth_url,
             api_key=fusionauth_api_key,
@@ -404,7 +404,7 @@ def provision_fusionauth(
             _log(on_status,
                  f"FusionAuth agent: smoke test — logging in as {first.email}...")
             try:
-                from bizniz.auth.types import FusionAuthError as _FAError
+                from bizniz.auth_orchestrators.types import FusionAuthError as _FAError
                 token = orch_for_materialize.get_token(
                     application_id, first.email, first.password,
                 )
@@ -506,7 +506,7 @@ def provision_fusionauth(
     # live FusionAuth, then write AUTH_CONTRACT.md + JSON sidecar.
     # We fail loudly if validation doesn't pass so downstream
     # tests/engineers don't trust a contract that lies.
-    from bizniz.auth import (
+    from bizniz.auth_orchestrators import (
         AuthContract,
         ContractRole,
         ContractTestUser,

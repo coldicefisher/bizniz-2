@@ -33,7 +33,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import requests
 
-from bizniz.auth.types import (
+from bizniz.auth_orchestrators.types import (
     ApplicationId,
     FusionAuthError,
     FusionAuthRole,
@@ -990,7 +990,7 @@ class FusionAuthOrchestrator:
     ) -> ReconcileReport:
         """Bring FusionAuth into the desired state described by ``spec``.
 
-        ``spec`` is a ``bizniz.auth.spec.AuthSpec`` (typed late to keep
+        ``spec`` is a ``bizniz.auth_orchestrators.spec.AuthSpec`` (typed late to keep
         this module free of a hard import cycle through planner). This
         is the single entrypoint the provisioner calls — it walks the
         spec and ensures each application, role, group, and user.
@@ -1025,7 +1025,7 @@ class FusionAuthOrchestrator:
         if not getattr(spec, "enabled", False):
             return report
 
-        from bizniz.auth.kickstart import _deterministic_uuid
+        from bizniz.auth_orchestrators.kickstart import _deterministic_uuid
 
         # Build map of name → app_id for cross-references (groups, users).
         # When ``primary_app_id`` is provided (the typical case — provisioner
