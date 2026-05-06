@@ -18,7 +18,7 @@
 # The Engineer plans the work for each service: requirements, use cases,
 # domain models, issues. Starts on the cheapest model; escalates via
 # engineer_escalation on repetition-detected stalls or repair iterations.
-engineer_model: gemini-flash-lite
+engineer_model: gemini-flash-top
 
 # Escalation chain when Engineer detects a repetition stall (same
 # action three of the last five iterations) or when repair iteration

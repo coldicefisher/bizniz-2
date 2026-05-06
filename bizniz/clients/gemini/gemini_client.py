@@ -187,6 +187,9 @@ class GeminiClient(BaseAIClient):
                     usage = getattr(response, "usage_metadata", None)
                     in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
                     out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
+                    cached_tok = int(
+                        getattr(usage, "cached_content_token_count", 0) or 0
+                    )
                     img_count = self._count_image_parts(response)
                     if in_tok or out_tok or img_count:
                         get_tracker().record(
@@ -196,6 +199,7 @@ class GeminiClient(BaseAIClient):
                             output_tokens=out_tok,
                             duration_ms=_duration_ms,
                             image_count=img_count,
+                            cached_input_tokens=cached_tok,
                         )
                 except Exception:
                     # Cost tracking is best-effort; never break a real call.
