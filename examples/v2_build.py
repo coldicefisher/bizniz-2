@@ -97,6 +97,41 @@ def _resolve_fa_endpoint(project_root: Path) -> tuple[str, str]:
     )
 
 
+def render_workspace_summary(project_root: Path, max_files: int = 200) -> str:
+    """Pre-render a compact workspace tree for the Engineer's initial context.
+
+    Cost lever (E): one-time render saves the Engineer ~5-10 tool calls
+    of `list_directory` / `get_workspace_tree` discovery in the typical
+    M1 implement loop. Bloats the initial prefix by ~1-2k tokens but
+    that prefix is cached (lever A) on every iteration.
+    """
+    from bizniz.workspace.local_workspace import LocalWorkspace
+    ws = LocalWorkspace(root=project_root)
+    try:
+        files = ws.list_relative_files()
+    except Exception:
+        return ""
+    files = sorted(f for f in files if not f.startswith("docs/runs/"))
+    if len(files) > max_files:
+        # Truncate but keep top-level + per-service directory listings.
+        truncated = files[:max_files]
+        return "\n".join(truncated) + f"\n\n... ({len(files) - max_files} more files truncated)"
+    return "\n".join(files)
+
+
+def _phase_label_for_log(args) -> str:
+    """One-line greppable label for the cost log."""
+    if args.plan_only:
+        return "plan-only"
+    if args.phase:
+        if args.milestone is not None:
+            return f"milestone={args.milestone} phase={args.phase}"
+        return f"phase={args.phase}"
+    if args.milestone is not None:
+        return f"full milestone={args.milestone}"
+    return "full"
+
+
 def _seed_fa_env_from_project(project_root: Path) -> None:
     """Export FUSIONAUTH_* vars from the project's infra/.env into the
     process env so pipeline-internal helpers (``_resolve_fa_tenant_id``)
@@ -244,6 +279,12 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
             metadata={"run_state_job_id": job_id, "gate_mode": gate_mode},
         )
 
+    workspace_summary = render_workspace_summary(project_root)
+    on_status(
+        f"Workspace summary: {len(workspace_summary.splitlines())} files "
+        f"pre-rendered for Engineer initial context"
+    )
+
     milestone_loop = MilestoneLoop(
         engineer=engineer,
         quality_engineer=qe,
@@ -257,6 +298,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         repair_budget=len(repair_tiers),
         repair_engineer_factory=repair_engineer_factory,
         cost_tracker=cost_tracker,
+        workspace_summary=workspace_summary,
         on_status=on_status,
     )
 
@@ -362,7 +404,13 @@ def main():
         target_phase=args.phase,
     )
 
-    # Finish the cost tracker job + write a summary to docs/runs/<job>/cost.md.
+    # Finish the cost tracker job + write cost report.
+    #
+    # Two files:
+    #   cost.md    — latest run only (overwritten each invocation; useful for
+    #                quick eyeballing of "what did THIS gate cost")
+    #   costs.md   — append-only log of every gate invocation against this
+    #                project's runs dir (the documentation trail)
     tracker = getattr(pipeline, "_build_cost_tracker", None)
     runs_dir = getattr(pipeline, "_build_runs_dir", None)
     if tracker is not None:
@@ -377,7 +425,26 @@ def main():
                 summary = tracker.summary()
                 cost_md = runs_dir / "cost.md"
                 cost_md.write_text(str(summary))
-                on_status(f"Cost report written to {cost_md}")
+
+                # Append a dated entry to costs.md so we keep a per-gate
+                # history. Phase label derives from CLI args so the entry
+                # is greppable: "phase=architect", "milestone=1 phase=enrich",
+                # "plan-only", or "full" for a full --milestone N run.
+                phase_label = _phase_label_for_log(args)
+                ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                halt_note = f" — HALTED@{result.halted_at}" if result.halted_at else ""
+                entry = (
+                    f"## {ts} — {phase_label}{halt_note}\n\n"
+                    f"{summary}\n\n"
+                    f"---\n\n"
+                )
+                costs_md = runs_dir / "costs.md"
+                if costs_md.exists():
+                    costs_md.write_text(costs_md.read_text() + entry)
+                else:
+                    costs_md.write_text("# Cost log\n\n" + entry)
+
+                on_status(f"Cost report: {cost_md}; appended to {costs_md}")
             except Exception as e:
                 on_status(f"Cost report write failed: {type(e).__name__}: {e}")
 

@@ -100,12 +100,22 @@ class ToolLoopAgent(ABC):
         on_status: Optional[Callable[[str], None]] = None,
         tool_iterations: int = 40,
         timeout_seconds: int = 600,
+        history_window: int = 0,
     ):
+        """``history_window``: when > 0, sliding-window compaction kicks in.
+        We always keep the system prompt + initial user message, then keep
+        the most recent ``history_window`` assistant/user PAIRS. Older
+        tool-result turns get dropped between calls. This bounds the
+        per-call input growth (which was the dominant cost lever in M1
+        smoke runs — Engineer used 1.68M input tokens across 44 calls).
+        Set to 0 (default) to keep entire history (legacy behavior).
+        """
         self._client = client
         self._workspace = workspace
         self._on_status = on_status
         self._tool_iterations = tool_iterations
         self._timeout_seconds = timeout_seconds
+        self._history_window = max(0, history_window)
 
     # ── Subclass contract ────────────────────────────────────────────────────
 
@@ -154,6 +164,30 @@ class ToolLoopAgent(ABC):
         handlers = self.tool_handlers()
         terminal = self.terminal_action
 
+        # PROMPT CACHING (lever A): opt-in via ``self._enable_prompt_cache``
+        # (default False). The combination of cached_content + JSON_SCHEMA
+        # response_format + sliding-window history caused empty-action
+        # responses in initial smoke runs — needs more investigation.
+        # Sliding-window (B) and pre-rendered context (E) work
+        # independently of caching; they bring most of the cost win
+        # without the integration risk.
+        cache_name: Optional[str] = None
+        cache_prefix_count = 0
+        if getattr(self, "_enable_prompt_cache", False):
+            try:
+                cache_name = self._client.try_create_cache(messages)
+                if cache_name:
+                    cache_prefix_count = 2
+                    self._log(
+                        f"{agent_name}: prompt cache created "
+                        f"(prefix=2 messages) — {cache_name}"
+                    )
+            except Exception as e:
+                self._log(
+                    f"{agent_name}: try_create_cache raised "
+                    f"{type(e).__name__}: {e}"
+                )
+
         start_time = time.time()
         parse_failures = 0
         max_parse_failures = 3
@@ -167,7 +201,12 @@ class ToolLoopAgent(ABC):
                 )
                 return self._force_terminal(messages, agent_name, reason="timeout")
 
-            text = self._call_llm(messages, agent_name)
+            messages = self._compact_history(messages, agent_name)
+            text = self._call_llm(
+                messages, agent_name,
+                cached_content_name=cache_name,
+                cache_prefix_count=cache_prefix_count,
+            )
             if text is None:
                 parse_failures += 1
                 if parse_failures >= max_parse_failures:
@@ -237,6 +276,45 @@ class ToolLoopAgent(ABC):
         if self._on_status:
             self._on_status(msg)
 
+    def _compact_history(
+        self, messages: List[Dict[str, str]], agent_name: str,
+    ) -> List[Dict[str, str]]:
+        """Sliding-window compaction. Keep system + initial_user (the
+        first 2 messages — they're always preserved) and the most recent
+        ``history_window`` assistant/user pairs. Drop everything in
+        between.
+
+        Disabled when ``history_window <= 0``.
+        """
+        if self._history_window <= 0:
+            return messages
+        # 2 anchor messages + 2 messages per pair = anchor + window*2.
+        max_total = 2 + self._history_window * 2
+        if len(messages) <= max_total:
+            return messages
+        kept = messages[:2] + messages[-(self._history_window * 2):]
+        dropped = len(messages) - len(kept)
+        if dropped > 0:
+            # Insert a brief synthetic note so the LLM knows context was
+            # truncated and it can re-read files/get_my_plan if needed.
+            kept = (
+                kept[:2]
+                + [{
+                    "role": "user",
+                    "content": (
+                        f"(System: {dropped} earlier message(s) were "
+                        f"compacted to keep cost bounded. If you need "
+                        f"older context, use view_file / get_my_plan / "
+                        f"discovery tools to re-fetch.)"
+                    ),
+                }]
+                + kept[2:]
+            )
+            self._log(
+                f"{agent_name}: compacted history ({len(messages)}→{len(kept)} messages)"
+            )
+        return kept
+
     def _log_action(self, agent_name: str, action_type: str, action: dict) -> None:
         """One-line action log. Subclasses can override for richer logging.
 
@@ -258,6 +336,8 @@ class ToolLoopAgent(ABC):
         self,
         messages: List[Dict[str, str]],
         agent_name: str,
+        cached_content_name: Optional[str] = None,
+        cache_prefix_count: int = 0,
     ) -> Optional[str]:
         """Call the LLM. Returns the raw text on success, None on
         retryable failure (caller will increment parse_failures).
@@ -268,6 +348,8 @@ class ToolLoopAgent(ABC):
                 use_message_history=False,
                 response_format=ResponseFormat.JSON_SCHEMA,
                 schema=self.action_schema,
+                cached_content_name=cached_content_name,
+                cache_prefix_count=cache_prefix_count,
             )
         except AIInsufficientFunds:
             raise

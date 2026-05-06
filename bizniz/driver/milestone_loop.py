@@ -81,6 +81,7 @@ class MilestoneLoop:
         repair_budget: int = 3,
         repair_engineer_factory: Optional[Callable[[int], Engineer]] = None,
         cost_tracker=None,
+        workspace_summary: Optional[str] = None,
         on_status: Optional[Callable[[str], None]] = None,
     ):
         self._engineer = engineer
@@ -95,6 +96,7 @@ class MilestoneLoop:
         self._repair_budget = max(0, min(3, repair_budget))
         self._repair_engineer_factory = repair_engineer_factory
         self._cost_tracker = cost_tracker
+        self._workspace_summary = workspace_summary
         self._on_status = on_status
 
     def _tag(self, milestone_index: int, phase: SubPhase) -> None:
@@ -537,6 +539,7 @@ class MilestoneLoop:
             enriched_spec=spec,
             auth_contract=auth_contract,
             prior_specs=prior_list,
+            workspace_summary=self._workspace_summary,
         )
 
     def _phase_review(

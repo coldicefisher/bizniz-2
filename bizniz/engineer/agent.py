@@ -71,13 +71,21 @@ class Engineer(ToolLoopAgent):
         tool_iterations: int = 60,
         timeout_seconds: int = 1800,
         base_url: Optional[str] = None,
+        history_window: int = 12,
     ):
+        """``history_window`` (default 12) bounds per-call input growth
+        via sliding-window compaction (lever B from cost analysis). The
+        Engineer keeps the system prompt + initial user message + the
+        last 12 assistant/user pairs. Older tool results get dropped
+        with a synthetic "compacted, use discovery tools to re-fetch"
+        note. Set to 0 to disable (legacy unbounded growth)."""
         super().__init__(
             client=client,
             workspace=workspace,
             on_status=on_status,
             tool_iterations=tool_iterations,
             timeout_seconds=timeout_seconds,
+            history_window=history_window,
         )
         self._compose_path = compose_path
         self._target_service = target_service
