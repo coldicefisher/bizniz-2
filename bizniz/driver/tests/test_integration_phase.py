@@ -122,28 +122,102 @@ class TestRunApi:
         assert "ImportError" in (result.error_summary or "")
 
     def test_debugger_repairs_then_passes(self, tmp_path):
+        """When the debugger_factory is wired, repair_integration_failure
+        is delegated to (apply fixes + restart container + rerun).
+        """
         tester = MagicMock()
         tester.generate_test_file.return_value = "y"
         debugger = MagicMock()
-        debugger.debug = MagicMock()
         ip = IntegrationPhase(
             http_tester_factory=MagicMock(return_value=tester),
             web_tester_factory=MagicMock(),
             debugger_factory=MagicMock(return_value=debugger),
             debugger_max_iterations=3,
         )
-        sidecar_results = [(False, "fail"), (True, "passed")]
         with patch("bizniz.driver.integration_phase.capture_backend_contracts") as cap, \
-             patch("bizniz.driver.integration_phase._run_pytest_in_sidecar") as pyt:
+             patch("bizniz.driver.integration_phase._run_pytest_in_sidecar") as pyt, \
+             patch("bizniz.driver.integration_phase.repair_integration_failure") as rep:
             cap.return_value = {"backend": {}}
-            pyt.side_effect = sidecar_results
+            pyt.return_value = (False, "ImportError: foo")
+            rep.return_value = (True, "passed after debug")
             result = ip.run_api(
                 milestone=_milestone(), architecture=_arch(_backend()),
                 project_root=tmp_path, compose_path="/p/c.yml",
                 service_workspaces={"backend": _make_workspace(tmp_path, "backend")},
             )
         assert result.passed is True
-        debugger.debug.assert_called_once()
+        # repair_integration_failure called with the right shape.
+        assert rep.called
+        kwargs = rep.call_args.kwargs
+        assert kwargs["max_iterations"] == 3
+        assert kwargs["compose_path"] == "/p/c.yml"
+        assert callable(kwargs["debugger_factory"])
+        assert callable(kwargs["rerun_tests"])
+        assert callable(kwargs["capture_logs"])
+
+    def test_debug_loop_failure_returns_failed(self, tmp_path):
+        tester = MagicMock()
+        tester.generate_test_file.return_value = "y"
+        ip = IntegrationPhase(
+            http_tester_factory=MagicMock(return_value=tester),
+            web_tester_factory=MagicMock(),
+            debugger_factory=MagicMock(return_value=MagicMock()),
+            debugger_max_iterations=3,
+        )
+        with patch("bizniz.driver.integration_phase.capture_backend_contracts") as cap, \
+             patch("bizniz.driver.integration_phase._run_pytest_in_sidecar") as pyt, \
+             patch("bizniz.driver.integration_phase.repair_integration_failure") as rep:
+            cap.return_value = {"backend": {}}
+            pyt.return_value = (False, "fail output")
+            rep.return_value = (False, "still failing after repair")
+            result = ip.run_api(
+                milestone=_milestone(), architecture=_arch(_backend()),
+                project_root=tmp_path, compose_path="/p/c.yml",
+                service_workspaces={"backend": _make_workspace(tmp_path, "backend")},
+            )
+        assert result.passed is False
+        assert "still failing" in (result.error_summary or "")
+
+    def test_debug_loop_factory_adapter_shape(self, tmp_path):
+        """Verify the (workspace, service) factory shape adapts to the
+        (workspace,) shape repair_integration_failure expects."""
+        tester = MagicMock()
+        tester.generate_test_file.return_value = "y"
+        debugger_seen = []
+
+        def factory(*, workspace, service):
+            debugger_seen.append((workspace, service))
+            return MagicMock()
+
+        ip = IntegrationPhase(
+            http_tester_factory=MagicMock(return_value=tester),
+            web_tester_factory=MagicMock(),
+            debugger_factory=factory,
+        )
+        with patch("bizniz.driver.integration_phase.capture_backend_contracts") as cap, \
+             patch("bizniz.driver.integration_phase._run_pytest_in_sidecar") as pyt, \
+             patch("bizniz.driver.integration_phase.repair_integration_failure") as rep:
+            cap.return_value = {"backend": {}}
+            pyt.return_value = (False, "fail")
+            # Capture the wrapped factory; invoke it with a dummy workspace
+            # to ensure it routes back to our (workspace, service) factory.
+            captured = {}
+            def fake_repair(**kwargs):
+                wrapped = kwargs["debugger_factory"]
+                wrapped(MagicMock(name="ws-passed-by-repair"))
+                captured["ok"] = True
+                return (True, "ok")
+            rep.side_effect = fake_repair
+            ip.run_api(
+                milestone=_milestone(), architecture=_arch(_backend()),
+                project_root=tmp_path, compose_path="/p/c.yml",
+                service_workspaces={"backend": _make_workspace(tmp_path, "backend")},
+            )
+        assert captured.get("ok") is True
+        assert len(debugger_seen) == 1  # adapter forwarded one call
+        # The service kwarg is the backend ServiceDefinition.
+        ws_arg, svc_arg = debugger_seen[0]
+        assert svc_arg.name == "backend"
 
     def test_tester_raises_marks_failed(self, tmp_path):
         tester = MagicMock()

@@ -23,6 +23,7 @@ stack is up + healthy before run_api/run_web are called.
 """
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -31,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from bizniz.architect.types import ServiceDefinition, ServiceResult, SystemArchitecture
 from bizniz.integration.contracts import capture_backend_contracts
+from bizniz.integration.debug_loop import repair_integration_failure
 from bizniz.integration.runner import (
     _capture_container_logs,
     _frontends,
@@ -68,13 +70,23 @@ class IntegrationPhase:
         debugger_factory: Optional[Callable[..., object]] = None,
         debugger_max_iterations: int = 3,
         backend_wait_s: float = 60.0,
+        problem_statement: Optional[str] = None,
         on_status: Optional[Callable[[str], None]] = None,
     ):
+        """Construct.
+
+        ``debugger_factory``, when provided, is called as
+        ``debugger_factory(workspace=ws, service=service)`` and must
+        return an ``AgenticDebugger`` (or compatible) instance. v1's
+        ``repair_integration_failure`` drives the actual loop —
+        IntegrationPhase wires the factory + the rerun callback.
+        """
         self._http_factory = http_tester_factory
         self._web_factory = web_tester_factory
         self._debugger_factory = debugger_factory
         self._debugger_max_iterations = debugger_max_iterations
         self._backend_wait_s = backend_wait_s
+        self._problem_statement = problem_statement
         self._on_status = on_status
 
     # ── Public ─────────────────────────────────────────────────────────
@@ -268,12 +280,43 @@ class IntegrationPhase:
         auth_contract: Optional[str],
         openapi_doc: Dict,
     ) -> tuple[bool, str]:
-        """Run pytest in the sidecar; on fail, dispatch the debugger up
-        to ``debugger_max_iterations`` times.
+        """Run pytest in the sidecar; on fail, drive the agentic debug
+        loop via ``repair_integration_failure`` (which applies code
+        fixes, restarts the container, and re-runs tests with sticky
+        repair history).
         """
+        workspace_path = (
+            Path(workspace.root) if hasattr(workspace, "root") else project_root
+        )
+
+        def _rerun() -> tuple[bool, str]:
+            """Re-run pytest after debugger applies fixes.
+
+            CRITICAL: rebuild + force-recreate the backend container
+            first so code edits take effect. Skipping this caused 3
+            wasted iterations and $0.77 in v11 (per CLAUDE.md).
+            """
+            try:
+                subprocess.run(
+                    ["docker", "compose", "-f", compose_path, "up", "-d",
+                     "--build", "--force-recreate", backend.name],
+                    capture_output=True, text=True, timeout=600,
+                )
+            except Exception as e:
+                self._log(
+                    f"IntegrationPhase API: container rebuild raised "
+                    f"{type(e).__name__}: {e}"
+                )
+            return _run_pytest_in_sidecar(
+                service=backend,
+                workspace_path=workspace_path,
+                compose_path=compose_path,
+                on_status=self._on_status,
+            )
+
         passed, output = _run_pytest_in_sidecar(
             service=backend,
-            workspace_path=Path(workspace.root) if hasattr(workspace, "root") else project_root,
+            workspace_path=workspace_path,
             compose_path=compose_path,
             on_status=self._on_status,
         )
@@ -284,45 +327,35 @@ class IntegrationPhase:
             f"IntegrationPhase API: '{backend.name}' tests failed; "
             f"dispatching debugger (max {self._debugger_max_iterations} iterations)"
         )
-        for i in range(self._debugger_max_iterations):
-            try:
-                debugger = self._debugger_factory(
-                    workspace=workspace,
-                    compose_path=compose_path,
-                    service_name=backend.name,
-                )
-            except Exception as e:
-                self._log(
-                    f"IntegrationPhase API: debugger factory raised "
-                    f"{type(e).__name__}: {e} — bailing"
-                )
-                return False, output
-            try:
-                # Debugger interface (v1 AgenticDebugger): debug(error_output, ...)
-                debugger.debug(
-                    error_output=output,
-                    auth_contract=auth_contract,
-                )
-            except Exception as e:
-                self._log(
-                    f"IntegrationPhase API: debugger iteration {i} raised "
-                    f"{type(e).__name__}: {e}"
-                )
-                continue
-            # Re-run after debugger applied fixes.
-            passed, output = _run_pytest_in_sidecar(
+
+        # Adapt our (workspace, service) factory to the (workspace,) shape
+        # repair_integration_failure expects.
+        def _wrapped_factory(ws, _backend=backend):
+            return self._debugger_factory(workspace=ws, service=_backend)
+
+        def _capture_logs() -> str:
+            return _capture_container_logs(compose_path, backend.name)
+
+        try:
+            return repair_integration_failure(
                 service=backend,
-                workspace_path=Path(workspace.root) if hasattr(workspace, "root") else project_root,
-                compose_path=compose_path,
+                workspace=workspace,
+                failure_output=output,
+                integration_test_rel="tests/integration/test_api.py",
+                debugger_factory=_wrapped_factory,
+                rerun_tests=_rerun,
                 on_status=self._on_status,
+                max_iterations=self._debugger_max_iterations,
+                capture_logs=_capture_logs,
+                compose_path=compose_path,
+                problem_statement=self._problem_statement,
             )
-            if passed:
-                self._log(
-                    f"IntegrationPhase API: '{backend.name}' passed after "
-                    f"debugger iteration {i}"
-                )
-                return True, output
-        return False, output
+        except Exception as e:
+            self._log(
+                f"IntegrationPhase API: debug loop raised "
+                f"{type(e).__name__}: {e}"
+            )
+            return False, output
 
     def _log(self, msg: str) -> None:
         if self._on_status:

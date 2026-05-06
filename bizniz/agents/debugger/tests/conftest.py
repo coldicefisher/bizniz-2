@@ -1,7 +1,6 @@
 import pytest
 from unittest.mock import MagicMock
 
-from bizniz.agents.debugger.quick import QuickDebugger
 from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.environment.base_environment import BaseExecutionEnvironment
 from bizniz.workspace.base_workspace import BaseWorkspace

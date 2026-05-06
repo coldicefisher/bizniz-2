@@ -35,7 +35,9 @@ from bizniz.driver.integration_phase import IntegrationPhase
 from bizniz.driver.milestone_loop import MilestoneLoop
 from bizniz.driver.pipeline import V2Pipeline
 from bizniz.driver.state import RunState
+from bizniz.agents.debugger.agentic import AgenticDebugger
 from bizniz.engineer.agent import Engineer
+from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
 from bizniz.integration.http_api_tester import HTTPApiTester
 from bizniz.integration.web_ui_tester import WebUITester
 from bizniz.planner.planner import Planner
@@ -133,11 +135,38 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     def web_tester_factory(workspace):
         return WebUITester(client=tester_client, workspace=workspace)
 
+    debugger_client = _client_for(getattr(config, "debugger_model", config.architect_model))
+
+    def debugger_factory(workspace, service):
+        """Build a fresh AgenticDebugger bound to ``service``'s container.
+
+        The pytest environment uses the service's built image so imports
+        of the service's runtime deps resolve at debugger-call time.
+        Falls back to a generic image if the service has no image_name
+        recorded yet (early M1 runs before image stamping).
+        """
+        image = getattr(service, "image_name", None) or "python:3.12-slim"
+        env = DockerPytestEnvironment(
+            workspace_root=workspace.root if hasattr(workspace, "root") else project_root,
+            image=image,
+        )
+        return AgenticDebugger(
+            client=debugger_client,
+            workspace=workspace,
+            environment=env,
+            tool_iterations=15,
+            timeout_seconds=600,
+            compose_path=compose_path,
+            service_name=service.name,
+            on_status_message=on_status,
+        )
+
     integration_phase = IntegrationPhase(
         http_tester_factory=http_tester_factory,
         web_tester_factory=web_tester_factory,
-        debugger_factory=None,  # AgenticDebugger wiring deferred to next pass
+        debugger_factory=debugger_factory,
         debugger_max_iterations=3,
+        problem_statement=args.problem or "",
         on_status=on_status,
     )
 
