@@ -17,7 +17,6 @@ from typing import Optional
 from bizniz.core.agent import BaseAIAgent
 from bizniz.architect.types import ServiceDefinition
 from bizniz.integration.web_ui_prompts import WEB_UI_TESTER_SYSTEM_PROMPT
-from bizniz.integration.hallucination_guard import validate_test_grounding
 from bizniz.integration.contract_guard import validate_form_field_contract
 
 
@@ -64,56 +63,27 @@ class WebUITester(BaseAIAgent):
         )
         source = self._strip_code_block(text or "")
 
-        # Combined validation: hallucination + contract-shape. Run
-        # them as a single loop so a contract-guard retry can't
-        # silently re-introduce hallucinations (which it did — we saw
-        # the AI add `grooming services` back into the test names
-        # while fixing form fields). Both must pass on the same
-        # output before we ship.
-        extra = self._allowlist_from_context(service, backend_contracts or {})
-        if auth_contract:
-            from bizniz.integration.hallucination_guard import _tokenize as _tok
-            extra = extra | _tok(auth_contract)
-
-        def _validate(src: str) -> tuple[bool, str]:
-            h = validate_test_grounding(problem_statement, src, extra_allowed=extra)
-            if not h.ok:
-                return False, h.message()
-            c = validate_form_field_contract(src, backend_contracts or {})
-            if not c.ok:
-                return False, c.message()
-            return True, ""
-
-        ok, corrective = _validate(source)
-        if not ok:
+        # Contract-shape validation only. Hallucination detection moved
+        # to the v2 ``CodeReviewer`` which runs as a post-flight pass
+        # over all changed files (catches fabricated symbols/types
+        # across the whole milestone, not just per-file domain leakage).
+        c = validate_form_field_contract(source, backend_contracts or {})
+        if not c.ok:
             self.add_messages_to_history([
                 {"role": "assistant", "content": source},
-                {"role": "user", "content": corrective},
+                {"role": "user", "content": c.message()},
             ])
             text2, _, _ = self._ai_client.get_text(messages=self.message_history)
             source = self._strip_code_block(text2 or source)
-            ok2, corrective2 = _validate(source)
-            if not ok2:
+            c2 = validate_form_field_contract(source, backend_contracts or {})
+            if not c2.ok:
                 raise ValueError(
-                    f"WebUITester output failed validation after one "
-                    f"corrective retry. Refusing to write a contaminated "
-                    f"test file. Reason: {corrective2[:400]}"
+                    f"WebUITester output failed contract-shape validation "
+                    f"after one corrective retry. Refusing to write a "
+                    f"contaminated test file. Reason: {c2.message()[:400]}"
                 )
 
         return source
-
-    @staticmethod
-    def _allowlist_from_context(service: ServiceDefinition, backend_contracts: dict) -> set:
-        allowed = set()
-        if service.name:
-            allowed.add(service.name.lower())
-        for svc_name, doc in (backend_contracts or {}).items():
-            allowed.add(str(svc_name).lower())
-            for path in (doc.get("paths") or {}).keys():
-                for part in str(path).split("/"):
-                    if part and not part.startswith("{") and not part.endswith("}"):
-                        allowed.add(part.lower())
-        return allowed
 
     @staticmethod
     def _build_prompt(
