@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, Optional
 
+from bizniz.architect.types import SystemArchitecture
+from bizniz.lib.framework_conventions import render_for_reviewer
+
 
 CODE_REVIEW_SCHEMA = {
     "name": "CodeReviewReport",
@@ -120,6 +123,7 @@ def build_review_prompt(
     milestone_name: str,
     enriched_spec_json: str,
     changed_files: Dict[str, str],
+    architecture: Optional[SystemArchitecture] = None,
     existing_symbols: Optional[str] = None,
     auth_contract: Optional[str] = None,
     prior_specs: Optional[Iterable[str]] = None,
@@ -142,6 +146,11 @@ def build_review_prompt(
     capability ids that match prior specs?).
     """
     parts = [f"# Code Review: {milestone_name}\n"]
+
+    if architecture is not None:
+        fw_block = render_for_reviewer(architecture)
+        if fw_block:
+            parts.append("\n" + fw_block)
 
     parts.append("\n## EnrichedSpec (the build-against contract)\n")
     parts.append("```json\n")

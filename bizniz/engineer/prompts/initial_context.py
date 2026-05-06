@@ -12,6 +12,7 @@ from typing import Iterable, Optional
 
 from bizniz.architect.types import SystemArchitecture
 from bizniz.code_reviewer.types import CodeReviewReport
+from bizniz.lib.framework_conventions import render_for_engineer
 from bizniz.planner.types import Milestone
 from bizniz.quality_engineer.types import EnrichedSpec
 
@@ -49,6 +50,10 @@ def build_engineer_initial_context(
 
     parts.append("\n## Architecture\n")
     parts.append(_render_architecture(architecture))
+
+    fw_block = render_for_engineer(architecture)
+    if fw_block:
+        parts.append("\n" + fw_block)
 
     parts.append("\n## EnrichedSpec (your build-against contract)\n")
     parts.append("```json\n")
@@ -132,6 +137,10 @@ def build_engineer_repair_context(
 
     parts.append("\n## Architecture\n")
     parts.append(_render_architecture(architecture))
+
+    fw_block = render_for_engineer(architecture)
+    if fw_block:
+        parts.append("\n" + fw_block)
 
     parts.append("\n## Code Review Report (your repair task)\n")
     parts.append(code_review_report.render_for_repair())

@@ -386,3 +386,21 @@ class TestInitialContext:
         assert "create_pet" in user
         assert "list_pets" in user
         assert "groomer" in user
+
+    def test_threads_framework_conventions(self, tmp_path):
+        # _arch() declares a fastapi backend — Engineer seed context
+        # must include FastAPI conventions for the engineer to know
+        # about auto-mounted routes, Pydantic v2, etc.
+        actions = [
+            _action("submit_plan", approach="ok", issues=[_issue("I1")]),
+            _action("submit_implementation", summary="s",
+                    final_test_status="not_run",
+                    completed_issue_ids=["I1"]),
+        ]
+        eng = _engineer(_client_with_actions(actions), tmp_path)
+        eng.implement(_milestone(), _arch(), _spec())
+        first_msgs = eng._client.get_text.call_args_list[0].kwargs["messages"]
+        user = next(m["content"] for m in first_msgs if m["role"] == "user")
+        assert "Framework conventions" in user
+        assert "fastapi" in user.lower()
+        assert "auto-mounts app/api/routes/" in user

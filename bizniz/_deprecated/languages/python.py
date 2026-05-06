@@ -6,7 +6,7 @@ import re
 import sys
 from typing import Set
 
-from bizniz.languages.base import LanguageStrategy
+from bizniz._deprecated.languages.base import LanguageStrategy
 from bizniz.workspace.base_workspace import BaseWorkspace
 from bizniz.tools.discovery_prompt import DISCOVERY_TOOLS_PROMPT
 

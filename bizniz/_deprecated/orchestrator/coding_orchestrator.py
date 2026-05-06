@@ -50,7 +50,7 @@ from bizniz.agents.coder.types import FileChange
 from bizniz.tester.types import GeneratedTestFile
 from bizniz.orchestrator.strategy import CodingStrategy
 from bizniz.preflight.registry import get_validator
-from bizniz.languages import get_language_strategy, LanguageStrategy
+from bizniz._deprecated.languages import get_language_strategy, LanguageStrategy
 from bizniz.orchestrator.types import (
     OrchestratorResult,
     OrchestratorStalledError,

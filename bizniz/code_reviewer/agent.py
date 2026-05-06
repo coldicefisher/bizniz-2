@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Callable, Dict, Iterable, List, Optional
 
+from bizniz.architect.types import SystemArchitecture
 from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.clients.chatgpt.messages import Message
 from bizniz.clients.chatgpt.types.response_format import ResponseFormat
@@ -40,6 +41,7 @@ class CodeReviewer:
         milestone: Milestone,
         enriched_spec: EnrichedSpec,
         changed_files: Dict[str, str],
+        architecture: Optional[SystemArchitecture] = None,
         existing_symbols: Optional[str] = None,
         auth_contract: Optional[str] = None,
         prior_specs: Optional[Iterable[EnrichedSpec]] = None,
@@ -72,6 +74,7 @@ class CodeReviewer:
             milestone_name=milestone.name,
             enriched_spec_json=enriched_spec.model_dump_json(indent=2),
             changed_files=changed_files,
+            architecture=architecture,
             existing_symbols=existing_symbols,
             auth_contract=auth_contract,
             prior_specs=prior_jsons,

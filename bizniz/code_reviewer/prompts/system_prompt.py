@@ -87,31 +87,25 @@ will fail. When in doubt, mark warning.
 
 # THE FALSE-POSITIVE CALIBRATION
 
-A few specific things that look like hallucinations but ARE real:
+A specific list of "looks like a hallucination, but it's actually a
+framework-magic real thing" patterns is provided in the user message
+as a `Framework calibration` block, generated from the project's
+architecture. **Read it before flagging anything**, and treat anything
+in that list as REAL — don't flag it.
 
-  - **FastAPI auto-discovered routes** — `router` attr exported from a
-    file in `app/api/routes/` IS auto-mounted, even if you don't see
-    a registration. Don't flag the route file as "unregistered."
+General guardrails that hold across frameworks:
 
-  - **SQLAlchemy declarative models** — fields declared with `Mapped[X]`
-    or `Column(...)` are real even though they look like class
-    attributes. Don't flag `User.email` as missing if it's
-    `email: Mapped[str]` in the model.
+  - **TypeScript path aliases** — `import { foo } from '@/lib/foo'`
+    is real if `tsconfig.json` has a `paths` mapping `@/*` to `src/*`.
+  - **Auth contract role names** — declared by the project's
+    `AUTH_CONTRACT.md`; not arbitrary.
+  - **Workspace-local imports** — relative imports (`./`, `../`) and
+    project package roots are real even if not in the existing-symbols
+    block.
 
-  - **Pydantic field aliases** — a field with `Field(alias='emailAddress')`
-    is accessible as both ``email`` (python) and ``emailAddress`` (json).
-
-  - **TypeScript path aliases** — `import { foo } from '@/lib/foo'` is
-    real if the project's `tsconfig.json` has a path alias mapping
-    `@/*` to `src/*`.
-
-  - **Skeleton conventions** — bizniz skeletons auto-mount
-    `src/routes/*.tsx` exporting `RouteEntry`. The auth contract
-    declares role names. These are conventions, not arbitrary.
-
-When you see anything from this list, do NOT flag it. If you can't
-tell whether it's framework magic or a hallucination, mark warning
-and explain in ``reason``.
+If you can't tell whether something is framework magic or a
+hallucination, mark `warning` and explain in `reason`. Don't ship a
+`critical` flag on a pattern you're unsure about.
 
 # OUTPUT
 

@@ -5,9 +5,9 @@ Each language provides its own strategy that encapsulates prompts,
 file conventions, import scanning, and package management.
 """
 
-from bizniz.languages.base import LanguageStrategy
-from bizniz.languages.python import PythonStrategy
-from bizniz.languages.typescript import TypeScriptStrategy
+from bizniz._deprecated.languages.base import LanguageStrategy
+from bizniz._deprecated.languages.python import PythonStrategy
+from bizniz._deprecated.languages.typescript import TypeScriptStrategy
 
 
 _STRATEGIES = {

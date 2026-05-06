@@ -267,6 +267,47 @@ class TestPromptThreading:
         assert "Auth contract" in user
         assert "groomer" in user
 
+    def test_framework_calibration_threaded_when_architecture_provided(self):
+        from bizniz.architect.types import ServiceDefinition, SystemArchitecture
+        arch = SystemArchitecture(
+            project_name="P", project_slug="p", description="d",
+            services=[
+                ServiceDefinition(
+                    name="frontend", service_type="frontend",
+                    framework="angular", language="typescript",
+                    description="UI", workspace_name="frontend", port=4200,
+                ),
+            ],
+        )
+        client = _client_returning(_payload())
+        cr = CodeReviewer(client=client)
+        cr.review(
+            milestone=_milestone(), enriched_spec=_spec(),
+            changed_files={"x.ts": "y"},
+            architecture=arch,
+        )
+        user = next(
+            m.content for m in client.get_text.call_args.kwargs["messages"]
+            if m.role == "user"
+        )
+        assert "Framework calibration" in user
+        assert "angular" in user.lower()
+        assert "@Component" in user
+        assert "@NgModule" in user
+
+    def test_no_framework_calibration_when_architecture_omitted(self):
+        client = _client_returning(_payload())
+        cr = CodeReviewer(client=client)
+        cr.review(
+            milestone=_milestone(), enriched_spec=_spec(),
+            changed_files={"x.py": "y"},
+        )
+        user = next(
+            m.content for m in client.get_text.call_args.kwargs["messages"]
+            if m.role == "user"
+        )
+        assert "Framework calibration" not in user
+
     def test_prior_specs_threaded(self):
         client = _client_returning(_payload())
         cr = CodeReviewer(client=client)
