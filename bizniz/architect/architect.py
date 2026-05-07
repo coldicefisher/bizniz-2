@@ -83,6 +83,15 @@ class Architect:
             label="Architect.decompose",
         )
 
+        # Defensive: the LLM occasionally returns a top-level list of
+        # services instead of the expected dict. Wrap it back into the
+        # dict shape so the rest of the parser can proceed.
+        if isinstance(raw, list):
+            self._log(
+                f"Architect: LLM returned a list (len={len(raw)}); "
+                f"normalizing into 'services' field"
+            )
+            raw = {"services": raw}
         services = [ServiceDefinition(**svc) for svc in raw.get("services") or []]
         if not services:
             raise ArchitectBadAIResponseError(
