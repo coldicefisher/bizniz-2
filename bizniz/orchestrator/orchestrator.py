@@ -177,11 +177,40 @@ class Orchestrator:
                     error=f"{type(e).__name__}: {e}",
                 )
 
+            # `passed` and `deferred` terminate. `partial` / `failed`
+            # are escalation-eligible — the Coder either ran out of
+            # iterations or self-reported short of the goal. Try the
+            # next tier with fresh budget. Same exhaustion semantics
+            # as the stall path.
+            if result.status in ("partial", "failed"):
+                last_err = result.summary or f"status={result.status}"
+                self._log(
+                    f"[{self._service}] {issue.id}: {result.status} on {model} — "
+                    f"{last_err[:120]}"
+                )
+                if self._progression.is_at_max:
+                    self._log(
+                        f"[{self._service}] {issue.id}: progression exhausted, "
+                        f"marking {result.status}."
+                    )
+                    return IssueOutcome(
+                        issue_id=issue.id,
+                        disposition=result.status,
+                        tiers_used=tiers_used,
+                        final_result=result,
+                        error=last_err,
+                    )
+                next_model = self._progression.escalate()
+                self._log(
+                    f"[{self._service}] {issue.id}: escalating to {next_model}"
+                )
+                continue
+
             disposition: IssueDisposition
             if result.status == "passed":
                 disposition = "escalated" if len(tiers_used) > 1 else "passed"
             else:
-                disposition = result.status  # partial / deferred / failed
+                disposition = result.status  # deferred
 
             return IssueOutcome(
                 issue_id=issue.id,

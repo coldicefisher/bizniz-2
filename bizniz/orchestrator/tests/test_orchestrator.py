@@ -166,6 +166,70 @@ class TestEscalation:
         assert out.issues[0].tiers_used == ["lite", "top", "pro"]
         assert "c" in out.issues[0].error
 
+    def test_partial_status_escalates(self):
+        # Tier 0 returns partial (forced-final at iteration cap),
+        # tier 1 passes. Same escalation semantics as a stall.
+        coder = _coder([
+            CoderResult(issue_id="I1", status="partial", summary="iter cap"),
+            _result("I1"),
+        ])
+        orch = Orchestrator(
+            service="backend",
+            coder_factory=lambda m: coder,
+            progression=ModelProgression(["lite", "top"]),
+        )
+        out = orch.run_service([_issue("I1")], _arch(), _spec())
+
+        assert out.all_passed
+        assert out.issues[0].disposition == "escalated"
+        assert out.issues[0].tiers_used == ["lite", "top"]
+
+    def test_partial_at_top_tier_marks_partial(self):
+        coder = _coder([
+            CoderResult(issue_id="I1", status="partial", summary="lite"),
+            CoderResult(issue_id="I1", status="partial", summary="top"),
+        ])
+        orch = Orchestrator(
+            service="backend",
+            coder_factory=lambda m: coder,
+            progression=ModelProgression(["lite", "top"]),
+        )
+        out = orch.run_service([_issue("I1")], _arch(), _spec())
+
+        assert not out.all_passed
+        assert out.issues[0].disposition == "partial"
+        assert out.issues[0].tiers_used == ["lite", "top"]
+        assert out.issues[0].final_result is not None
+
+    def test_failed_status_escalates(self):
+        coder = _coder([
+            CoderResult(issue_id="I1", status="failed", summary="bad"),
+            _result("I1"),
+        ])
+        orch = Orchestrator(
+            service="backend",
+            coder_factory=lambda m: coder,
+            progression=ModelProgression(["lite", "top"]),
+        )
+        out = orch.run_service([_issue("I1")], _arch(), _spec())
+        assert out.all_passed
+        assert out.issues[0].disposition == "escalated"
+
+    def test_deferred_status_terminates_no_escalation(self):
+        # Deferred = explicit punt; do not escalate.
+        coder = _coder([
+            CoderResult(issue_id="I1", status="deferred",
+                        summary="needs upstream"),
+        ])
+        orch = Orchestrator(
+            service="backend",
+            coder_factory=lambda m: coder,
+            progression=ModelProgression(["lite", "top"]),
+        )
+        out = orch.run_service([_issue("I1")], _arch(), _spec())
+        assert out.issues[0].disposition == "deferred"
+        assert out.issues[0].tiers_used == ["lite"]
+
     def test_progression_resets_per_issue(self):
         # I1 escalates to top, I2 should start fresh at lite.
         coder = _coder([

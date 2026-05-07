@@ -10,8 +10,10 @@ from bizniz.coder.types import CoderResult
 
 IssueDisposition = Literal[
     "passed",       # Coder returned status=passed
-    "partial",      # Coder returned status=partial (code written, tests red)
-    "stalled",      # All tiers exhausted on stall
+    "partial",      # All tiers returned partial (code written, tests red)
+    "failed",       # All tiers returned failed (Coder gave up explicitly)
+    "deferred",     # Coder punted — issue blocked outside its scope
+    "stalled",      # All tiers exhausted on stall (3-of-5 repetition)
     "escalated",    # Passed only after escalating to a higher tier
     "errored",      # Unexpected exception
     "skipped",      # Dependency previously failed

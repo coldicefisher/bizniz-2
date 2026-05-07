@@ -26,7 +26,8 @@ from bizniz.coder.prompts.system_prompt import CODER_SYSTEM_PROMPT
 from bizniz.coder.symbol_validator import validate_files
 from bizniz.coder.types import CoderError, CoderResult, Issue
 from bizniz.lib.tool_loop_agent import (
-    ToolHandler, ToolLoopAgent, ToolLoopAgentStalledError,
+    TerminalActionRejected, ToolHandler, ToolLoopAgent,
+    ToolLoopAgentStalledError,
 )
 from bizniz.lib.tools.container import build_container_handlers
 from bizniz.lib.tools.database import build_database_handlers
@@ -90,15 +91,71 @@ class Coder(ToolLoopAgent):
     def parse_terminal_action(self, action: dict) -> CoderResult:
         if self._issue is None:
             raise CoderError("submit_code reached without an active issue")
+
+        status = action.get("status") or "passed"
+        # Green-tests gate: if the LLM claims "passed", verify it
+        # actually ran tests and they were green. Without this, the
+        # Coder can submit fake passes — the only deterministic
+        # signal we have is whether ``run_tests`` was invoked and
+        # what its output looked like.
+        if status == "passed":
+            rejection = self._reject_if_tests_not_green()
+            if rejection:
+                raise TerminalActionRejected(rejection)
+
         return CoderResult(
             issue_id=self._issue.id,
-            status=action.get("status") or "passed",
+            status=status,
             target_files_written=list(self._target_files_written),
             test_files_written=list(self._test_files_written),
             summary=action.get("summary") or "",
             notes=list(action.get("notes") or []),
             last_test_output_tail=self._last_test_output[-2000:],
         )
+
+    def _reject_if_tests_not_green(self) -> Optional[str]:
+        """Return a rejection message if the model claims ``passed``
+        but ``run_tests`` either wasn't called or its output doesn't
+        carry the deterministic ``TESTS PASSED`` verdict prefix.
+
+        The ``run_tests`` handler in ``lib/tools/test_runner.py``
+        prefixes its output with ``TESTS PASSED`` iff pytest exited 0,
+        and ``TESTS FAILED`` otherwise. That prefix is the
+        deterministic signal — we own it and the LLM can't fabricate
+        it because ``self._last_test_output`` is captured by our
+        wrapper directly from the handler.
+
+        Limitation: a green output here means *the last pytest
+        invocation* exited 0. It does NOT prove the issue's specific
+        test files were exercised — the LLM could run an unrelated
+        green test directory. We accept that risk at this layer and
+        rely on QualityEngineer.review (post-flight, full spec
+        context) to catch coverage gaps.
+        """
+        if not self._last_test_output:
+            return (
+                "submit_code rejected: you claimed status='passed' but "
+                "run_tests was never called this run. Invoke run_tests "
+                "with the path to the test files for this issue, "
+                "confirm the output starts with 'TESTS PASSED', then "
+                "resubmit. If tests are red, fix the code and try "
+                "again. If you genuinely cannot get tests to pass, "
+                "submit with status='partial' or status='failed' and "
+                "describe the blocker in the summary."
+            )
+        if not self._last_test_output.lstrip().startswith("TESTS PASSED"):
+            tail = self._last_test_output[-1000:]
+            return (
+                "submit_code rejected: you claimed status='passed' but "
+                "the last run_tests output does not start with the "
+                "deterministic 'TESTS PASSED' verdict (pytest exit 0). "
+                "Read the output below, fix the issue, run_tests "
+                "again, and only submit status='passed' when the run "
+                "exits clean. If you cannot resolve it, submit "
+                "status='partial' with a summary of the blocker.\n\n"
+                f"--- last test output (tail) ---\n{tail}"
+            )
+        return None
 
     # ── Public ─────────────────────────────────────────────────────────
 

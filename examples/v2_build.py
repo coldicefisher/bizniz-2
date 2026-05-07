@@ -252,18 +252,33 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     def service_planner_factory(_service):
         return ServicePlanner(client=sp_client, on_status=on_status)
 
+    coder_tiers = list(
+        getattr(config, "coder_models", []) or [config.engineer_model]
+    )
+    # Per-tier iteration budget. Lite is cheap so let it grind cheaply;
+    # top has fewer turns because each one is more expensive but more
+    # capable; pro is the last shot — strongest model, modest budget.
+    # Counts come from the strategy discussion: 100 / 50 / 20.
+    tier_iterations = {
+        coder_tiers[0]: 100,
+        **({coder_tiers[1]: 50} if len(coder_tiers) > 1 else {}),
+        **({coder_tiers[2]: 20} if len(coder_tiers) > 2 else {}),
+    }
+    # Higher tiers (pro+ if config grows) inherit the last explicit
+    # budget. Falls back to 30 for unknown models.
+    default_iterations = (
+        list(tier_iterations.values())[-1] if tier_iterations else 30
+    )
+
     def coder_factory(model: str, service):
         return Coder(
             client=_client_for(model, f"coder:{service.name}"),
             workspace=workspace_for_service(service.workspace_name),
             compose_path=compose_path,
             target_service=service.name,
+            tool_iterations=tier_iterations.get(model, default_iterations),
             on_status=on_status,
         )
-
-    coder_tiers = list(
-        getattr(config, "coder_models", []) or [config.engineer_model]
-    )
 
     def progression_factory(_service):
         return ModelProgression(list(coder_tiers))

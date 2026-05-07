@@ -64,6 +64,19 @@ class ToolLoopAgentNoTerminalError(ToolLoopAgentError):
     not return a terminal action."""
 
 
+class TerminalActionRejected(Exception):
+    """Subclass raised this from ``parse_terminal_action`` to push the
+    LLM back into the loop with a correction message. Loop appends
+    ``reason`` as a user message and continues.
+
+    Used to gate self-reported terminal status: e.g. Coder claims
+    ``status="passed"`` but tests aren't actually green.
+    """
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 class ToolLoopAgentStalledError(ToolLoopAgentError):
     """The agent emitted the same action signature too many times in
     its recent window (default: 3 of the last 5). Caller should
@@ -262,7 +275,14 @@ class ToolLoopAgent(ABC):
             action_type = action.get("action", "")
             if action_type == terminal:
                 self._log(f"{agent_name}: terminal action submitted")
-                return self.parse_terminal_action(action)
+                try:
+                    return self.parse_terminal_action(action)
+                except TerminalActionRejected as e:
+                    self._log(
+                        f"{agent_name}: terminal rejected — {e.reason[:160]}"
+                    )
+                    messages.append({"role": "user", "content": e.reason})
+                    continue
 
             handler = handlers.get(action_type)
             if handler is None:

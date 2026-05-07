@@ -166,7 +166,9 @@ class TestValidateSymbolsHandler:
 
 class TestEndToEnd:
     def test_minimal_path(self, tmp_path):
-        # Coder writes one file, validates, writes test, runs (mocked), submits.
+        # Coder writes file, validates, writes test, runs tests, submits.
+        # Stub run_tests to return the deterministic green verdict so the
+        # submit_code gate accepts status='passed'.
         (tmp_path / "requirements.txt").write_text("fastapi\n")
         actions = [
             _action("write_file", path="app/users.py",
@@ -174,21 +176,56 @@ class TestEndToEnd:
             _action("validate_symbols"),
             _action("write_file", path="tests/test_users.py",
                     new_content="def test_x(): assert True\n"),
+            _action("run_tests", path="tests/"),
             _action("submit_code", status="passed", summary="ok"),
         ]
         coder = _coder(_client_with(actions), tmp_path)
-        result = coder.code_issue(
-            issue=_issue(),
-            architecture=_arch(),
-            enriched_spec=_spec(),
+        # Stub the run_tests handler to return the verdict prefix.
+        coder._handlers = coder._build_handlers("backend")
+        coder._handlers["run_tests"] = lambda a: "TESTS PASSED\n(exit code: 0)\n"
+        # Re-attach the wrapper that captures _last_test_output.
+        original_run_tests = coder._handlers["run_tests"]
+
+        def run_tests_tracked(action):
+            result = original_run_tests(action)
+            coder._last_test_output = result
+            return result
+        coder._handlers["run_tests"] = run_tests_tracked
+
+        # Skip code_issue's _build_handlers reset by invoking .run() directly
+        # with the prepared handlers. We still need to mark _issue and clear
+        # state like code_issue does.
+        from bizniz.coder.prompts.initial_context import build_coder_initial_context
+        coder._issue = _issue()
+        coder._target_files_written = []
+        coder._test_files_written = []
+        coder._last_test_output = ""
+        initial = build_coder_initial_context(
+            issue=_issue(), architecture=_arch(), enriched_spec=_spec(),
         )
+        result = coder.run(initial)
         assert isinstance(result, CoderResult)
         assert result.status == "passed"
         assert result.target_files_written == ["app/users.py"]
         assert result.test_files_written == ["tests/test_users.py"]
 
+    def test_passed_without_run_tests_is_rejected(self, tmp_path):
+        # LLM tries to submit passed without running tests → rejected.
+        # After rejection, LLM submits partial → accepted.
+        actions = [
+            _action("submit_code", status="passed", summary="lying"),
+            _action("submit_code", status="partial", summary="ok honest"),
+        ]
+        coder = _coder(_client_with(actions), tmp_path)
+        result = coder.code_issue(
+            issue=_issue(), architecture=_arch(), enriched_spec=_spec(),
+        )
+        assert result.status == "partial"
+
     def test_initial_context_has_issue_only(self, tmp_path):
-        actions = [_action("submit_code", status="passed", summary="x")]
+        # Use status='partial' to bypass the green-tests gate; this test
+        # only cares about the prompt assembly.
+        actions = [_action("submit_code", status="partial", summary="x")]
         coder = _coder(_client_with(actions), tmp_path)
         coder.code_issue(
             issue=_issue(target=("a.py",), tests=("t.py",)),
