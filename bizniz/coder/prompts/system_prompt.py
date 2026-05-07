@@ -41,12 +41,28 @@ actually exists, write the tests, and run them green.
 4. **Write tests** — only after validate_symbols passes. write_file
    each test_file with complete pytest tests.
 
-5. **Run tests** (run_tests). On fail:
-   - Read the error, view_file as needed.
-   - Fix code or test (whichever's wrong; tests should match the
-     code, not vice-versa unless the code is genuinely broken).
-   - Re-run.
-   - Quick-pass + 1 retry first; then grind.
+5. **Run tests** (run_tests). On fail, DIAGNOSE before rewriting:
+   - **Read the test output END TO END.** Don't just glance at the
+     summary. Find the actual error: ImportError, AssertionError,
+     ModuleNotFoundError, fixture-not-found, etc. The output tells
+     you what's wrong; running the test again WITHOUT changing
+     anything will give the same result.
+   - **Use the inspect tools when output is unclear:**
+     * ``inspect_env`` — what env vars does the container actually see?
+     * ``tail_logs`` — what is the running container saying?
+     * ``run_in_container`` — run an ad-hoc shell command in the
+       service container (e.g. ``ls /app/app/models/``, ``python
+       -c "from app.models.user import User"``).
+     * ``run_python_in_container`` — run Python in the live container
+       (e.g. ``import sys; print(sys.path)``).
+     * ``hit_endpoint`` — for endpoint tests, hit the URL directly to
+       see what the live service returns.
+     * ``query_database`` — peek at DB state if a test depends on data.
+   - **Fix the actual cause, not your guess.** If the test output
+     says ``ModuleNotFoundError: No module named 'worker.config'``,
+     don't rewrite the test — fix the import path. If
+     ``fixture 'db' not found``, write a conftest.py with the fixture.
+   - Re-run after each fix. If you've changed nothing, do NOT re-run.
 
 6. **submit_code** when tests pass — terminal action.
 
@@ -73,6 +89,20 @@ actually exists, write the tests, and run them green.
   - **Absolute imports only.** `from app.models.user import User`,
     not `from ..models.user import User`. The skeletons + stubs
     are set up for absolute paths.
+
+  - **Imports are workspace-relative — DO NOT prefix the
+    service/workspace name.** Your workspace IS the service
+    directory. If you write ``config.py`` at the workspace root,
+    import it as ``from config import Settings``, NOT
+    ``from worker.config import Settings``. The container's
+    PYTHONPATH is the workspace root; ``worker.config`` would
+    look for ``worker/config.py`` inside the workspace, which
+    doesn't exist (and double-nested ``worker/worker/config.py``
+    is wrong because the deployed container can't reach it).
+    Same rule for any service: ``backend`` Coder imports
+    ``from app.models.user``, not ``from backend.app.models.user``.
+    ``frontend`` Coder imports ``from src/types/auth``, not
+    ``from frontend/src/types/auth``.
 
   - **Public APIs need docstrings.** Every public class / function
     you write needs a one-line docstring at minimum. Downstream

@@ -154,6 +154,51 @@ class IssueStateStore:
             notes=notes,
         )
 
+    # ── Retry-failed ──────────────────────────────────────────────────
+
+    def reset_non_passed_to_pending(self, service: Optional[str] = None) -> int:
+        """Flip every issue NOT in (passed, escalated, deferred) back to
+        pending so a re-run can retry them with new fixes/prompts in
+        place. Returns the count of rows reset.
+
+        Used by --retry-failed: lets the user iterate on fixes against
+        a known-bad set of issues without paying for ServicePlanner to
+        re-emit the plan.
+
+        ``service`` filters to one service; None = all services in this
+        (job, milestone) scope.
+        """
+        terminal_keep = ("passed", "escalated", "deferred")
+        params: list = list(terminal_keep)
+        sql = (
+            "UPDATE coder_issues SET status='pending', "
+            "started_at=NULL, finished_at=NULL, error='', "
+            "tiers_used='[]', current_tier=NULL "
+            f"WHERE job_id=? AND milestone_index=? AND status NOT IN "
+            f"({','.join('?' for _ in terminal_keep)})"
+        )
+        params = list(terminal_keep) + [self._job_id, self._milestone_index]
+        if service is not None:
+            sql += " AND service=?"
+            params.append(service)
+        # Reorder for the actual placeholders
+        sql_final = (
+            "UPDATE coder_issues SET status='pending', "
+            "started_at=NULL, finished_at=NULL, error='', "
+            "tiers_used='[]', current_tier=NULL "
+            f"WHERE job_id=? AND milestone_index=? AND status NOT IN "
+            f"({','.join('?' for _ in terminal_keep)})"
+            + (" AND service=?" if service is not None else "")
+        )
+        params_final = (
+            [self._job_id, self._milestone_index]
+            + list(terminal_keep)
+            + ([service] if service is not None else [])
+        )
+        cur = self._db._conn.execute(sql_final, params_final)
+        self._db._conn.commit()
+        return cur.rowcount
+
     # ── Reads ─────────────────────────────────────────────────────────
 
     def all_rows(self, service: Optional[str] = None) -> list:

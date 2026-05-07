@@ -239,6 +239,57 @@ class TestAssembleEngineerResult:
 # ── Cross-job isolation ────────────────────────────────────────────────
 
 
+class TestRetryFailed:
+    def test_resets_non_passed_back_to_pending(self, store):
+        store.record_planned("backend", [_issue("BE-001"), _issue("BE-002"),
+                                          _issue("BE-003"), _issue("BE-004")])
+        store.mark_finished(
+            "backend", "BE-001", status="passed",
+            result=CoderResult(issue_id="BE-001", status="passed"),
+        )
+        store.mark_finished("backend", "BE-002", status="stalled", error="x")
+        store.mark_finished("backend", "BE-003", status="partial",
+            result=CoderResult(issue_id="BE-003", status="partial"))
+        # BE-004 stays pending
+
+        n = store.reset_non_passed_to_pending()
+        # 3 rows touched: BE-002 (stalled), BE-003 (partial), BE-004
+        # (already pending — re-flipped to pending is a no-op semantically
+        # but counts as a row update). BE-001 (passed) skipped.
+        assert n == 3
+
+        rows = {r["issue_id"]: r["status"] for r in store.all_rows()}
+        assert rows["BE-001"] == "passed"
+        assert rows["BE-002"] == "pending"
+        assert rows["BE-003"] == "pending"
+        assert rows["BE-004"] == "pending"
+
+    def test_per_service_filter(self, store):
+        store.record_planned("backend", [_issue("BE-001")])
+        store.record_planned("frontend", [_issue("FE-001", deps=[])])
+        store.mark_finished("backend", "BE-001", status="stalled", error="x")
+        store.mark_finished("frontend", "FE-001", status="stalled", error="y")
+
+        n = store.reset_non_passed_to_pending(service="backend")
+        assert n == 1
+        rows = {f"{r['service']}/{r['issue_id']}": r["status"] for r in store.all_rows()}
+        assert rows["backend/BE-001"] == "pending"
+        assert rows["frontend/FE-001"] == "stalled"
+
+    def test_clears_runtime_fields(self, store):
+        store.record_planned("backend", [_issue("BE-001")])
+        store.mark_started("backend", "BE-001", "lite")
+        store.mark_finished("backend", "BE-001", status="stalled", error="boom")
+
+        store.reset_non_passed_to_pending()
+        rows = store.all_rows()
+        r = rows[0]
+        assert r["status"] == "pending"
+        assert r["error"] == ""
+        assert r["tiers_used"] == "[]"
+        assert r["current_tier"] is None
+
+
 class TestCrossJobIsolation:
     def test_two_jobs_dont_collide(self, tmp_path):
         project = Project(root=tmp_path, project_name="test")

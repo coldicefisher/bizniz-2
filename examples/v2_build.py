@@ -503,6 +503,16 @@ def main():
                    help="Push through soft gates (warn + continue)")
     p.add_argument("--interactive", action="store_true",
                    help="Halt at every gate for human review")
+    p.add_argument("--retry-failed", action="store_true",
+                   help=(
+                       "Reset every non-passed coder_issues row in the "
+                       "given milestone back to pending so the implement "
+                       "phase re-attempts them with current code/prompts. "
+                       "Use after fixing a Coder/prompt bug to retry "
+                       "issues without paying for ServicePlanner re-plan."
+                   ))
+    p.add_argument("--retry-service", default=None,
+                   help="With --retry-failed, restrict the reset to one service")
     p.add_argument(
         "--phase",
         default=None,
@@ -539,6 +549,23 @@ def main():
 
     on_status(f"v2-build: project={args.project} job={args.resume_job_id or 'new'} "
               f"mode={'auto' if args.auto else ('interactive' if args.interactive else 'strict')}")
+
+    # --retry-failed: flip non-passed coder_issues rows to pending so
+    # the implement phase re-attempts them. Useful after fixing a
+    # Coder/prompt bug — saves ServicePlanner re-plan cost.
+    if args.retry_failed:
+        if args.milestone is None:
+            p.error("--retry-failed requires --milestone")
+        store = pipeline._milestone_loop._issue_store_factory(args.milestone)
+        n = store.reset_non_passed_to_pending(service=args.retry_service)
+        scope = (
+            f"service={args.retry_service}"
+            if args.retry_service else "all services"
+        )
+        on_status(
+            f"--retry-failed: reset {n} issue(s) to pending "
+            f"(milestone={args.milestone}, {scope})"
+        )
 
     result = pipeline.run(
         problem_statement=args.problem or "",
