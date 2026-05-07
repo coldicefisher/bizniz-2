@@ -156,22 +156,27 @@ class TestValidation:
             )
 
     def test_missing_target_files_raises(self):
+        # No target_files = nothing to code. Still raises.
         d = _issue_dict("BE-001", files=[])
         client = _client_returning({"issues": [d]})
         planner = ServicePlanner(client=client)
-        with pytest.raises(ServicePlannerError, match="target/test file"):
+        with pytest.raises(ServicePlannerError, match="empty target_files"):
             planner.plan_service(
                 architecture=_arch(), enriched_spec=_spec(), service=_service(),
             )
 
-    def test_missing_test_files_raises(self):
+    def test_missing_test_files_auto_filled(self):
+        # No test_files = auto-fill with tests/test_<id>.py instead
+        # of raising. Lets the dispatcher proceed even when the LLM
+        # forgets test_files for one issue out of many.
         d = _issue_dict("BE-001", tests=[])
         client = _client_returning({"issues": [d]})
         planner = ServicePlanner(client=client)
-        with pytest.raises(ServicePlannerError, match="target/test file"):
-            planner.plan_service(
-                architecture=_arch(), enriched_spec=_spec(), service=_service(),
-            )
+        issues = planner.plan_service(
+            architecture=_arch(), enriched_spec=_spec(), service=_service(),
+        )
+        assert len(issues) == 1
+        assert issues[0].test_files == ["tests/test_be_001.py"]
 
     def test_cyclic_deps_raises(self):
         client = _client_returning({"issues": [

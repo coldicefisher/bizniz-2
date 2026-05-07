@@ -132,13 +132,24 @@ class MilestoneCodeDispatcher:
                     skeleton_md_for_service(service.name)
                     if skeleton_md_for_service else None
                 )
-                issues = planner.plan_service(
-                    architecture=architecture,
-                    enriched_spec=enriched_spec,
-                    service=service,
-                    skeleton_md=skeleton_md,
-                    auth_contract=auth_contract,
-                )
+                try:
+                    issues = planner.plan_service(
+                        architecture=architecture,
+                        enriched_spec=enriched_spec,
+                        service=service,
+                        skeleton_md=skeleton_md,
+                        auth_contract=auth_contract,
+                    )
+                except Exception as e:
+                    # ServicePlannerError or any other planner-side
+                    # failure should not kill the whole milestone — skip
+                    # this service and continue with the rest.
+                    self._log(
+                        f"MilestoneCodeDispatcher: `{service.name}` planner "
+                        f"raised {type(e).__name__}: {str(e)[:200]} — "
+                        f"skipping service"
+                    )
+                    continue
                 self._log(
                     f"MilestoneCodeDispatcher: `{service.name}` planner "
                     f"emitted {len(issues)} issues"
