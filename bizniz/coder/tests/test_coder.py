@@ -247,6 +247,54 @@ class TestEndToEnd:
 # ── Schema correctness ─────────────────────────────────────────────────
 
 
+class TestWorkspacePrefixStrip:
+    """ServicePlanner emits paths like 'backend/app/users.py' thinking
+    workspace is project-root. Coder must strip the prefix or files
+    land double-nested at backend/backend/app/users.py and the
+    skeleton can't import them."""
+
+    def test_strip_known_prefix(self, tmp_path):
+        coder = Coder(
+            client=MagicMock(spec=BaseAIClient),
+            workspace=LocalWorkspace(root=tmp_path),
+            compose_path="/p/c.yml", target_service="backend",
+            workspace_name="backend",
+        )
+        assert coder._strip_workspace_prefix("backend/app/users.py") \
+            == "app/users.py"
+
+    def test_unprefixed_path_unchanged(self, tmp_path):
+        coder = Coder(
+            client=MagicMock(spec=BaseAIClient),
+            workspace=LocalWorkspace(root=tmp_path),
+            compose_path="/p/c.yml", target_service="backend",
+            workspace_name="backend",
+        )
+        assert coder._strip_workspace_prefix("app/users.py") == "app/users.py"
+
+    def test_idempotent(self, tmp_path):
+        coder = Coder(
+            client=MagicMock(spec=BaseAIClient),
+            workspace=LocalWorkspace(root=tmp_path),
+            compose_path="/p/c.yml", target_service="backend",
+            workspace_name="backend",
+        )
+        once = coder._strip_workspace_prefix("backend/app/users.py")
+        twice = coder._strip_workspace_prefix(once)
+        assert twice == "app/users.py"
+
+    def test_falls_back_to_target_service_when_workspace_name_unset(
+        self, tmp_path,
+    ):
+        coder = Coder(
+            client=MagicMock(spec=BaseAIClient),
+            workspace=LocalWorkspace(root=tmp_path),
+            compose_path="/p/c.yml", target_service="backend",
+            # workspace_name not provided
+        )
+        assert coder._strip_workspace_prefix("backend/x.py") == "x.py"
+
+
 class TestSchema:
     def test_validate_symbols_in_action_enum(self):
         from bizniz.coder.prompts.schema import CODER_ACTION_SCHEMA

@@ -288,6 +288,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
             workspace=workspace_for_service(service.workspace_name),
             compose_path=compose_path,
             target_service=service.name,
+            workspace_name=service.workspace_name,
             tool_iterations=tier_iterations.get(model, default_iterations),
             on_status=on_status,
         )

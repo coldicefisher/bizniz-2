@@ -52,6 +52,7 @@ class Coder(ToolLoopAgent):
         tool_iterations: int = 30,
         timeout_seconds: int = 1200,
         base_url: Optional[str] = None,
+        workspace_name: Optional[str] = None,
     ):
         super().__init__(
             client=client,
@@ -64,6 +65,12 @@ class Coder(ToolLoopAgent):
         self._compose_path = compose_path
         self._target_service = target_service
         self._base_url = base_url
+        # ServicePlanner sometimes emits paths like "backend/app/users.py"
+        # treating workspace as project-rooted; the actual workspace IS
+        # the service dir, so unstripped paths land at "backend/backend/
+        # app/users.py" and the FastAPI skeleton can't import them at
+        # runtime. Track the prefix and strip in write_file / run_tests.
+        self._workspace_prefix = (workspace_name or target_service).strip("/")
         # Per-call state — set in code_issue()
         self._issue: Optional[Issue] = None
         self._target_files_written: List[str] = []
@@ -234,27 +241,47 @@ class Coder(ToolLoopAgent):
         h.update(build_database_handlers(self._compose_path))
         h.update(build_jwt_handlers())
 
-        # Wrap write_file to track which target/test files we've written.
+        # Wrap write_file to (1) strip workspace_name prefix from
+        # paths the LLM emitted as project-rooted, and (2) track which
+        # target/test files we've written.
         original_write = h["write_file"]
 
         def write_file_tracked(action: dict) -> str:
+            normalized_path = self._strip_workspace_prefix(
+                action.get("path") or ""
+            )
+            if normalized_path != action.get("path"):
+                action = {**action, "path": normalized_path}
             result = original_write(action)
-            path = action.get("path") or ""
+            path = normalized_path
             if self._issue is not None:
-                if path in self._issue.target_files:
+                # Match the issue's declared target/test files using
+                # both the LLM's path (raw) and the normalized path so
+                # tracking stays correct regardless of which form the
+                # ServicePlanner emitted.
+                target_set = {self._strip_workspace_prefix(p)
+                              for p in self._issue.target_files}
+                test_set = {self._strip_workspace_prefix(p)
+                            for p in self._issue.test_files}
+                if path in target_set:
                     if path not in self._target_files_written:
                         self._target_files_written.append(path)
-                elif path in self._issue.test_files:
+                elif path in test_set:
                     if path not in self._test_files_written:
                         self._test_files_written.append(path)
             return result
 
         h["write_file"] = write_file_tracked
 
-        # Wrap run_tests so we capture the last output for the result.
+        # Wrap run_tests so we (1) strip workspace_name prefix from
+        # the path arg and (2) capture the last output for the result.
         original_run_tests = h["run_tests"]
 
         def run_tests_tracked(action: dict) -> str:
+            raw_path = action.get("path") or ""
+            normalized = self._strip_workspace_prefix(raw_path)
+            if normalized != raw_path:
+                action = {**action, "path": normalized}
             result = original_run_tests(action)
             self._last_test_output = result
             return result
@@ -265,6 +292,24 @@ class Coder(ToolLoopAgent):
         h["validate_symbols"] = self._handle_validate_symbols
 
         return h
+
+    # ── Path normalization ────────────────────────────────────────────
+
+    def _strip_workspace_prefix(self, path: str) -> str:
+        """Strip a leading ``<workspace_name>/`` from ``path``.
+
+        ServicePlanner sometimes emits target_files like
+        ``"backend/app/users.py"`` thinking workspaces are project-
+        rooted. The Coder's workspace IS the service dir, so without
+        stripping the file lands at ``backend/backend/app/users.py``
+        and the FastAPI skeleton's ``from app.models.user import User``
+        looks at ``app/app/models/user.py`` and 404s at runtime.
+        Idempotent on already-relative paths.
+        """
+        prefix = self._workspace_prefix + "/"
+        if path.startswith(prefix):
+            return path[len(prefix):]
+        return path
 
     # ── validate_symbols handler ──────────────────────────────────────
 
