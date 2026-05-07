@@ -634,6 +634,46 @@ class TestCodeDispatcher:
         dispatcher.run.assert_called_once()
         eng.implement.assert_not_called()
 
+    def test_repair_routes_through_dispatcher(self, tmp_path):
+        # When code_dispatcher is set, repair iterations should call
+        # dispatcher.repair() instead of v2 Engineer.repair().
+        eng = MagicMock()
+        dispatcher = MagicMock()
+        dispatcher.run.return_value = _engineer_result()
+        dispatcher.repair.return_value = _engineer_result()
+        qe = MagicMock()
+        qe.enrich.return_value = _spec()
+        # First review fails, repair succeeds, second review approves.
+        qe.review.side_effect = [
+            _coverage(approved=False), _coverage(approved=True),
+        ]
+        cr = MagicMock()
+        cr.review.side_effect = [
+            _code_review(approved=False, critical=True),
+            _code_review(approved=True),
+        ]
+        ip = MagicMock()
+        ip.run_api.return_value = _integration_result(passed=True, phase="api")
+        ip.run_worker.return_value = _integration_result(passed=True, phase="worker")
+        ip.run_web.return_value = _integration_result(passed=True, phase="web")
+
+        loop = _build_loop(
+            engineer=eng, qe=qe, cr=cr, integration=ip,
+            code_dispatcher=dispatcher,
+        )
+        state = MilestoneState(tmp_path / "m1", 1)
+
+        outcome = loop.run(
+            milestone=_milestone(), architecture=_arch(),
+            prior_specs=[], auth_contract=None, state=state,
+        )
+        assert outcome.final_subphase == SubPhase.DONE
+        # Repair went through dispatcher, not v2 Engineer
+        dispatcher.repair.assert_called_once()
+        eng.repair.assert_not_called()
+        # repair_iteration kwarg passed correctly (1-indexed)
+        assert dispatcher.repair.call_args.kwargs["repair_iteration"] == 1
+
     def test_dispatcher_receives_spec_and_arch(self, tmp_path):
         dispatcher = MagicMock()
         dispatcher.run.return_value = _engineer_result()

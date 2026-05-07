@@ -6,9 +6,13 @@ import pytest
 
 from bizniz.architect.types import ServiceDefinition, SystemArchitecture
 from bizniz.clients.base_ai_client import BaseAIClient
+from bizniz.code_reviewer.types import (
+    CodeReviewReport, FlaggedSymbol,
+)
 from bizniz.coder.types import Issue
 from bizniz.quality_engineer.types import (
-    CapabilitySpec, EnrichedSpec, Field as SpecField,
+    CapabilitySpec, CoverageReport, EnrichedSpec, Field as SpecField,
+    MissingScenario,
 )
 from bizniz.service_planner.agent import ServicePlanner, ServicePlannerError
 
@@ -220,3 +224,100 @@ class TestPromptContent:
         sent = client.get_text.call_args.kwargs["messages"]
         user_msg = next(m.content for m in sent if m.role == "user")
         assert "JWT" in user_msg or "auth" in user_msg.lower()
+
+
+# ── Repair mode ────────────────────────────────────────────────────────
+
+
+def _coverage(missing_capability="cap_x", scenario_priority="critical"):
+    return CoverageReport(
+        milestone_name="M1",
+        approved=False,
+        coverage_by_capability={"cap_x": "missing"},
+        missing_scenarios=[MissingScenario(
+            capability_id=missing_capability,
+            scenario="duplicate email returns 409",
+            priority=scenario_priority,
+        )],
+        recommendations=["Add duplicate-email test"],
+    )
+
+
+def _code_review(flagged_file="backend/app/users.py"):
+    return CodeReviewReport(
+        milestone_name="M1",
+        approved=False,
+        flagged_symbols=[FlaggedSymbol(
+            file=flagged_file, line=12, symbol="get_current_user_with_roles",
+            kind="import", reason="symbol not in app.core.auth",
+            severity="critical",
+        )],
+    )
+
+
+def _prior_issue(id_, files=None, refs=None):
+    return Issue(
+        id=id_, title=f"Implement {id_}", description="",
+        service="backend", language="python",
+        target_files=files or ["app/users.py"],
+        test_files=[f"tests/test_{id_.lower()}.py"],
+        success_criteria=[], spec_refs=refs or ["cap_x"],
+        depends_on=[],
+    )
+
+
+class TestRepair:
+    def test_repair_returns_fix_issues(self):
+        client = _client_returning({"issues": [
+            _issue_dict("BE-001-fix1", refs=["cap_x"]),
+        ]})
+        planner = ServicePlanner(client=client)
+        issues = planner.plan_repair(
+            architecture=_arch(), enriched_spec=_spec(),
+            service=_service(),
+            prior_issues=[_prior_issue("BE-001")],
+            prior_dispositions={"BE-001": "passed"},
+            coverage_report=_coverage(),
+            code_review_report=_code_review(),
+            repair_iteration=1,
+        )
+        assert len(issues) == 1
+        assert issues[0].id == "BE-001-fix1"
+        assert issues[0].service == "backend"
+
+    def test_repair_empty_plan_is_legal(self):
+        # ServicePlanner can decide this service has no findings.
+        client = _client_returning({"issues": []})
+        planner = ServicePlanner(client=client)
+        issues = planner.plan_repair(
+            architecture=_arch(), enriched_spec=_spec(),
+            service=_service(),
+            prior_issues=[_prior_issue("BE-001")],
+            prior_dispositions={"BE-001": "passed"},
+            coverage_report=None,
+            code_review_report=_code_review(flagged_file="frontend/src/x.tsx"),
+            repair_iteration=1,
+        )
+        assert issues == []
+
+    def test_repair_prompt_includes_findings(self):
+        client = _client_returning({"issues": [_issue_dict("BE-001-fix1")]})
+        planner = ServicePlanner(client=client)
+        planner.plan_repair(
+            architecture=_arch(), enriched_spec=_spec(),
+            service=_service(),
+            prior_issues=[_prior_issue("BE-001")],
+            prior_dispositions={"BE-001": "passed"},
+            coverage_report=_coverage(),
+            code_review_report=_code_review(),
+            repair_iteration=1,
+        )
+        sent = client.get_text.call_args.kwargs["messages"]
+        user_msg = next(m.content for m in sent if m.role == "user")
+        # Findings present in the prompt
+        assert "cap_x" in user_msg
+        assert "duplicate email" in user_msg
+        assert "get_current_user_with_roles" in user_msg
+        assert "BE-001" in user_msg
+        # Iteration number present
+        assert "iter" in user_msg.lower()

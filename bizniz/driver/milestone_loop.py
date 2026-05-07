@@ -298,18 +298,39 @@ class MilestoneLoop:
                 f"(model escalation tier {iter_idx})"
             )
             self._tag(state.milestone_index, phase)
-            engineer_for_repair = self._engineer_for_repair(iter_idx)
-            report_for_repair = _merge_to_repair_report(
-                milestone.name, coverage, code_review,
-            )
-            result = engineer_for_repair.repair(
-                milestone=milestone,
-                architecture=architecture,
-                code_review_report=report_for_repair,
-                enriched_spec=spec,
-                auth_contract=auth_contract,
-                prior_specs=prior_list,
-            )
+
+            # v2.5 path: dispatch fix-issues through ServicePlanner +
+            # Orchestrator + Coder. The store grows with `*-fix1`,
+            # `*-fix2` rows alongside the originals; assemble_engineer_
+            # result reads the union. v2 fallback is unchanged.
+            if self._code_dispatcher is not None:
+                store = (
+                    self._issue_store_factory(state.milestone_index)
+                    if self._issue_store_factory is not None else None
+                )
+                result = self._code_dispatcher.repair(
+                    architecture=architecture,
+                    enriched_spec=spec,
+                    coverage_report=coverage,
+                    code_review_report=code_review,
+                    repair_iteration=iter_idx + 1,  # 1-indexed for prompt clarity
+                    auth_contract=auth_contract,
+                    workspace_summary=self._workspace_summary,
+                    issue_store=store,
+                )
+            else:
+                engineer_for_repair = self._engineer_for_repair(iter_idx)
+                report_for_repair = _merge_to_repair_report(
+                    milestone.name, coverage, code_review,
+                )
+                result = engineer_for_repair.repair(
+                    milestone=milestone,
+                    architecture=architecture,
+                    code_review_report=report_for_repair,
+                    enriched_spec=spec,
+                    auth_contract=auth_contract,
+                    prior_specs=prior_list,
+                )
             repair_iterations += 1
             coverage, code_review = self._phase_review(
                 milestone, architecture, spec, result, auth_contract, prior_list,

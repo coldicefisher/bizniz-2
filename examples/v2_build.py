@@ -395,6 +395,11 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         f"pre-rendered for Engineer initial context"
     )
 
+    # v2.5 mode caps repair at 2 iterations (ServicePlanner repair-mode
+    # for both). After 2, MilestoneLoop hard-gates on milestone_unapproved.
+    # Legacy v2 mode used len(repair_tiers); kept inline for the fallback.
+    repair_budget_v25 = 2
+
     milestone_loop = MilestoneLoop(
         engineer=engineer,
         quality_engineer=qe,
@@ -405,7 +410,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         primary_workspace=primary_workspace,
         compose_path=compose_path,
         project_root=project_root,
-        repair_budget=len(repair_tiers),
+        repair_budget=repair_budget_v25,
         repair_engineer_factory=repair_engineer_factory,
         engineer_escalation_factory=engineer_escalation_factory,
         code_dispatcher=code_dispatcher,

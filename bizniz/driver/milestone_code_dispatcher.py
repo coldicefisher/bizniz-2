@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Callable, Dict, List, Optional
 
 from bizniz.architect.types import ServiceDefinition, SystemArchitecture
+from bizniz.code_reviewer.types import CodeReviewReport
 from bizniz.coder.agent import Coder
 from bizniz.coder.types import Issue as CoderIssue
 from bizniz.engineer.types import (
@@ -34,7 +35,7 @@ from bizniz.lib.dependency_graph import topological_layers
 from bizniz.lib.model_progression import ModelProgression
 from bizniz.orchestrator.orchestrator import Orchestrator
 from bizniz.orchestrator.types import IssueOutcome, OrchestratorResult
-from bizniz.quality_engineer.types import EnrichedSpec
+from bizniz.quality_engineer.types import CoverageReport, EnrichedSpec
 from bizniz.service_planner.agent import ServicePlanner
 from bizniz.state.issue_store import IssueStateStore
 
@@ -181,6 +182,126 @@ class MilestoneCodeDispatcher:
             notes=_collect_notes(per_service),
         )
 
+    # ── Repair ─────────────────────────────────────────────────────────
+
+    def repair(
+        self,
+        *,
+        architecture: SystemArchitecture,
+        enriched_spec: EnrichedSpec,
+        coverage_report: Optional[CoverageReport],
+        code_review_report: Optional[CodeReviewReport],
+        repair_iteration: int,
+        auth_contract: Optional[str] = None,
+        skeleton_md_for_service: Optional[Callable[[str], Optional[str]]] = None,
+        workspace_summary: Optional[str] = None,
+        issue_store: Optional[IssueStateStore] = None,
+    ) -> EngineerResult:
+        """Run a repair iteration.
+
+        Reads prior issues + dispositions from the store, asks
+        ServicePlanner to emit fix-issues per service, dispatches them
+        through the Orchestrator. Returns an EngineerResult assembled
+        from the store (which now includes both original issues and
+        fix-issues from this iteration).
+        """
+        self._log(
+            f"MilestoneCodeDispatcher.repair: iter {repair_iteration} starting"
+        )
+        active_store = issue_store if issue_store is not None else self._issue_store
+        if active_store is None:
+            raise RuntimeError(
+                "MilestoneCodeDispatcher.repair requires an IssueStateStore "
+                "(prior issues + dispositions are read from it)."
+            )
+
+        layers = topological_layers(list(architecture.services))
+
+        for layer in layers:
+            for service in layer:
+                # Pull this service's prior issues + dispositions from
+                # the store (these are the originals + any prior repair
+                # iterations).
+                prior_rows = active_store.all_rows(service=service.name)
+                if not prior_rows:
+                    self._log(
+                        f"repair: skipping `{service.name}` — no prior "
+                        f"issues recorded; nothing to fix"
+                    )
+                    continue
+
+                prior_issues = [
+                    _row_to_coder_issue(r) for r in prior_rows
+                ]
+                prior_dispositions = {
+                    r["issue_id"]: r["status"] for r in prior_rows
+                }
+
+                self._log(
+                    f"repair: planning `{service.name}` "
+                    f"({len(prior_issues)} prior issues)"
+                )
+                planner = self._planner_factory(service)
+                skeleton_md = (
+                    skeleton_md_for_service(service.name)
+                    if skeleton_md_for_service else None
+                )
+                fix_issues = planner.plan_repair(
+                    architecture=architecture,
+                    enriched_spec=enriched_spec,
+                    service=service,
+                    prior_issues=prior_issues,
+                    prior_dispositions=prior_dispositions,
+                    coverage_report=coverage_report,
+                    code_review_report=code_review_report,
+                    repair_iteration=repair_iteration,
+                    skeleton_md=skeleton_md,
+                    auth_contract=auth_contract,
+                )
+                if not fix_issues:
+                    self._log(
+                        f"repair: `{service.name}` — planner emitted no "
+                        f"fix-issues, skipping"
+                    )
+                    continue
+
+                self._log(
+                    f"repair: `{service.name}` → {len(fix_issues)} fix-issue(s)"
+                )
+
+                active_store.record_planned(service.name, fix_issues)
+
+                progression = self._progression_factory(service)
+
+                def make_coder(model: str, _service=service) -> Coder:
+                    return self._coder_factory(model, _service)
+
+                orchestrator = Orchestrator(
+                    service=service.name,
+                    coder_factory=make_coder,
+                    progression=progression,
+                    issue_store=active_store,
+                    on_status=self._on_status,
+                )
+                orchestrator.run_service(
+                    issues=fix_issues,
+                    architecture=architecture,
+                    enriched_spec=enriched_spec,
+                    auth_contract=auth_contract,
+                    workspace_summary=workspace_summary,
+                    skeleton_md=skeleton_md,
+                )
+
+        # Reassemble the EngineerResult from the store — now reflects
+        # the union of original outcomes + fix-issue outcomes.
+        result = active_store.assemble_engineer_result()
+        self._log(
+            f"MilestoneCodeDispatcher.repair: iter {repair_iteration} done — "
+            f"{len(result.completed_issue_ids)} passing, "
+            f"{len(result.deferred_issue_ids)} not"
+        )
+        return result
+
     # ── Helpers ────────────────────────────────────────────────────────
 
     def _log(self, msg: str) -> None:
@@ -202,6 +323,23 @@ class MilestoneCodeDispatcher:
                 f"({'all green' if r.all_passed else 'some pending'})"
             )
         return "; ".join(bits)
+
+
+def _row_to_coder_issue(row) -> CoderIssue:
+    """Hydrate a CoderIssue from a coder_issues row (for repair planning)."""
+    import json as _json
+    return CoderIssue(
+        id=row["issue_id"],
+        title=row["title"],
+        description=row["description"],
+        service=row["service"],
+        language=row["language"] or "python",
+        target_files=_json.loads(row["target_files"] or "[]"),
+        test_files=_json.loads(row["test_files"] or "[]"),
+        success_criteria=_json.loads(row["success_criteria"] or "[]"),
+        spec_refs=_json.loads(row["spec_refs"] or "[]"),
+        depends_on=_json.loads(row["depends_on"] or "[]"),
+    )
 
 
 def _to_engineer_issue(

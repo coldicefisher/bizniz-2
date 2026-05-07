@@ -19,12 +19,14 @@ from bizniz.architect.types import ServiceDefinition, SystemArchitecture
 from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.clients.chatgpt.messages import Message
 from bizniz.clients.chatgpt.types.response_format import ResponseFormat
+from bizniz.code_reviewer.types import CodeReviewReport
 from bizniz.coder.types import Issue
 from bizniz.lib.dependency_graph import (
     CyclicDependencyError, topological_layers,
 )
 from bizniz.lib.llm_utils import call_with_retry
-from bizniz.quality_engineer.types import EnrichedSpec
+from bizniz.quality_engineer.types import CoverageReport, EnrichedSpec
+from bizniz.service_planner.prompts.repair_prompt import build_repair_prompt
 from bizniz.service_planner.prompts.schema import SERVICE_PLANNER_SCHEMA
 from bizniz.service_planner.prompts.system_prompt import (
     SERVICE_PLANNER_SYSTEM_PROMPT,
@@ -134,6 +136,101 @@ class ServicePlanner:
         self._log(
             f"ServicePlanner: {service.name} → {len(ordered)} issue(s) "
             f"in {len(layers)} layer(s)"
+        )
+        return ordered
+
+    def plan_repair(
+        self,
+        *,
+        architecture: SystemArchitecture,
+        enriched_spec: EnrichedSpec,
+        service: ServiceDefinition,
+        prior_issues: List[Issue],
+        prior_dispositions: dict,
+        coverage_report: Optional[CoverageReport],
+        code_review_report: Optional[CodeReviewReport],
+        repair_iteration: int,
+        skeleton_md: Optional[str] = None,
+        auth_contract: Optional[str] = None,
+    ) -> List[Issue]:
+        """Repair-mode planning. Takes review findings + prior issues
+        and emits MINIMUM fix-issues.
+
+        Returns ``[]`` if the planner determined no fixes are needed
+        for this service (findings were elsewhere). The caller should
+        treat empty as "no work for this service this iteration."
+        """
+        self._log(
+            f"ServicePlanner (repair iter {repair_iteration}): {service.name}"
+        )
+
+        user_prompt = build_repair_prompt(
+            architecture=architecture,
+            enriched_spec=enriched_spec,
+            service=service,
+            prior_issues=prior_issues,
+            prior_dispositions=prior_dispositions,
+            coverage_report=coverage_report,
+            code_review_report=code_review_report,
+            repair_iteration=repair_iteration,
+            skeleton_md=skeleton_md,
+            auth_contract=auth_contract,
+        )
+
+        raw = call_with_retry(
+            client=self._client,
+            messages=[
+                Message(role="system", content=SERVICE_PLANNER_SYSTEM_PROMPT),
+                Message(role="user", content=user_prompt),
+            ],
+            response_format=ResponseFormat.JSON_SCHEMA,
+            schema=SERVICE_PLANNER_SCHEMA,
+            max_attempts=self._max_retries,
+            on_status=self._on_status,
+            label=f"ServicePlanner.repair({service.name}, iter{repair_iteration})",
+        )
+
+        items = raw.get("issues") or []
+        if not items:
+            # Empty repair plan is legal — this service had no findings.
+            self._log(
+                f"ServicePlanner (repair iter {repair_iteration}): "
+                f"{service.name} → no fixes needed"
+            )
+            return []
+
+        for it in items:
+            it["service"] = service.name
+            it["language"] = (service.language or "python").lower()
+
+        issues: List[Issue] = []
+        for it in items:
+            try:
+                issues.append(Issue.model_validate(it))
+            except Exception as e:
+                raise ServicePlannerError(
+                    f"ServicePlanner.repair({service.name}): issue failed "
+                    f"validation — {e}; payload: {it!r}"
+                ) from e
+
+        self._validate_unique_ids(issues, service.name)
+        self._validate_dep_targets(issues, service.name)
+        self._validate_files_non_empty(issues, service.name)
+
+        try:
+            layers = topological_layers(issues)
+        except CyclicDependencyError as e:
+            raise ServicePlannerError(
+                f"ServicePlanner.repair({service.name}): {e}"
+            ) from e
+
+        ordered: List[Issue] = []
+        for layer in layers:
+            ordered.extend(layer)
+
+        self._log(
+            f"ServicePlanner (repair iter {repair_iteration}): "
+            f"{service.name} → {len(ordered)} fix-issue(s)"
         )
         return ordered
 

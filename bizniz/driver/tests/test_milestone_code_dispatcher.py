@@ -227,3 +227,121 @@ class TestThreading:
         )
         assert recorded["skeleton"] == "## skel for backend"
         assert recorded["auth"] == "JWT-rs256"
+
+
+# ── Repair ─────────────────────────────────────────────────────────────
+
+
+class TestRepair:
+    def test_repair_runs_planner_then_dispatches_fix_issues(self, tmp_path):
+        """End-to-end repair: store has prior issues, repair() reads
+        them, calls plan_repair, dispatches the fix-issues, store ends
+        up with originals + fix-issues."""
+        from bizniz.code_reviewer.types import (
+            CodeReviewReport, FlaggedSymbol,
+        )
+        from bizniz.coder.types import CoderResult
+        from bizniz.project.project import Project
+        from bizniz.state.issue_store import IssueStateStore
+
+        # Real store on a real (tmp) DB.
+        project = Project(root=tmp_path, project_name="t")
+        store = IssueStateStore(db=project.db, job_id="J1", milestone_index=1)
+
+        # Seed: one prior passing issue.
+        store.record_planned("backend", [_coder_issue("BE-001")])
+        store.mark_finished(
+            "backend", "BE-001", status="passed",
+            result=CoderResult(issue_id="BE-001", status="passed"),
+        )
+
+        # ServicePlanner emits one fix-issue when called for repair.
+        def planner_factory(_service):
+            planner = MagicMock()
+            planner.plan_repair.return_value = [
+                _coder_issue("BE-001-fix1"),
+            ]
+            return planner
+
+        # Coder for the fix returns passed.
+        coder = MagicMock()
+        coder.code_issue.return_value = CoderResult(
+            issue_id="BE-001-fix1", status="passed",
+        )
+
+        dispatcher = MilestoneCodeDispatcher(
+            service_planner_factory=planner_factory,
+            coder_factory=lambda model, service: coder,
+            progression_factory=_progression_factory(),
+        )
+
+        review = CodeReviewReport(
+            milestone_name="M1", approved=False,
+            flagged_symbols=[FlaggedSymbol(
+                file="backend/app/users.py", line=12,
+                symbol="get_current_user_with_roles",
+                kind="import", reason="x", severity="critical",
+            )],
+        )
+
+        result = dispatcher.repair(
+            architecture=_arch(services=[_backend()]),
+            enriched_spec=_spec(),
+            coverage_report=None,
+            code_review_report=review,
+            repair_iteration=1,
+            issue_store=store,
+        )
+        # EngineerResult includes both BE-001 (passed originally) and
+        # BE-001-fix1 (passed in repair).
+        ids = {i.id for i in result.plan.issues}
+        assert ids == {"BE-001", "BE-001-fix1"}
+        assert "BE-001-fix1" in result.completed_issue_ids
+
+    def test_repair_skips_services_with_no_prior_issues(self, tmp_path):
+        from bizniz.coder.types import CoderResult
+        from bizniz.project.project import Project
+        from bizniz.state.issue_store import IssueStateStore
+
+        project = Project(root=tmp_path, project_name="t")
+        store = IssueStateStore(db=project.db, job_id="J1", milestone_index=1)
+
+        # No prior issues for backend or db
+        planner_factory_called = []
+
+        def planner_factory(service):
+            planner_factory_called.append(service.name)
+            planner = MagicMock()
+            planner.plan_repair.return_value = []
+            return planner
+
+        dispatcher = MilestoneCodeDispatcher(
+            service_planner_factory=planner_factory,
+            coder_factory=_coder_factory_with([]),
+            progression_factory=_progression_factory(),
+        )
+        dispatcher.repair(
+            architecture=_arch(),
+            enriched_spec=_spec(),
+            coverage_report=None,
+            code_review_report=None,
+            repair_iteration=1,
+            issue_store=store,
+        )
+        # No services touched the planner since all skip on empty store
+        assert planner_factory_called == []
+
+    def test_repair_requires_store(self):
+        dispatcher = MilestoneCodeDispatcher(
+            service_planner_factory=_planner_factory_returning({}),
+            coder_factory=_coder_factory_with([]),
+            progression_factory=_progression_factory(),
+        )
+        with pytest.raises(RuntimeError, match="IssueStateStore"):
+            dispatcher.repair(
+                architecture=_arch(),
+                enriched_spec=_spec(),
+                coverage_report=None,
+                code_review_report=None,
+                repair_iteration=1,
+            )
