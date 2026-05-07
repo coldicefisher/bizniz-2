@@ -25,7 +25,7 @@ engineer_model: gemini-flash-top
 # escalates a tier. Indexed by tier 0, 1, 2... — Engineer.implement
 # starts at tier 0 (= engineer_model above). Repair iter N uses tier N.
 engineer_escalation:
-  - gemini-flash-lite
+  - gemini-flash-top
   - gemini-flash-top
   - gemini-pro
 
