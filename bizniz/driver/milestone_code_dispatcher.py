@@ -36,6 +36,7 @@ from bizniz.orchestrator.orchestrator import Orchestrator
 from bizniz.orchestrator.types import IssueOutcome, OrchestratorResult
 from bizniz.quality_engineer.types import EnrichedSpec
 from bizniz.service_planner.agent import ServicePlanner
+from bizniz.state.issue_store import IssueStateStore
 
 
 CoderFactory = Callable[[str, ServiceDefinition], Coder]
@@ -59,11 +60,13 @@ class MilestoneCodeDispatcher:
         service_planner_factory: ServicePlannerFactory,
         coder_factory: CoderFactory,
         progression_factory: ProgressionFactory,
+        issue_store: Optional[IssueStateStore] = None,
         on_status: Optional[Callable[[str], None]] = None,
     ):
         self._planner_factory = service_planner_factory
         self._coder_factory = coder_factory
         self._progression_factory = progression_factory
+        self._issue_store = issue_store
         self._on_status = on_status
 
     def run(
@@ -74,6 +77,7 @@ class MilestoneCodeDispatcher:
         auth_contract: Optional[str] = None,
         skeleton_md_for_service: Optional[Callable[[str], Optional[str]]] = None,
         workspace_summary: Optional[str] = None,
+        issue_store: Optional[IssueStateStore] = None,
     ) -> EngineerResult:
         """Plan + dispatch every service in topo order, return EngineerResult.
 
@@ -83,6 +87,11 @@ class MilestoneCodeDispatcher:
         the Orchestrator handles per-issue topo + escalation.
         """
         self._log("MilestoneCodeDispatcher: starting")
+
+        # Per-call store overrides the constructor-set one. MilestoneLoop
+        # passes a per-milestone store; tests / one-off use can rely on
+        # the constructor-set instance.
+        active_store = issue_store if issue_store is not None else self._issue_store
 
         layers = topological_layers(list(architecture.services))
         all_issues: List[EngineerIssue] = []
@@ -113,6 +122,11 @@ class MilestoneCodeDispatcher:
                     f"emitted {len(issues)} issues"
                 )
 
+                # Persist planned issues immediately so resume sees them
+                # even if the dispatcher dies mid-run.
+                if active_store is not None:
+                    active_store.record_planned(service.name, issues)
+
                 progression = self._progression_factory(service)
 
                 def make_coder(model: str, _service=service) -> Coder:
@@ -122,6 +136,7 @@ class MilestoneCodeDispatcher:
                     service=service.name,
                     coder_factory=make_coder,
                     progression=progression,
+                    issue_store=active_store,
                     on_status=self._on_status,
                 )
                 outcome = orchestrator.run_service(

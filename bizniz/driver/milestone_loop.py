@@ -32,6 +32,7 @@ from bizniz.driver.state import MilestoneState, SubPhase, next_subphase
 from bizniz.engineer.agent import Engineer
 from bizniz.engineer.types import EngineerResult
 from bizniz.lib.tool_loop_agent import ToolLoopAgentStalledError
+from bizniz.state.issue_store import IssueStateStore
 from bizniz.planner.types import Milestone
 from bizniz.quality_engineer.agent import QualityEngineer
 from bizniz.quality_engineer.types import CoverageReport, EnrichedSpec
@@ -84,6 +85,7 @@ class MilestoneLoop:
         repair_engineer_factory: Optional[Callable[[int], Engineer]] = None,
         engineer_escalation_factory: Optional[Callable[[int], Engineer]] = None,
         code_dispatcher: Optional[MilestoneCodeDispatcher] = None,
+        issue_store_factory: Optional[Callable[[int], IssueStateStore]] = None,
         cost_tracker=None,
         workspace_summary: Optional[str] = None,
         on_status: Optional[Callable[[str], None]] = None,
@@ -106,6 +108,15 @@ class MilestoneLoop:
         # IMPLEMENT phase. Repair phases still use the v2 Engineer until
         # the v2.5 review-and-repair path is built.
         self._code_dispatcher = code_dispatcher
+        # Factory: milestone_index → IssueStateStore. Each milestone gets
+        # its own scoped store. When set, IMPLEMENT-phase state lives in
+        # the DB (not the per-phase JSON).
+        self._issue_store_factory = issue_store_factory
+        # Per-call binding so _phase_implement_with_escalation can hand
+        # the store to the dispatcher without re-querying the factory
+        # (and so we don't have to thread state.milestone_index through
+        # the existing private method signatures).
+        self._current_milestone_store = None
         self._cost_tracker = cost_tracker
         self._workspace_summary = workspace_summary
         self._on_status = on_status
@@ -188,13 +199,43 @@ class MilestoneLoop:
             state.mark_phase(SubPhase.ENRICH, spec)
         spec = spec or self._reload_required(state, SubPhase.ENRICH, EnrichedSpec)
 
-        if not _has(state, SubPhase.IMPLEMENT):
-            self._tag(state.milestone_index, SubPhase.IMPLEMENT)
-            result = self._phase_implement_with_escalation(
-                milestone, architecture, spec, auth_contract, prior_list,
+        # IMPLEMENT phase: when an issue_store_factory is wired, the DB
+        # is the authoritative source for issue-level state. No JSON
+        # artifact is written for IMPLEMENT — the dispatcher persists
+        # rows as it goes; a resumed run picks up where it left off.
+        # We mark the phase complete on disk only as a no-payload marker
+        # so downstream resume gates (`_has(state, SubPhase.IMPLEMENT)`)
+        # see it. The actual EngineerResult is rebuilt from DB rows on
+        # demand via _load_engineer_result_if_done.
+        if self._issue_store_factory is not None:
+            issue_store = self._issue_store_factory(state.milestone_index)
+            if not issue_store.is_implement_done():
+                self._tag(state.milestone_index, SubPhase.IMPLEMENT)
+                # Stash the per-milestone store so
+                # _phase_implement_with_escalation can pass it to the
+                # dispatcher. Cleared on exit so subsequent calls are
+                # clean.
+                self._current_milestone_store = issue_store
+                try:
+                    result = self._phase_implement_with_escalation(
+                        milestone, architecture, spec, auth_contract, prior_list,
+                    )
+                finally:
+                    self._current_milestone_store = None
+                # Marker only — payload lives in the DB.
+                state.mark_phase(SubPhase.IMPLEMENT, {"_db_backed": True})
+            if result is None:
+                result = issue_store.assemble_engineer_result()
+        else:
+            if not _has(state, SubPhase.IMPLEMENT):
+                self._tag(state.milestone_index, SubPhase.IMPLEMENT)
+                result = self._phase_implement_with_escalation(
+                    milestone, architecture, spec, auth_contract, prior_list,
+                )
+                state.mark_phase(SubPhase.IMPLEMENT, result)
+            result = result or self._reload_required(
+                state, SubPhase.IMPLEMENT, EngineerResult,
             )
-            state.mark_phase(SubPhase.IMPLEMENT, result)
-        result = result or self._reload_required(state, SubPhase.IMPLEMENT, EngineerResult)
 
         # Reviews + repairs.
         repair_phases = (
@@ -403,7 +444,20 @@ class MilestoneLoop:
                       SubPhase.REVIEW_FINAL,
                       SubPhase.INTEGRATION_API, SubPhase.INTEGRATION_WORKER,
                       SubPhase.INTEGRATION_WEB):
-            result = self._reload_required(state, SubPhase.IMPLEMENT, EngineerResult)
+            # DB-backed when configured; legacy JSON otherwise.
+            if self._issue_store_factory is not None:
+                store = self._issue_store_factory(state.milestone_index)
+                if not store.is_implement_done():
+                    self._gates.hard(
+                        "missing_state_artifact",
+                        f"phase {target.value} requires IMPLEMENT but DB has "
+                        f"no terminal coder_issues for this milestone",
+                    )
+                result = store.assemble_engineer_result()
+            else:
+                result = self._reload_required(
+                    state, SubPhase.IMPLEMENT, EngineerResult,
+                )
 
         # Dispatch.
         coverage: Optional[CoverageReport] = None
@@ -566,11 +620,21 @@ class MilestoneLoop:
         """
         if self._code_dispatcher is not None:
             self._log("MilestoneLoop: implement via v2.5 code dispatcher")
+            store = None
+            if self._issue_store_factory is not None:
+                # _phase_implement_with_escalation runs once per milestone;
+                # we don't have direct access to milestone_index here, so
+                # close over it via the calling site. The simpler path:
+                # rely on the dispatcher's constructor-set store. But we
+                # have a factory keyed by milestone_index. Read from the
+                # implicit binding the caller set up.
+                store = self._current_milestone_store
             return self._code_dispatcher.run(
                 architecture=architecture,
                 enriched_spec=spec,
                 auth_contract=auth_contract,
                 workspace_summary=self._workspace_summary,
+                issue_store=store,
             )
 
         # Tier 0 = self._engineer (default model).
@@ -688,6 +752,13 @@ class MilestoneLoop:
         return self._reload_required(state, SubPhase.ENRICH, EnrichedSpec)
 
     def _load_engineer_result_if_done(self, state: MilestoneState) -> Optional[EngineerResult]:
+        # DB-backed path: assemble from coder_issues rows.
+        if self._issue_store_factory is not None:
+            issue_store = self._issue_store_factory(state.milestone_index)
+            if issue_store.is_implement_done():
+                return issue_store.assemble_engineer_result()
+            return None
+        # Legacy JSON path.
         if not _has(state, SubPhase.IMPLEMENT):
             return None
         return self._reload_required(state, SubPhase.IMPLEMENT, EngineerResult)

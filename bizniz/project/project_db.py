@@ -189,6 +189,54 @@ class ProjectDB:
 
             CREATE INDEX IF NOT EXISTS idx_milestones_plan ON milestones(plan_id);
             CREATE INDEX IF NOT EXISTS idx_milestones_status ON milestones(status);
+
+            -- v2.5 single-source-of-truth for issue-level state. Each row
+            -- is one Coder issue inside one milestone of one job. Status
+            -- transitions: pending → running → (passed|partial|failed|
+            -- stalled|deferred|errored|skipped). Rows persist across
+            -- runs so you can query stall history per issue across all
+            -- M1 retries. Filter by job_id for per-run views.
+            CREATE TABLE IF NOT EXISTS coder_issues (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id               TEXT    NOT NULL,
+                milestone_index      INTEGER NOT NULL,
+                service              TEXT    NOT NULL,
+                issue_id             TEXT    NOT NULL,
+                issue_index          INTEGER NOT NULL DEFAULT 0,
+                title                TEXT    NOT NULL,
+                description          TEXT    NOT NULL DEFAULT '',
+                language             TEXT    NOT NULL DEFAULT 'python',
+                target_files         TEXT    NOT NULL DEFAULT '[]',
+                test_files           TEXT    NOT NULL DEFAULT '[]',
+                spec_refs            TEXT    NOT NULL DEFAULT '[]',
+                depends_on           TEXT    NOT NULL DEFAULT '[]',
+                success_criteria     TEXT    NOT NULL DEFAULT '[]',
+                status               TEXT    NOT NULL DEFAULT 'pending'
+                                     CHECK(status IN ('pending','running','passed',
+                                                      'partial','failed','stalled',
+                                                      'deferred','errored','skipped','escalated')),
+                tiers_used           TEXT    NOT NULL DEFAULT '[]',
+                current_tier         TEXT,
+                iterations_used      INTEGER NOT NULL DEFAULT 0,
+                target_files_written TEXT    NOT NULL DEFAULT '[]',
+                test_files_written   TEXT    NOT NULL DEFAULT '[]',
+                last_test_output     TEXT    NOT NULL DEFAULT '',
+                summary              TEXT    NOT NULL DEFAULT '',
+                error                TEXT    NOT NULL DEFAULT '',
+                notes                TEXT    NOT NULL DEFAULT '[]',
+                planned_at           TEXT    NOT NULL,
+                started_at           TEXT,
+                finished_at          TEXT,
+                UNIQUE(job_id, milestone_index, service, issue_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_coder_issues_job ON coder_issues(job_id);
+            CREATE INDEX IF NOT EXISTS idx_coder_issues_milestone
+                ON coder_issues(job_id, milestone_index);
+            CREATE INDEX IF NOT EXISTS idx_coder_issues_service
+                ON coder_issues(service);
+            CREATE INDEX IF NOT EXISTS idx_coder_issues_status
+                ON coder_issues(status);
         """)
         self._conn.commit()
         self._migrate_schema()
@@ -765,6 +813,160 @@ class ProjectDB:
                    GROUP BY m.id
                    ORDER BY m.sequence_index""",
                 (plan_id,),
+            )
+        return cur.fetchall()
+
+    # ── Coder issues (v2.5 single-source-of-truth for IMPLEMENT phase) ─────
+
+    def upsert_planned_issue(
+        self,
+        *,
+        job_id: str,
+        milestone_index: int,
+        service: str,
+        issue_id: str,
+        issue_index: int,
+        title: str,
+        description: str,
+        language: str,
+        target_files: List[str],
+        test_files: List[str],
+        spec_refs: List[str],
+        depends_on: List[str],
+        success_criteria: List[str],
+    ) -> int:
+        """Record an issue planned by ServicePlanner. Idempotent via the
+        UNIQUE(job_id, milestone_index, service, issue_id) constraint:
+        re-planning the same issue updates its definition without
+        clobbering runtime state. Returns the row id.
+        """
+        now = _now()
+        cur = self._conn.execute(
+            """INSERT INTO coder_issues
+               (job_id, milestone_index, service, issue_id, issue_index,
+                title, description, language, target_files, test_files,
+                spec_refs, depends_on, success_criteria, planned_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(job_id, milestone_index, service, issue_id) DO UPDATE SET
+                   issue_index = excluded.issue_index,
+                   title = excluded.title,
+                   description = excluded.description,
+                   language = excluded.language,
+                   target_files = excluded.target_files,
+                   test_files = excluded.test_files,
+                   spec_refs = excluded.spec_refs,
+                   depends_on = excluded.depends_on,
+                   success_criteria = excluded.success_criteria
+               """,
+            (
+                job_id, milestone_index, service, issue_id, issue_index,
+                title, description, language,
+                json.dumps(target_files), json.dumps(test_files),
+                json.dumps(spec_refs), json.dumps(depends_on),
+                json.dumps(success_criteria), now,
+            ),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def mark_issue_started(
+        self,
+        *,
+        job_id: str,
+        milestone_index: int,
+        service: str,
+        issue_id: str,
+        tier: str,
+    ) -> None:
+        """Mark issue as running, append tier to tiers_used."""
+        row = self.get_coder_issue(job_id, milestone_index, service, issue_id)
+        if row is None:
+            return
+        tiers = list(json.loads(row["tiers_used"] or "[]"))
+        if not tiers or tiers[-1] != tier:
+            tiers.append(tier)
+        now = _now()
+        self._conn.execute(
+            """UPDATE coder_issues
+               SET status='running', current_tier=?, tiers_used=?,
+                   started_at = COALESCE(started_at, ?)
+               WHERE job_id=? AND milestone_index=? AND service=? AND issue_id=?""",
+            (tier, json.dumps(tiers), now,
+             job_id, milestone_index, service, issue_id),
+        )
+        self._conn.commit()
+
+    def mark_issue_finished(
+        self,
+        *,
+        job_id: str,
+        milestone_index: int,
+        service: str,
+        issue_id: str,
+        status: str,
+        target_files_written: Optional[List[str]] = None,
+        test_files_written: Optional[List[str]] = None,
+        last_test_output: str = "",
+        summary: str = "",
+        error: str = "",
+        notes: Optional[List[str]] = None,
+        iterations_used: Optional[int] = None,
+    ) -> None:
+        """Persist the final state of an issue attempt."""
+        now = _now()
+        sets = ["status=?", "summary=?", "error=?", "finished_at=?"]
+        params: list = [status, summary, error, now]
+        if target_files_written is not None:
+            sets.append("target_files_written=?")
+            params.append(json.dumps(target_files_written))
+        if test_files_written is not None:
+            sets.append("test_files_written=?")
+            params.append(json.dumps(test_files_written))
+        if last_test_output:
+            sets.append("last_test_output=?")
+            params.append(last_test_output)
+        if notes is not None:
+            sets.append("notes=?")
+            params.append(json.dumps(notes))
+        if iterations_used is not None:
+            sets.append("iterations_used=?")
+            params.append(iterations_used)
+        params.extend([job_id, milestone_index, service, issue_id])
+        self._conn.execute(
+            f"UPDATE coder_issues SET {', '.join(sets)} "
+            f"WHERE job_id=? AND milestone_index=? AND service=? AND issue_id=?",
+            params,
+        )
+        self._conn.commit()
+
+    def get_coder_issue(
+        self, job_id: str, milestone_index: int,
+        service: str, issue_id: str,
+    ) -> Optional[sqlite3.Row]:
+        cur = self._conn.execute(
+            """SELECT * FROM coder_issues
+               WHERE job_id=? AND milestone_index=? AND service=? AND issue_id=?""",
+            (job_id, milestone_index, service, issue_id),
+        )
+        return cur.fetchone()
+
+    def list_coder_issues(
+        self, job_id: str, milestone_index: int,
+        service: Optional[str] = None,
+    ) -> List[sqlite3.Row]:
+        if service is not None:
+            cur = self._conn.execute(
+                """SELECT * FROM coder_issues
+                   WHERE job_id=? AND milestone_index=? AND service=?
+                   ORDER BY issue_index, id""",
+                (job_id, milestone_index, service),
+            )
+        else:
+            cur = self._conn.execute(
+                """SELECT * FROM coder_issues
+                   WHERE job_id=? AND milestone_index=?
+                   ORDER BY service, issue_index, id""",
+                (job_id, milestone_index),
             )
         return cur.fetchall()
 

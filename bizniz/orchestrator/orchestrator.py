@@ -29,6 +29,7 @@ from bizniz.orchestrator.types import (
     IssueDisposition, IssueOutcome, OrchestratorResult,
 )
 from bizniz.quality_engineer.types import EnrichedSpec
+from bizniz.state.issue_store import IssueStateStore, ResumeBehavior
 
 
 CoderFactory = Callable[[str], Coder]
@@ -49,11 +50,13 @@ class Orchestrator:
         service: str,
         coder_factory: CoderFactory,
         progression: ModelProgression,
+        issue_store: Optional[IssueStateStore] = None,
         on_status: Optional[Callable[[str], None]] = None,
     ):
         self._service = service
         self._coder_factory = coder_factory
         self._progression = progression
+        self._issue_store = issue_store
         self._on_status = on_status
 
     # ── Public ─────────────────────────────────────────────────────────
@@ -115,6 +118,20 @@ class Orchestrator:
         skeleton_md: Optional[str],
     ) -> IssueOutcome:
         """Dispatch one issue, escalating on stall."""
+        # Resume gate: if the DB shows this issue already terminal, return
+        # the persisted outcome without invoking the Coder. Saves API spend
+        # on resumed runs.
+        if self._issue_store is not None:
+            decision = self._issue_store.resume_decision(self._service, issue.id)
+            if decision == ResumeBehavior.SKIP:
+                prior = self._issue_store.previous_outcome(self._service, issue.id)
+                if prior is not None:
+                    self._log(
+                        f"[{self._service}] {issue.id}: resume — already "
+                        f"{prior.disposition} on previous run, skipping"
+                    )
+                    return prior
+
         # Always start each issue at the cheapest tier — passing on
         # one issue doesn't justify upgrading the whole service.
         self._progression.reset()
@@ -128,6 +145,8 @@ class Orchestrator:
                 f"[{self._service}] {issue.id}: starting on tier "
                 f"{self._progression._index} ({model})"
             )
+            if self._issue_store is not None:
+                self._issue_store.mark_started(self._service, issue.id, model)
             coder = self._coder_factory(model)
 
             try:
@@ -150,6 +169,11 @@ class Orchestrator:
                         f"[{self._service}] {issue.id}: progression exhausted, "
                         f"marking stalled."
                     )
+                    if self._issue_store is not None:
+                        self._issue_store.mark_finished(
+                            self._service, issue.id,
+                            status="stalled", error=last_err,
+                        )
                     return IssueOutcome(
                         issue_id=issue.id,
                         disposition="stalled",
@@ -170,11 +194,17 @@ class Orchestrator:
                     f"[{self._service}] {issue.id}: errored — "
                     f"{type(e).__name__}: {str(e)[:200]}"
                 )
+                err_str = f"{type(e).__name__}: {e}"
+                if self._issue_store is not None:
+                    self._issue_store.mark_finished(
+                        self._service, issue.id,
+                        status="errored", error=err_str,
+                    )
                 return IssueOutcome(
                     issue_id=issue.id,
                     disposition="errored",
                     tiers_used=tiers_used,
-                    error=f"{type(e).__name__}: {e}",
+                    error=err_str,
                 )
 
             # `passed` and `deferred` terminate. `partial` / `failed`
@@ -193,6 +223,11 @@ class Orchestrator:
                         f"[{self._service}] {issue.id}: progression exhausted, "
                         f"marking {result.status}."
                     )
+                    if self._issue_store is not None:
+                        self._issue_store.mark_finished(
+                            self._service, issue.id,
+                            status=result.status, result=result, error=last_err,
+                        )
                     return IssueOutcome(
                         issue_id=issue.id,
                         disposition=result.status,
@@ -211,6 +246,12 @@ class Orchestrator:
                 disposition = "escalated" if len(tiers_used) > 1 else "passed"
             else:
                 disposition = result.status  # deferred
+
+            if self._issue_store is not None:
+                self._issue_store.mark_finished(
+                    self._service, issue.id,
+                    status=disposition, result=result,
+                )
 
             return IssueOutcome(
                 issue_id=issue.id,

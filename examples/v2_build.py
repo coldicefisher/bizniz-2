@@ -50,7 +50,9 @@ from bizniz.integration.worker_tester import WorkerTester
 from bizniz.planner.planner import Planner
 from bizniz.provisioner.provisioner import Provisioner
 from bizniz.quality_engineer.agent import QualityEngineer
+from bizniz.project.project import Project
 from bizniz.sidecars import ensure_sidecars_built
+from bizniz.state.issue_store import IssueStateStore
 from bizniz.workspace.local_workspace import LocalWorkspace
 
 
@@ -291,10 +293,26 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     def progression_factory(_service):
         return ModelProgression(list(coder_tiers))
 
+    # Issue-state DB: per-project ProjectDB, scoped per (job, milestone)
+    # via factory. The dispatcher writes to it as it goes; MilestoneLoop
+    # reads from it for IMPLEMENT-phase resume + EngineerResult assembly.
+    project_obj = Project(root=project_root, project_name=project_slug)
+
+    def issue_store_factory(milestone_index: int) -> IssueStateStore:
+        return IssueStateStore(
+            db=project_obj.db,
+            job_id=job_id,
+            milestone_index=milestone_index,
+        )
+
     code_dispatcher = MilestoneCodeDispatcher(
         service_planner_factory=service_planner_factory,
         coder_factory=coder_factory,
         progression_factory=progression_factory,
+        # Dispatcher gets a scoped store for milestone 1 by default.
+        # MilestoneLoop overrides with per-milestone stores via the
+        # issue_store_factory it receives (passed below).
+        issue_store=None,
         on_status=on_status,
     )
 
@@ -391,6 +409,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         repair_engineer_factory=repair_engineer_factory,
         engineer_escalation_factory=engineer_escalation_factory,
         code_dispatcher=code_dispatcher,
+        issue_store_factory=issue_store_factory,
         cost_tracker=cost_tracker,
         workspace_summary=workspace_summary,
         on_status=on_status,
