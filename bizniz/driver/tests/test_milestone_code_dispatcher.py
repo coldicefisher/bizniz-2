@@ -107,23 +107,40 @@ class TestHappyPath:
         assert all(i.status == "done" for i in result.plan.issues)
 
     def test_two_services_topo_ordered(self):
-        # db plans first (no deps), backend plans second (depends_on db).
+        # worker plans first (no deps), backend plans second
+        # (depends_on worker). Both are code-bearing (python) so the
+        # language filter doesn't skip either.
+        worker = ServiceDefinition(
+            name="worker", service_type="worker", framework="celery",
+            language="python", description="bg worker",
+            workspace_name="worker", port=None, depends_on=[],
+        )
+        backend_dep_worker = ServiceDefinition(
+            name="backend", service_type="backend", framework="fastapi",
+            language="python", description="API",
+            workspace_name="backend", port=8000, depends_on=["worker"],
+        )
+        arch = SystemArchitecture(
+            project_name="P", project_slug="p", description="",
+            services=[backend_dep_worker, worker],  # declared out of order on purpose
+        )
+
         dispatcher = MilestoneCodeDispatcher(
             service_planner_factory=_planner_factory_returning({
-                "db": [_coder_issue("DB-001", service="db")],
+                "worker": [_coder_issue("WK-001", service="worker")],
                 "backend": [_coder_issue("BE-001")],
             }),
             coder_factory=_coder_factory_with([
-                CoderResult(issue_id="DB-001", status="passed"),
+                CoderResult(issue_id="WK-001", status="passed"),
                 CoderResult(issue_id="BE-001", status="passed"),
             ]),
             progression_factory=_progression_factory(),
         )
-        result = dispatcher.run(architecture=_arch(), enriched_spec=_spec())
+        result = dispatcher.run(architecture=arch, enriched_spec=_spec())
 
-        # db's issue must come before backend's in the plan
+        # worker's issue must come before backend's in the plan
         ids = [i.id for i in result.plan.issues]
-        assert ids.index("DB-001") < ids.index("BE-001")
+        assert ids.index("WK-001") < ids.index("BE-001")
 
 
 # ── Mixed pass/fail ────────────────────────────────────────────────────
@@ -227,6 +244,67 @@ class TestThreading:
         )
         assert recorded["skeleton"] == "## skel for backend"
         assert recorded["auth"] == "JWT-rs256"
+
+
+# ── Code-bearing filter ────────────────────────────────────────────────
+
+
+class TestCodeBearingFilter:
+    def test_db_service_is_skipped(self):
+        # Pure-infrastructure services (sql, conf, yaml) must NOT
+        # be planned — the pytest sidecar can't green-test them.
+        planner_called: list = []
+
+        def planner_factory(service):
+            planner_called.append(service.name)
+            planner = MagicMock()
+            planner.plan_service.return_value = []
+            return planner
+
+        dispatcher = MilestoneCodeDispatcher(
+            service_planner_factory=planner_factory,
+            coder_factory=_coder_factory_with([]),
+            progression_factory=_progression_factory(),
+        )
+        # Architecture has db (sql), cache (redis-conf), backend (python)
+        cache = ServiceDefinition(
+            name="cache", service_type="cache", framework="redis",
+            language="conf", description="cache",
+            workspace_name="cache", port=6379, depends_on=[],
+        )
+        arch = SystemArchitecture(
+            project_name="P", project_slug="p", description="",
+            services=[_db(), cache, _backend()],
+        )
+        dispatcher.run(architecture=arch, enriched_spec=_spec())
+        # Only backend was planned (db has language=sql, cache=conf)
+        assert planner_called == ["backend"]
+
+    def test_typescript_service_is_planned(self):
+        planner_called: list = []
+
+        def planner_factory(service):
+            planner_called.append(service.name)
+            planner = MagicMock()
+            planner.plan_service.return_value = []
+            return planner
+
+        dispatcher = MilestoneCodeDispatcher(
+            service_planner_factory=planner_factory,
+            coder_factory=_coder_factory_with([]),
+            progression_factory=_progression_factory(),
+        )
+        frontend = ServiceDefinition(
+            name="frontend", service_type="frontend", framework="react",
+            language="typescript", description="ui",
+            workspace_name="frontend", port=5173, depends_on=[],
+        )
+        arch = SystemArchitecture(
+            project_name="P", project_slug="p", description="",
+            services=[frontend],
+        )
+        dispatcher.run(architecture=arch, enriched_spec=_spec())
+        assert planner_called == ["frontend"]
 
 
 # ── Repair ─────────────────────────────────────────────────────────────

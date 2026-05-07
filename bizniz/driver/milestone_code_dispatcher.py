@@ -40,6 +40,19 @@ from bizniz.service_planner.agent import ServicePlanner
 from bizniz.state.issue_store import IssueStateStore
 
 
+# Languages the Coder can actually generate + test code for. Services
+# whose language isn't in this set are pure infrastructure (postgres
+# init.sql, redis.conf, fusionauth kickstart) — they're materialized
+# by the Provisioner and don't need ServicePlanner / Coder. Trying to
+# plan them just burns API spend on issues the pytest sidecar can't
+# possibly green-test.
+_CODE_BEARING_LANGUAGES = {"python", "typescript", "javascript", "ts", "js", "py"}
+
+
+def _is_code_bearing(service: ServiceDefinition) -> bool:
+    return (service.language or "").lower() in _CODE_BEARING_LANGUAGES
+
+
 CoderFactory = Callable[[str, ServiceDefinition], Coder]
 """(model_name, service) → Coder bound to that service's workspace + model."""
 
@@ -102,6 +115,14 @@ class MilestoneCodeDispatcher:
 
         for layer in layers:
             for service in layer:
+                if not _is_code_bearing(service):
+                    self._log(
+                        f"MilestoneCodeDispatcher: skipping `{service.name}` "
+                        f"(language='{service.language}' is "
+                        f"infrastructure-only — provisioner already "
+                        f"materialized it; nothing to code)"
+                    )
+                    continue
                 self._log(
                     f"MilestoneCodeDispatcher: planning service "
                     f"`{service.name}` ({service.framework}/{service.language})"
@@ -219,6 +240,8 @@ class MilestoneCodeDispatcher:
 
         for layer in layers:
             for service in layer:
+                if not _is_code_bearing(service):
+                    continue
                 # Pull this service's prior issues + dispositions from
                 # the store (these are the originals + any prior repair
                 # iterations).
