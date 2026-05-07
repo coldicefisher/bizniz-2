@@ -292,6 +292,80 @@ class TestUnexpectedException:
         assert "boom" in out.issues[0].error
 
 
+class TestTransientErrorEscalation:
+    """Provider 503s / connection drops / Coder bad-response (which
+    fires after 3 consecutive 503s) should escalate, not terminate."""
+
+    def test_503_escalates(self):
+        coder = _coder([
+            RuntimeError("Gemini API error: 503 UNAVAILABLE"),
+            _result("I1"),
+        ])
+        orch = Orchestrator(
+            service="backend",
+            coder_factory=lambda m: coder,
+            progression=ModelProgression(["lite", "top"]),
+        )
+        out = orch.run_service([_issue("I1")], _arch(), _spec())
+        assert out.all_passed
+        assert out.issues[0].disposition == "escalated"
+        assert out.issues[0].tiers_used == ["lite", "top"]
+
+    def test_llm_call_failed_n_times_escalates(self):
+        # The exact message the Coder raises after 3 consecutive 503s
+        coder = _coder([
+            RuntimeError("Coder: LLM call failed 3 times"),
+            _result("I1"),
+        ])
+        orch = Orchestrator(
+            service="backend",
+            coder_factory=lambda m: coder,
+            progression=ModelProgression(["lite", "top"]),
+        )
+        out = orch.run_service([_issue("I1")], _arch(), _spec())
+        assert out.all_passed
+
+    def test_connection_reset_escalates(self):
+        coder = _coder([
+            ConnectionError("Connection reset by peer"),
+            _result("I1"),
+        ])
+        orch = Orchestrator(
+            service="backend",
+            coder_factory=lambda m: coder,
+            progression=ModelProgression(["lite", "top"]),
+        )
+        out = orch.run_service([_issue("I1")], _arch(), _spec())
+        assert out.all_passed
+
+    def test_genuine_error_still_errors(self):
+        # KeyError, AttributeError, etc — real bugs, not transient.
+        coder = _coder([KeyError("missing field")])
+        orch = Orchestrator(
+            service="backend",
+            coder_factory=lambda m: coder,
+            progression=ModelProgression(["lite", "top"]),
+        )
+        out = orch.run_service([_issue("I1")], _arch(), _spec())
+        assert out.issues[0].disposition == "errored"
+        # Non-transient: did not escalate, only one tier used
+        assert out.issues[0].tiers_used == ["lite"]
+
+    def test_transient_at_top_tier_still_errors(self):
+        # If we're already at the top tier and hit a 503, we have
+        # nowhere to escalate. Mark errored.
+        coder = _coder([
+            RuntimeError("Gemini API error: 503 UNAVAILABLE"),
+        ])
+        orch = Orchestrator(
+            service="backend",
+            coder_factory=lambda m: coder,
+            progression=ModelProgression(["lite"]),  # only one tier
+        )
+        out = orch.run_service([_issue("I1")], _arch(), _spec())
+        assert out.issues[0].disposition == "errored"
+
+
 # ── on_status callback ─────────────────────────────────────────────────
 
 

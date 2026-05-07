@@ -186,15 +186,27 @@ class Orchestrator:
                 )
                 continue
             except Exception as e:
-                # Anything other than a stall is unexpected — let the
-                # MilestoneLoop decide if this should kill the service
-                # or continue. Surface as an outcome rather than re-raise
-                # so partial progress is preserved across other issues.
-                self._log(
-                    f"[{self._service}] {issue.id}: errored — "
-                    f"{type(e).__name__}: {str(e)[:200]}"
-                )
                 err_str = f"{type(e).__name__}: {e}"
+                # Transient class — provider overload (Gemini 503),
+                # connection drops, timeouts. Escalate to the next
+                # tier (typically a different model with separate
+                # quota) instead of marking errored. Tier-0 lite is
+                # the most overloaded; flash and flash-top usually
+                # have headroom even when lite is 503'd.
+                if self._is_transient_error(e) and not self._progression.is_at_max:
+                    next_model = self._progression.escalate()
+                    self._log(
+                        f"[{self._service}] {issue.id}: transient error "
+                        f"on {model} ({type(e).__name__}); escalating "
+                        f"to {next_model}"
+                    )
+                    continue
+
+                # Genuine error: log + record + give up on this issue.
+                # Other issues continue.
+                self._log(
+                    f"[{self._service}] {issue.id}: errored — {err_str[:200]}"
+                )
                 if self._issue_store is not None:
                     self._issue_store.mark_finished(
                         self._service, issue.id,
@@ -259,6 +271,30 @@ class Orchestrator:
                 tiers_used=tiers_used,
                 final_result=result,
             )
+
+    # ── Error classification ───────────────────────────────────────────
+
+    @staticmethod
+    def _is_transient_error(exc: Exception) -> bool:
+        """True if ``exc`` is a provider-side blip we should retry by
+        escalating tiers. Conservative — only matches signatures we've
+        actually observed in the wild:
+          - ToolLoopAgentBadResponseError("LLM call failed N times")
+            raised after the Coder hit 3 consecutive Gemini 503s.
+          - 503 / UNAVAILABLE / overload language in the message.
+          - Connection-class network errors (reset, timeout).
+        """
+        msg = str(exc).lower()
+        cls = type(exc).__name__
+        if "llm call failed" in msg:
+            return True
+        if "503" in msg or "unavailable" in msg or "overload" in msg:
+            return True
+        if "connection" in msg or "timeout" in msg or "reset" in msg:
+            return True
+        if cls in ("ConnectionError", "TimeoutError", "OSError"):
+            return True
+        return False
 
     # ── Status ─────────────────────────────────────────────────────────
 
