@@ -130,6 +130,7 @@ class CostTracker:
         self._problem_id = problem_id
         self._issue_id = issue_id
         self._job_id: Optional[str] = None
+        self._project_slug: Optional[str] = None
         self._service_name: Optional[str] = None
         self._phase: Optional[str] = None
         self._milestone_id: Optional[int] = None
@@ -137,6 +138,9 @@ class CostTracker:
         # is. The set tracks rows already persisted so re-attach doesn't
         # double-write.
         self._persisted_record_ids: set = set()
+        # Optional cumulative ledger — survives project-dir wipes
+        # (lives at ~/.bizniz/cost_ledger.jsonl by default).
+        self._ledger = None
 
     # ── Compatibility shim for older callers ─────────────────────────────────
 
@@ -148,6 +152,15 @@ class CostTracker:
         """Deprecated alias for ``attach_project_db``. Kept for backward
         compatibility with any caller still using the older name."""
         self.attach_project_db(db)
+
+    def attach_ledger(self, ledger) -> None:
+        """Bind a ``bizniz.cost.ledger.CostLedger`` so every recorded
+        call also gets appended to the cumulative cross-project log.
+        Idempotent — re-attaching the same instance is a no-op; passing
+        a different instance replaces the prior reference.
+        """
+        with self._lock:
+            self._ledger = ledger
 
     def attach_project_db(self, project_db) -> None:
         """Bind a ProjectDB; flush any buffered records and live-persist
@@ -176,6 +189,7 @@ class CostTracker:
         """
         with self._lock:
             self._job_id = str(uuid.uuid4())
+            self._project_slug = project_slug
             db = self._project_db
         if db is not None:
             try:
@@ -311,12 +325,21 @@ class CostTracker:
             idx = len(self._records)
             self._records.append(rec)
             db = self._project_db
+            ledger = self._ledger
+            project_slug = self._project_slug or ""
         if db is not None:
             try:
                 db.save_api_call(rec)
                 self._persisted_record_ids.add(idx)
             except Exception:
                 # Persistence is best-effort; never break a real call.
+                pass
+        if ledger is not None:
+            # Cumulative ledger: survives project-dir wipes since it
+            # lives at ~/.bizniz/cost_ledger.jsonl. Best-effort.
+            try:
+                ledger.append(record=rec, project_slug=project_slug)
+            except Exception:
                 pass
         return rec
 

@@ -31,6 +31,7 @@ from bizniz.auth_orchestrators.fusionauth_orchestrator import FusionAuthOrchestr
 from bizniz.code_reviewer.agent import CodeReviewer
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.cost import get_tracker
+from bizniz.cost.ledger import CostLedger, get_default_ledger_path
 from bizniz.driver.gates import GatePolicy
 from bizniz.driver.integration_phase import IntegrationPhase
 from bizniz.driver.milestone_loop import MilestoneLoop
@@ -293,12 +294,19 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     # MilestoneLoop. The run_status's job_id is reused so the cost log
     # and run state agree.
     cost_tracker = get_tracker()
+    # Attach the cumulative cross-project ledger BEFORE start_job so
+    # every record from this run lands in ~/.bizniz/cost_ledger.jsonl.
+    # Survives project-dir wipes — the alternative is the per-run
+    # costs.md which gets nuked along with the project.
+    ledger = CostLedger()
+    cost_tracker.attach_ledger(ledger)
     if cost_tracker.current_job_id is None:
         cost_tracker.start_job(
             project_slug=project_slug,
             problem_statement=args.problem or "",
             metadata={"run_state_job_id": job_id, "gate_mode": gate_mode},
         )
+    on_status(f"Cost ledger: {ledger.path}")
 
     workspace_summary = render_workspace_summary(project_root)
     on_status(
