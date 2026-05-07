@@ -192,6 +192,15 @@ class AuthAgent(ToolLoopAgent):
                 contract_markdown=result.contract_markdown,
                 primary_app_id=primary_app_id,
             )
+            # Emit deterministic auth-contract test files into each
+            # python backend's workspace. These run during the
+            # integration phase and catch FA-state drift even if the
+            # AuthAgent's audit was green at submit time.
+            self._emit_contract_tests(
+                contract_markdown=result.contract_markdown,
+                architecture=architecture,
+                primary_app_id=primary_app_id,
+            )
 
         # Run the deterministic audit battery against the post-loop state.
         result.audit = self._run_audit_battery(
@@ -265,6 +274,81 @@ class AuthAgent(ToolLoopAgent):
             f"prior contract or your assumptions about what FA emits — "
             f"measure first."
         )
+
+    def _emit_contract_tests(
+        self,
+        *,
+        contract_markdown: str,
+        architecture: SystemArchitecture,
+        primary_app_id: str,
+    ) -> None:
+        """Render + write a deterministic auth-contract test file into
+        each python backend service's workspace. Runs during the
+        integration phase via the pytest sidecar and asserts the
+        contract holds at runtime — catches FA state drift between
+        AuthAgent submit and integration time.
+
+        File path: ``<service.workspace_name>/tests/auth/test_auth_contract.py``.
+        Regenerated each AuthAgent run; the file's docstring tells
+        humans not to edit it.
+
+        Idempotent — same contract → same file content. No language
+        other than python emitted yet (typescript/jest variant queued
+        for later).
+        """
+        from bizniz.auth_agent.contract_tests import (
+            render_auth_contract_test_file,
+        )
+        try:
+            content = render_auth_contract_test_file(
+                contract_markdown=contract_markdown,
+                primary_app_id=primary_app_id,
+            )
+        except Exception as e:
+            self._log(
+                f"AuthAgent: contract test render failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return
+
+        # Where the AuthAgent's own workspace lives. Per-service
+        # workspaces are siblings under this root.
+        ws_root = getattr(self._workspace, "root", None)
+        if ws_root is None:
+            self._log(
+                "AuthAgent: cannot emit contract tests — workspace has "
+                "no .root attribute"
+            )
+            return
+
+        from pathlib import Path
+        emitted: list[str] = []
+        for service in architecture.services:
+            if (service.language or "").lower() != "python":
+                continue
+            if (service.service_type or "").lower() not in ("backend", "worker"):
+                continue
+            target_dir = Path(ws_root) / service.workspace_name / "tests" / "auth"
+            target = target_dir / "test_auth_contract.py"
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                # Make the dir an importable package so pytest's
+                # collection picks it up cleanly under --rootdir.
+                init = target_dir / "__init__.py"
+                if not init.exists():
+                    init.write_text("")
+                target.write_text(content)
+                emitted.append(str(target))
+            except Exception as e:
+                self._log(
+                    f"AuthAgent: failed to write contract test for "
+                    f"`{service.name}`: {type(e).__name__}: {e}"
+                )
+        if emitted:
+            self._log(
+                f"AuthAgent: emitted {len(emitted)} contract test file(s): "
+                f"{', '.join(emitted)}"
+            )
 
     def _reconcile_users_from_contract(
         self,
