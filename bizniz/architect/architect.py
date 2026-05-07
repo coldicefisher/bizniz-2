@@ -83,15 +83,23 @@ class Architect:
             label="Architect.decompose",
         )
 
-        # Defensive: the LLM occasionally returns a top-level list of
-        # services instead of the expected dict. Wrap it back into the
-        # dict shape so the rest of the parser can proceed.
+        # Defensive: the LLM occasionally returns a list at the top
+        # level. Two real shapes seen in the wild:
+        #   1. [{project_name, services: [...]}]  (response wrapped
+        #      in a single-element list)
+        #   2. [{name, service_type, framework, ...}, ...]  (just the
+        #      services list, no wrapper dict)
+        # Detect by peeking at the first element's shape.
         if isinstance(raw, list):
             self._log(
                 f"Architect: LLM returned a list (len={len(raw)}); "
-                f"normalizing into 'services' field"
+                f"attempting to normalize"
             )
-            raw = {"services": raw}
+            if (len(raw) == 1 and isinstance(raw[0], dict)
+                    and "services" in raw[0]):
+                raw = raw[0]  # unwrap shape 1
+            else:
+                raw = {"services": raw}  # shape 2: it's the services list
         services = [ServiceDefinition(**svc) for svc in raw.get("services") or []]
         if not services:
             raise ArchitectBadAIResponseError(
