@@ -430,6 +430,42 @@ class V2Pipeline:
             primary_app_id=_resolve_fa_app_id(),
             tenant_id=_resolve_fa_tenant_id(),
         )
+
+        # Gate on critical audit checks. AuthAgent's tool-loop submission
+        # is self-reported, so we trust the deterministic post-loop
+        # battery — not the agent's own claim of success. A failure on
+        # any of these means downstream code generation will produce
+        # auth-broken code (JWT alg mismatch, missing test users → 404
+        # at integration time). Halt now rather than burn API spend
+        # generating code against a fabricated contract.
+        _CRITICAL_AUDIT_CHECKS = {
+            "jwt_signing",
+            "test_users_in_fa",
+            "jwks_reachable",
+        }
+        critical_failures = [
+            c for c in result.audit.checks
+            if not c.passed and (
+                c.name in _CRITICAL_AUDIT_CHECKS
+                or c.name.startswith("token_validation:")
+            )
+        ]
+        if critical_failures:
+            detail = "; ".join(
+                f"[{c.name}] {c.detail[:160]}" for c in critical_failures
+            )
+            # Persist the failed result first so resume can see what
+            # AuthAgent actually returned (including the contract text
+            # the agent tried to ship).
+            self._state.mark_top_phase(TopPhase.AUTH, result)
+            self._gates.hard(
+                "auth_audit_failed",
+                f"AuthAgent.configure submitted but audit battery flagged "
+                f"{len(critical_failures)} critical failure(s) — refusing to "
+                f"proceed with code generation against a contract that "
+                f"doesn't match FusionAuth reality. {detail}",
+            )
+
         self._state.mark_top_phase(TopPhase.AUTH, result)
         return result.contract_markdown or None
 

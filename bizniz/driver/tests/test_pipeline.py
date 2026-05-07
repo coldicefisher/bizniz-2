@@ -222,3 +222,86 @@ class TestPipelineOrdering:
         art = json.loads((rs.root / f"{TopPhase.AUTH.value}.json").read_text())
         assert art.get("skipped") is True
         assert "no auth service" in (art.get("reason") or "")
+
+# ── AuthAgent audit gate ──────────────────────────────────────────────
+
+
+from bizniz.auth_agent.types import AuditCheck
+from bizniz.driver.gates import GateViolation
+
+
+class TestAuthAuditGate:
+    def _build_p(self, tmp_path, audit_checks):
+        planner = MagicMock(); planner.plan.return_value = _plan()
+        architect = MagicMock(); architect.decompose.return_value = _arch(with_auth=True)
+        provisioner = lambda a, n: {"compose_path": "/p/c.yml"}
+
+        def _auth_factory(architecture):
+            agent = MagicMock()
+            agent.configure.return_value = AuthAgentResult(
+                mode="configure",
+                contract_markdown="# contract",
+                summary="ok",
+                applied_changes=[],
+                audit=AuditReport(checks=audit_checks),
+            )
+            return agent
+
+        ml_loop = MagicMock()
+        p = _build_pipeline(
+            tmp_path, planner=planner, architect=architect,
+            auth_factory=_auth_factory, provisioner=provisioner,
+            ml_loop=ml_loop,
+        )
+        p._compose_up = lambda path: None
+        return p, ml_loop
+
+    def test_jwt_signing_failure_halts(self, tmp_path):
+        # V2Pipeline.run() catches GateViolation and returns it as a
+        # halted_at result; never raises out.
+        p, ml_loop = self._build_p(tmp_path, [
+            AuditCheck(name="jwt_signing", passed=False,
+                       detail="signing key uses 'HS256' — must be RS256"),
+        ])
+        result = p.run(problem_statement="x")
+        assert result.halted_at == "auth_audit_failed"
+        assert "jwt_signing" in (result.halt_reason or "")
+        # Critical: never proceeded to milestones.
+        ml_loop.run.assert_not_called()
+
+    def test_token_validation_failure_halts(self, tmp_path):
+        p, ml_loop = self._build_p(tmp_path, [
+            AuditCheck(name="token_validation:landlord@example.com",
+                       passed=False, detail="login returned 404"),
+        ])
+        result = p.run(problem_statement="x")
+        assert result.halted_at == "auth_audit_failed"
+        ml_loop.run.assert_not_called()
+
+    def test_test_users_in_fa_failure_halts(self, tmp_path):
+        p, ml_loop = self._build_p(tmp_path, [
+            AuditCheck(name="test_users_in_fa", passed=False,
+                       detail="contract names users not in FA: x@y.com"),
+        ])
+        result = p.run(problem_statement="x")
+        assert result.halted_at == "auth_audit_failed"
+        ml_loop.run.assert_not_called()
+
+    def test_credential_exposure_does_not_halt(self, tmp_path):
+        # credential_exposure has known false-positive issues; it's
+        # informational, not gating.
+        p, ml_loop = self._build_p(tmp_path, [
+            AuditCheck(name="credential_exposure", passed=False,
+                       detail="found 'password' in legit schema"),
+        ])
+        p.run(problem_statement="x")
+        ml_loop.run.assert_called()
+
+    def test_all_pass_proceeds(self, tmp_path):
+        p, ml_loop = self._build_p(tmp_path, [
+            AuditCheck(name="jwt_signing", passed=True),
+            AuditCheck(name="jwks_reachable", passed=True),
+            AuditCheck(name="token_validation:admin@admin.com", passed=True),
+        ])
+        p.run(problem_statement="x")
+        ml_loop.run.assert_called()

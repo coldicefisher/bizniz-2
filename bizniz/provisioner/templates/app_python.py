@@ -15,15 +15,30 @@ _FRAMEWORK_DEFAULTS = {
 }
 
 
-def _generate_dockerfile(port: int) -> str:
-    return (
+def _generate_dockerfile(port: int, service_type: str = "backend") -> str:
+    """Render the Dockerfile.
+
+    Web/API services get ``uvicorn main:app`` so the entry contract
+    matches the SKELETON.md hard contract. Workers get a placeholder
+    ``sleep infinity`` CMD so the container stays up while the Coder
+    fills in the real entrypoint — overriding to e.g.
+    ``celery -A main worker --loglevel=info`` once main.py exists.
+    Without this fork, every worker boilerplate fails compose-up
+    immediately because uvicorn is not in the worker's requirements.
+    """
+    base = (
         "FROM python:3.12-slim\n"
         "WORKDIR /app\n"
         "COPY requirements.txt .\n"
         "RUN pip install --no-cache-dir -r requirements.txt\n"
         "COPY . .\n"
         "ENV PYTHONPATH=/app\n"
-        f'CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "{port}"]\n'
+    )
+    if (service_type or "").lower() == "worker":
+        return base + 'CMD ["sleep", "infinity"]\n'
+    return (
+        base
+        + f'CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "{port}"]\n'
     )
 
 
@@ -115,7 +130,7 @@ class PythonAppTemplate(InfraTemplate):
 
     def render(self, ctx: TemplateContext) -> TemplateOutput:
         port = ctx.service.port or 8000
-        dockerfile = _generate_dockerfile(port)
+        dockerfile = _generate_dockerfile(port, ctx.service.service_type)
         requirements = _generate_requirements(ctx.service.framework, ctx.service.requirements)
         skeleton_md = _generate_skeleton_md(ctx.service.framework, port)
 

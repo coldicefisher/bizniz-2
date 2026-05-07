@@ -158,6 +158,18 @@ class AuthAgent(ToolLoopAgent):
             audit_mode=(mode == "audit"),
         )
 
+        # Deterministic preflight (configure mode only). The LLM tool
+        # surface doesn't include signing-key generation, and FusionAuth
+        # ships with HS256 by default — so without this, every run
+        # leaves the tenant on HS256 and the jwt_signing audit fails.
+        # This runs before the tool loop so the LLM's fa_diagnose calls
+        # see the post-fix state. Idempotent — generate_signing_key
+        # short-circuits if the key already exists.
+        if mode == "configure":
+            self._ensure_rs256_binding(
+                primary_app_id=primary_app_id, tenant_id=tenant_id,
+            )
+
         initial = self._build_initial_context(
             mode=mode,
             problem_slice=problem_slice,
@@ -168,6 +180,18 @@ class AuthAgent(ToolLoopAgent):
         )
 
         result: AuthAgentResult = self.run(initial)
+
+        # Post-loop reconciliation (configure mode only). The LLM's
+        # contract_markdown is the source of truth for which test users
+        # the project expects; if any are missing from FusionAuth, the
+        # audit will fail and downstream code generation will produce
+        # tests against users that 404 at integration time.
+        # Parse the contract, ensure every named user actually exists.
+        if mode == "configure" and result.contract_markdown:
+            self._reconcile_users_from_contract(
+                contract_markdown=result.contract_markdown,
+                primary_app_id=primary_app_id,
+            )
 
         # Run the deterministic audit battery against the post-loop state.
         result.audit = self._run_audit_battery(
@@ -241,6 +265,114 @@ class AuthAgent(ToolLoopAgent):
             f"prior contract or your assumptions about what FA emits — "
             f"measure first."
         )
+
+    def _reconcile_users_from_contract(
+        self,
+        *,
+        contract_markdown: str,
+        primary_app_id: str,
+    ) -> None:
+        """Make sure every test user named in the contract exists in
+        FusionAuth. The LLM's contract markdown is the source of truth
+        for downstream code (which writes integration tests against
+        these users); if the LLM claims a user but didn't actually
+        create one, integration tests 404 at login.
+
+        Idempotent — ``ensure_user`` short-circuits when the user
+        already has the same registration.
+        """
+        try:
+            from bizniz.auth_agent.audits import _parse_test_users
+            users = _parse_test_users(contract_markdown)
+        except Exception as e:
+            self._log(
+                f"AuthAgent: post-loop user reconcile parse failed "
+                f"({type(e).__name__}: {e}); audit will catch missing users"
+            )
+            return
+        if not users:
+            return
+        for email, password, roles in users:
+            try:
+                self._fa_orchestrator.ensure_user(
+                    app_id=primary_app_id,
+                    email=email,
+                    password=password,
+                    roles=list(roles),
+                    verified=True,
+                    password_change_required=False,
+                )
+                self._log(
+                    f"AuthAgent: reconciled test user {email} "
+                    f"(roles={roles})"
+                )
+            except Exception as e:
+                self._log(
+                    f"AuthAgent: ensure_user({email}) raised "
+                    f"{type(e).__name__}: {str(e)[:120]} (audit will catch)"
+                )
+
+    def _ensure_rs256_binding(
+        self, *, primary_app_id: str, tenant_id: str,
+    ) -> None:
+        """Make sure FusionAuth issues RS256-signed JWTs for the primary
+        application. Skeleton's ``get_current_user`` validates with
+        ``algorithms=["RS256"]``; HS256 tokens fail with
+        InvalidAlgorithmError 100% of the time.
+
+        Three-step:
+          1. ``generate_signing_key`` (deterministic key_id, idempotent —
+             short-circuits if the key exists already).
+          2. Try ``set_tenant_signing_key`` so the audit (which queries
+             tenant.jwtConfiguration.accessTokenKeyId) passes. Fresh
+             tenants sometimes reject this PATCH due to a known FA
+             validator quirk (blank/duplicate name).
+          3. Always also call ``set_application_signing_key`` —
+             application-level overrides tenant-level and is the path
+             that actually issues RS256 tokens at login time.
+
+        Failures here are logged but not raised — the audit battery will
+        catch a missing/wrong binding as ``jwt_signing`` and the
+        pipeline gate will halt the run before code generation. Defense
+        in depth: best-effort here, hard-gate later.
+        """
+        try:
+            from bizniz.auth_orchestrators.kickstart import _deterministic_uuid
+            key_id = _deterministic_uuid("signing-key", primary_app_id)
+            self._log(
+                f"AuthAgent: preflight — ensuring RS256 signing key "
+                f"{key_id} bound to app {primary_app_id} + tenant {tenant_id}"
+            )
+            self._fa_orchestrator.generate_signing_key(
+                key_id=key_id,
+                name=f"bizniz-app-{primary_app_id}-rs256",
+                algorithm="RS256",
+                length=2048,
+            )
+            # Try tenant-level binding first (audit looks here). May
+            # fail on fresh tenants due to FA's blank/duplicate name
+            # validator — log and continue, app-level still works.
+            try:
+                self._fa_orchestrator.set_tenant_signing_key(
+                    tenant_id=tenant_id, key_id=key_id,
+                )
+            except Exception as e:
+                self._log(
+                    f"AuthAgent: preflight tenant binding skipped "
+                    f"({type(e).__name__}: {str(e)[:120]}) — "
+                    f"falling back to app-level"
+                )
+            # Always bind at the application level. This is what
+            # actually issues RS256 tokens at /api/login time.
+            self._fa_orchestrator.set_application_signing_key(
+                app_id=primary_app_id, key_id=key_id,
+            )
+        except Exception as e:
+            # Don't break the run — let the audit catch and halt cleanly.
+            self._log(
+                f"AuthAgent: preflight RS256 binding raised "
+                f"{type(e).__name__}: {e} (audit will catch)"
+            )
 
     def _run_audit_battery(
         self,

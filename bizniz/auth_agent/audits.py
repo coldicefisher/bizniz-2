@@ -163,27 +163,56 @@ def audit_jwks_reachable(orch: FusionAuthOrchestrator) -> AuditCheck:
 def audit_jwt_signing(
     orch: FusionAuthOrchestrator,
     tenant_id: str,
+    primary_app_id: str = "",
 ) -> AuditCheck:
-    """Confirm the tenant's signing key is RS-family and bound to the
-    tenant's accessTokenKeyId."""
-    try:
-        tenant = orch.get_tenant(tenant_id)
-    except Exception as e:
-        return AuditCheck(
-            name="jwt_signing", passed=False,
-            detail=f"could not fetch tenant {tenant_id}: {type(e).__name__}: {e}",
-        )
-    if not tenant or not tenant.get("tenant"):
-        return AuditCheck(
-            name="jwt_signing", passed=False,
-            detail=f"tenant {tenant_id} not found",
-        )
-    jwt_cfg = tenant["tenant"].get("jwtConfiguration") or {}
-    key_id = jwt_cfg.get("accessTokenKeyId")
+    """Confirm the active signing key is RS-family.
+
+    Checks the application's jwtConfiguration FIRST (application-level
+    overrides tenant-level — see set_application_signing_key docstring
+    for why we prefer this path; fresh tenants reject PATCH on a known
+    FA validator quirk). Falls back to the tenant's signing key if the
+    application doesn't override.
+    """
+    key_id = None
+    source = ""
+    # Try application-level first (the path AuthAgent's preflight uses).
+    if primary_app_id:
+        try:
+            app = orch.get_application(primary_app_id)
+            app_jwt_cfg = (
+                (app or {}).get("application", {}).get("jwtConfiguration") or {}
+            )
+            if app_jwt_cfg.get("enabled") and app_jwt_cfg.get("accessTokenKeyId"):
+                key_id = app_jwt_cfg["accessTokenKeyId"]
+                source = f"application:{primary_app_id}"
+        except Exception:
+            # Fall through to tenant.
+            pass
+
+    if not key_id:
+        try:
+            tenant = orch.get_tenant(tenant_id)
+        except Exception as e:
+            return AuditCheck(
+                name="jwt_signing", passed=False,
+                detail=f"could not fetch tenant {tenant_id}: {type(e).__name__}: {e}",
+            )
+        if not tenant or not tenant.get("tenant"):
+            return AuditCheck(
+                name="jwt_signing", passed=False,
+                detail=f"tenant {tenant_id} not found",
+            )
+        jwt_cfg = tenant["tenant"].get("jwtConfiguration") or {}
+        key_id = jwt_cfg.get("accessTokenKeyId")
+        source = f"tenant:{tenant_id}"
     if not key_id:
         return AuditCheck(
             name="jwt_signing", passed=False,
-            detail="tenant has no accessTokenKeyId — JWTs unsigned or HS-fallback",
+            detail=(
+                f"neither application {primary_app_id} nor tenant "
+                f"{tenant_id} has accessTokenKeyId — JWTs unsigned "
+                f"or HS-fallback"
+            ),
         )
     try:
         key = orch.get_signing_key(key_id) if hasattr(orch, "get_signing_key") else None
@@ -429,7 +458,7 @@ def run_audit_battery(
     checks.append(audit_jwks_reachable(orch))
 
     # 2. JWT signing safe
-    checks.append(audit_jwt_signing(orch, tenant_id))
+    checks.append(audit_jwt_signing(orch, tenant_id, primary_app_id=primary_app_id))
 
     # 3. Test-user inventory + token validation
     test_users = _parse_test_users(contract_markdown)
