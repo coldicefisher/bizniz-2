@@ -54,16 +54,28 @@ def make_run_tests(
     base_url: Optional[str] = None,
     timeout_s: float = 180.0,
 ) -> ToolHandler:
-    """Run pytest in the pytest sidecar against the live stack.
+    """Run pytest INSIDE the target service's running container.
 
     Action fields:
       - ``path``: space-separated test paths relative to the workspace
                   (default: ``tests/``)
 
-    The sidecar joins the compose project's docker network so tests can
-    hit ``http://<service>:<port>`` URLs. Uses ``--noconftest --rootdir``
-    so pytest doesn't try to collect parent conftest files that would
-    require the service's full dependency tree.
+    Why exec-into-service vs sidecar: the service container has the
+    full dep set the Coder's tests need (sqlalchemy, fastapi, the
+    actual app code, etc.). The pytest sidecar only has pytest +
+    httpx, so any test that does ``from app.main import app`` or
+    relies on sqlalchemy fails at import-time with
+    ``ModuleNotFoundError`` — even when the code is correct.
+
+    This was the v33 wall: substantial code written, ALL tests failed
+    at import-time because of the env mismatch. Coder couldn't
+    diagnose because it inspected the backend container (where deps
+    are present) not the sidecar (where tests actually ran).
+
+    Trade-off: requires the service container to be running. compose-
+    up at the top of the pipeline guarantees this; if the container
+    isn't running, the error is clear (``docker compose exec`` fails
+    fast with a useful message).
     """
     def handler(action: Dict) -> str:
         if not compose_path or not target_service:
@@ -76,23 +88,15 @@ def make_run_tests(
             if p.startswith("/") or ".." in p.split("/"):
                 return f"ERROR: test path must be relative to workspace: {p!r}"
 
-        project_name = _compose_project_name(compose_path)
-        network = f"{project_name}_app-network"
         env_url = base_url or ""
-
         run_cmd = (
-            f"cd /workspace && "
-            + (f"API_BASE_URL={shlex.quote(env_url)} " if env_url else "")
-            + f"pytest {path_spec} --noconftest --rootdir {shlex.quote(path_spec.split()[0])} "
-            f"-v --tb=short --no-header"
+            (f"API_BASE_URL={shlex.quote(env_url)} " if env_url else "")
+            + f"pytest {path_spec} -v --tb=short --no-header"
         )
 
         cmd = [
-            "docker", "run", "--rm",
-            "--network", network,
-            "-v", f"{workspace_path}:/workspace",
-            "-w", "/workspace",
-            PYTEST_SIDECAR_IMAGE,
+            "docker", "compose", "-f", compose_path,
+            "exec", "-T", target_service,
             "sh", "-c", run_cmd,
         ]
         try:
@@ -102,7 +106,8 @@ def make_run_tests(
         except subprocess.TimeoutExpired as e:
             partial = (e.stdout or "") + (e.stderr or "")
             return _truncate(
-                f"ERROR: pytest sidecar timed out after {timeout_s:.0f}s\n{partial}"
+                f"ERROR: pytest in {target_service} timed out after "
+                f"{timeout_s:.0f}s\n{partial}"
             )
         except FileNotFoundError:
             return "ERROR: docker not available on host."
@@ -111,7 +116,10 @@ def make_run_tests(
 
         output = (proc.stdout or "") + (proc.stderr or "")
         verdict = "TESTS PASSED" if proc.returncode == 0 else "TESTS FAILED"
-        return _truncate(f"{verdict}\n(exit code: {proc.returncode})\n\n{output}")
+        return _truncate(
+            f"{verdict}\n(exit code: {proc.returncode}, "
+            f"ran inside service '{target_service}')\n\n{output}"
+        )
     return handler
 
 

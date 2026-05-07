@@ -39,19 +39,15 @@ class TestRunTests:
         with patch("subprocess.run", return_value=_proc(stdout="passed", returncode=0)) as m:
             out = handler({})
         argv = m.call_args[0][0]
-        assert argv[0] == "docker" and argv[1] == "run"
-        assert PYTEST_SIDECAR_IMAGE in argv
-        assert "--network" in argv
-        # network = projectname_app-network where projectname is parent dir lowercased
-        i = argv.index("--network")
-        assert argv[i + 1] == "proj_app-network"
-        # bind mount
-        assert f"{tmp_path}:/workspace" in argv
-        # pytest cmd contains tests/ default and base_url
+        # New shape: docker compose -f <path> exec -T <service> sh -c <cmd>
+        assert argv[0] == "docker" and argv[1] == "compose"
+        assert "exec" in argv and "-T" in argv
+        assert "backend" in argv
         sh_cmd = argv[-1]
         assert "pytest tests/" in sh_cmd
         assert "API_BASE_URL=http://backend:8000" in sh_cmd
         assert "TESTS PASSED" in out
+        assert "ran inside service 'backend'" in out
 
     def test_custom_path(self, tmp_path):
         handler = make_run_tests(
