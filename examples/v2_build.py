@@ -27,7 +27,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bizniz.architect.architect import Architect
 from bizniz.auth_agent.agent import AuthAgent
+from bizniz.auth_operator import FusionAuthOperator
 from bizniz.auth_orchestrators.fusionauth_orchestrator import FusionAuthOrchestrator
+from bizniz.auth_planner import AuthPlanner
 from bizniz.code_reviewer.agent import CodeReviewer
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.cost import get_tracker
@@ -434,6 +436,24 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
             on_status=on_status,
         )
 
+    # v2.6 split-AuthAgent path. Pipeline auto-selects this when both
+    # factories are wired (preferred). The legacy AuthAgent factory
+    # above stays as a fallback for tests that mock it.
+    def auth_planner_factory(architecture):
+        return AuthPlanner(client=auth_client, on_status=on_status)
+
+    def auth_operator_factory(architecture):
+        fa_url, fa_key = _resolve_fa_endpoint(project_root)
+        fa_orch = FusionAuthOrchestrator(
+            base_url=fa_url,
+            api_key=fa_key,
+            on_status=on_status,
+        )
+        return FusionAuthOperator(
+            orchestrator=fa_orch,
+            on_status=on_status,
+        )
+
     provisioner = Provisioner(
         project_parent=Path(os.environ.get("BIZNIZ_PROJECTS_ROOT") or
                              str(Path.home() / "bizniz_projects")),
@@ -455,6 +475,10 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         compose_path_for_arch=lambda _arch: compose_path,
         cost_tracker=cost_tracker,
         on_status=on_status,
+        auth_planner_factory=auth_planner_factory,
+        auth_operator_factory=auth_operator_factory,
+        auth_code_examples_client=auth_client,
+        project_root=project_root,
     )
     # Attach cost tracker + run_state to the pipeline-build closure so
     # main() can write the cost report on exit.

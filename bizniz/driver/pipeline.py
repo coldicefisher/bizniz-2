@@ -22,6 +22,11 @@ from bizniz.architect.architect import Architect
 from bizniz.architect.types import SystemArchitecture
 from bizniz.auth_agent.agent import AuthAgent
 from bizniz.auth_agent.types import AuthAgentResult
+from bizniz.auth_operator import (
+    AuthManifest, FusionAuthOperator, generate_code_examples,
+    render_auth_contract,
+)
+from bizniz.auth_planner import AuthPlanner
 from bizniz.driver.gates import GatePolicy, GateViolation
 from bizniz.driver.milestone_loop import MilestoneLoop, MilestoneOutcome
 from bizniz.driver.state import RunState, SubPhase, TopPhase
@@ -66,6 +71,14 @@ class V2Pipeline:
         compose_path_for_arch: Callable[[SystemArchitecture], str],
         cost_tracker=None,
         on_status: Optional[Callable[[str], None]] = None,
+        # v2.6 split-AuthAgent path. When all three are provided,
+        # _top_auth uses the planner/operator flow instead of the
+        # legacy AuthAgent. Tests + projects without auth still work
+        # via the legacy path.
+        auth_planner_factory: Optional[Callable[..., AuthPlanner]] = None,
+        auth_operator_factory: Optional[Callable[..., FusionAuthOperator]] = None,
+        auth_code_examples_client=None,
+        project_root: Optional[Path] = None,
     ):
         self._planner = planner
         self._architect = architect
@@ -78,6 +91,10 @@ class V2Pipeline:
         self._compose_path_for_arch = compose_path_for_arch
         self._cost_tracker = cost_tracker
         self._on_status = on_status
+        self._auth_planner_factory = auth_planner_factory
+        self._auth_operator_factory = auth_operator_factory
+        self._auth_code_examples_client = auth_code_examples_client
+        self._project_root = project_root
 
     def _tag_top(self, phase: TopPhase) -> None:
         if self._cost_tracker is None:
@@ -413,17 +430,30 @@ class V2Pipeline:
             return None
 
         self._tag_top(TopPhase.AUTH)
+        first_slice = (
+            plan.milestones[0].problem_slice
+            if plan.milestones else
+            "(no milestones — configure baseline auth)"
+        )
+
+        # v2.6 path: AuthPlanner (LLM, single call) → FusionAuthOperator
+        # (deterministic, knows FA quirks) → render contract from manifest
+        # → emit per-service contract test files → audit on the manifest.
+        # Falls back to legacy AuthAgent when factories aren't wired
+        # (existing tests, projects mid-migration).
+        if (self._auth_planner_factory is not None
+                and self._auth_operator_factory is not None):
+            return self._top_auth_v2(
+                architecture=architecture,
+                problem_slice=first_slice,
+            )
+
         agent = self._auth_agent_factory(architecture=architecture)
         # Caller-injected factory builds the agent already loaded with
         # client + workspace + orchestrator. We just call configure with
         # the milestone-1 problem slice as the seed (auth is set up before
         # any milestone runs; M1's slice typically describes the auth
         # surface area).
-        first_slice = (
-            plan.milestones[0].problem_slice
-            if plan.milestones else
-            "(no milestones — configure baseline auth)"
-        )
         result: AuthAgentResult = agent.configure(
             problem_slice=first_slice,
             architecture=architecture,
@@ -480,6 +510,185 @@ class V2Pipeline:
 
         self._state.mark_top_phase(TopPhase.AUTH, result)
         return result.contract_markdown or None
+
+    # ── v2.6 split-AuthAgent flow ──────────────────────────────────────
+
+    def _top_auth_v2(
+        self,
+        *,
+        architecture: SystemArchitecture,
+        problem_slice: str,
+    ) -> Optional[str]:
+        """AuthPlanner → FusionAuthOperator → render → emit tests → audit.
+
+        All FA mutation is deterministic. The LLM only emits the spec
+        (intent). The contract markdown is rendered from the live
+        manifest, so it can never claim a user that doesn't exist or
+        an algorithm that isn't bound.
+        """
+        primary_app_id = _resolve_fa_app_id()
+        tenant_id = _resolve_fa_tenant_id()
+
+        planner = self._auth_planner_factory(architecture=architecture)
+        operator = self._auth_operator_factory(architecture=architecture)
+
+        # Stage 1 — plan (single LLM call → AuthSpec).
+        try:
+            spec = planner.plan(
+                problem_slice=problem_slice,
+                architecture=architecture,
+            )
+        except Exception as e:
+            self._gates.hard(
+                "auth_planner_failed",
+                f"AuthPlanner raised {type(e).__name__}: {str(e)[:300]}",
+            )
+
+        # Stage 2 — apply (deterministic → AuthManifest).
+        try:
+            manifest: AuthManifest = operator.apply(
+                spec=spec,
+                primary_app_id=primary_app_id,
+                tenant_id=tenant_id,
+            )
+        except Exception as e:
+            self._gates.hard(
+                "auth_operator_failed",
+                f"FusionAuthOperator raised {type(e).__name__}: "
+                f"{str(e)[:300]}",
+            )
+
+        # Stage 3 — render contract from live manifest.
+        contract_md = render_auth_contract(manifest)
+
+        # Stage 3b — append code samples (small LLM call, optional).
+        if self._auth_code_examples_client is not None:
+            languages = sorted({
+                s.language for s in architecture.services
+                if s.service_type in ("backend", "frontend", "worker")
+                and (s.language or "").lower() in
+                ("python", "typescript", "javascript")
+            })
+            samples = generate_code_examples(
+                client=self._auth_code_examples_client,
+                manifest=manifest,
+                languages=languages,
+                on_status=self._on_status,
+            )
+            if samples:
+                contract_md = contract_md.rstrip() + "\n\n" + samples + "\n"
+
+        # Stage 4 — write contract to disk + emit per-service tests.
+        if self._project_root is not None:
+            try:
+                contract_path = self._project_root / "AUTH_CONTRACT.md"
+                contract_path.write_text(contract_md)
+                self._log(f"V2Pipeline: wrote {contract_path}")
+            except Exception as e:
+                self._log(
+                    f"V2Pipeline: failed to write AUTH_CONTRACT.md "
+                    f"({type(e).__name__}: {e})"
+                )
+            self._emit_v2_contract_tests(manifest, architecture)
+
+        # Stage 5 — gate on manifest. Deterministic checks.
+        critical: list[str] = []
+        if not manifest.signing_key.is_rs_family:
+            critical.append(
+                f"jwt_signing: algorithm={manifest.signing_key.algorithm} "
+                f"is not RS-family"
+            )
+        if not manifest.users:
+            critical.append("test_users: zero users in manifest")
+        else:
+            unverified = [
+                u.email for u in manifest.users if not u.login_verified
+            ]
+            if unverified:
+                critical.append(
+                    f"token_validation: login failed for "
+                    f"{', '.join(unverified)}"
+                )
+        if critical:
+            self._state.mark_top_phase(TopPhase.AUTH, {
+                "spec": spec.model_dump(),
+                "manifest": manifest.model_dump(),
+                "contract_markdown": contract_md,
+                "critical": critical,
+            })
+            self._gates.hard(
+                "auth_audit_failed",
+                f"FusionAuthOperator manifest failed audit: "
+                + "; ".join(critical),
+            )
+
+        self._state.mark_top_phase(TopPhase.AUTH, {
+            "spec": spec.model_dump(),
+            "manifest": manifest.model_dump(),
+            "contract_markdown": contract_md,
+        })
+        return contract_md
+
+    def _emit_v2_contract_tests(
+        self,
+        manifest: AuthManifest,
+        architecture: SystemArchitecture,
+    ) -> None:
+        """Render tests/auth/test_auth_contract.py per python service.
+
+        Re-uses the existing ``contract_tests`` renderer. Builds a
+        contract-markdown-shaped string that the renderer's parsers
+        recognize (deterministic-shape: Issuer line + test users
+        block in the audit's regex format).
+        """
+        from bizniz.auth_agent.contract_tests import (
+            render_auth_contract_test_file,
+        )
+        # The renderer parses test users + issuer out of a markdown
+        # blob; build the minimal blob that matches its parsers.
+        issuer_line = f"- Issuer (iss claim): {manifest.issuer}\n" if manifest.issuer else ""
+        users_lines = "\n".join(
+            f"- {u.email} / {u.password} — roles {', '.join(u.roles) or 'user'}"
+            for u in manifest.users
+        )
+        synth_md = f"## Issuer\n\n{issuer_line}\n## Test users\n\n{users_lines}\n"
+
+        try:
+            content = render_auth_contract_test_file(
+                contract_markdown=synth_md,
+                primary_app_id=manifest.primary_app_id,
+            )
+        except Exception as e:
+            self._log(
+                f"V2Pipeline: contract test render failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return
+
+        for service in architecture.services:
+            if (service.language or "").lower() != "python":
+                continue
+            if (service.service_type or "").lower() not in ("backend", "worker"):
+                continue
+            try:
+                target_dir = (
+                    self._project_root / service.workspace_name
+                    / "tests" / "auth"
+                )
+                target_dir.mkdir(parents=True, exist_ok=True)
+                init = target_dir / "__init__.py"
+                if not init.exists():
+                    init.write_text("")
+                (target_dir / "test_auth_contract.py").write_text(content)
+                self._log(
+                    f"V2Pipeline: emitted contract test "
+                    f"{service.workspace_name}/tests/auth/test_auth_contract.py"
+                )
+            except Exception as e:
+                self._log(
+                    f"V2Pipeline: failed to write contract test for "
+                    f"{service.name}: {type(e).__name__}: {e}"
+                )
 
     # ── Compose helpers ────────────────────────────────────────────────
 
