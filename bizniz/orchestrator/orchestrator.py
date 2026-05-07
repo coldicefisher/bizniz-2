@@ -1,0 +1,200 @@
+"""Per-service Orchestrator — drives the Coder issue-by-issue.
+
+Responsibilities:
+1. Topo-sort the service's issues by ``depends_on``.
+2. For each issue: build a Coder bound to the current tier's model
+   and dispatch ``code_issue()``.
+3. On ``ToolLoopAgentStalledError``: escalate via ``ModelProgression``
+   and retry with a stronger model. If the progression is exhausted,
+   mark the issue stalled and move on.
+4. If an issue's dependency stalled, mark dependents ``skipped``
+   without dispatching the Coder (cheaper than letting them stall
+   on missing imports).
+
+The Orchestrator does NOT write code, run tests, or know about
+specific tools. All of that lives in the Coder. This is purely a
+loop + escalation policy.
+"""
+from __future__ import annotations
+
+from typing import Callable, List, Optional, Set
+
+from bizniz.architect.types import SystemArchitecture
+from bizniz.coder.agent import Coder
+from bizniz.coder.types import CoderResult, Issue
+from bizniz.lib.dependency_graph import topological_layers
+from bizniz.lib.model_progression import ModelProgression
+from bizniz.lib.tool_loop_agent import ToolLoopAgentStalledError
+from bizniz.orchestrator.types import (
+    IssueDisposition, IssueOutcome, OrchestratorResult,
+)
+from bizniz.quality_engineer.types import EnrichedSpec
+
+
+CoderFactory = Callable[[str], Coder]
+"""Function that builds a Coder bound to ``model_name``.
+
+Construction lives outside the orchestrator because the Coder needs
+a workspace + compose_path + service-specific configuration that
+only the caller (MilestoneLoop) knows. The orchestrator just asks
+for a Coder bound to a particular model.
+"""
+
+
+class Orchestrator:
+    """Runs one service's worth of issues through the Coder."""
+
+    def __init__(
+        self,
+        service: str,
+        coder_factory: CoderFactory,
+        progression: ModelProgression,
+        on_status: Optional[Callable[[str], None]] = None,
+    ):
+        self._service = service
+        self._coder_factory = coder_factory
+        self._progression = progression
+        self._on_status = on_status
+
+    # ── Public ─────────────────────────────────────────────────────────
+
+    def run_service(
+        self,
+        issues: List[Issue],
+        architecture: SystemArchitecture,
+        enriched_spec: EnrichedSpec,
+        auth_contract: Optional[str] = None,
+        workspace_summary: Optional[str] = None,
+        skeleton_md: Optional[str] = None,
+    ) -> OrchestratorResult:
+        """Dispatch every issue in topo order, return aggregate result."""
+        result = OrchestratorResult(service=self._service)
+        if not issues:
+            return result
+
+        layers = topological_layers(issues)
+        failed_ids: Set[str] = set()
+
+        for layer in layers:
+            for issue in layer:
+                if any(dep in failed_ids for dep in issue.depends_on):
+                    self._log(
+                        f"[{self._service}] {issue.id}: skipping — "
+                        f"dependency previously failed."
+                    )
+                    result.issues.append(IssueOutcome(
+                        issue_id=issue.id,
+                        disposition="skipped",
+                        error="upstream dependency stalled or failed",
+                    ))
+                    failed_ids.add(issue.id)
+                    continue
+
+                outcome = self._run_one_issue(
+                    issue=issue,
+                    architecture=architecture,
+                    enriched_spec=enriched_spec,
+                    auth_contract=auth_contract,
+                    workspace_summary=workspace_summary,
+                    skeleton_md=skeleton_md,
+                )
+                result.issues.append(outcome)
+                if not outcome.passed:
+                    failed_ids.add(issue.id)
+        return result
+
+    # ── Per-issue ──────────────────────────────────────────────────────
+
+    def _run_one_issue(
+        self,
+        issue: Issue,
+        architecture: SystemArchitecture,
+        enriched_spec: EnrichedSpec,
+        auth_contract: Optional[str],
+        workspace_summary: Optional[str],
+        skeleton_md: Optional[str],
+    ) -> IssueOutcome:
+        """Dispatch one issue, escalating on stall."""
+        # Always start each issue at the cheapest tier — passing on
+        # one issue doesn't justify upgrading the whole service.
+        self._progression.reset()
+        tiers_used: List[str] = []
+        last_err: str = ""
+
+        while True:
+            model = self._progression.current_model
+            tiers_used.append(model)
+            self._log(
+                f"[{self._service}] {issue.id}: starting on tier "
+                f"{self._progression._index} ({model})"
+            )
+            coder = self._coder_factory(model)
+
+            try:
+                result: CoderResult = coder.code_issue(
+                    issue=issue,
+                    architecture=architecture,
+                    enriched_spec=enriched_spec,
+                    auth_contract=auth_contract,
+                    workspace_summary=workspace_summary,
+                    skeleton_md=skeleton_md,
+                )
+            except ToolLoopAgentStalledError as e:
+                last_err = str(e)
+                self._log(
+                    f"[{self._service}] {issue.id}: stalled on {model} — "
+                    f"{last_err[:120]}"
+                )
+                if self._progression.is_at_max:
+                    self._log(
+                        f"[{self._service}] {issue.id}: progression exhausted, "
+                        f"marking stalled."
+                    )
+                    return IssueOutcome(
+                        issue_id=issue.id,
+                        disposition="stalled",
+                        tiers_used=tiers_used,
+                        error=last_err,
+                    )
+                next_model = self._progression.escalate()
+                self._log(
+                    f"[{self._service}] {issue.id}: escalating to {next_model}"
+                )
+                continue
+            except Exception as e:
+                # Anything other than a stall is unexpected — let the
+                # MilestoneLoop decide if this should kill the service
+                # or continue. Surface as an outcome rather than re-raise
+                # so partial progress is preserved across other issues.
+                self._log(
+                    f"[{self._service}] {issue.id}: errored — "
+                    f"{type(e).__name__}: {str(e)[:200]}"
+                )
+                return IssueOutcome(
+                    issue_id=issue.id,
+                    disposition="errored",
+                    tiers_used=tiers_used,
+                    error=f"{type(e).__name__}: {e}",
+                )
+
+            disposition: IssueDisposition
+            if result.status == "passed":
+                disposition = "escalated" if len(tiers_used) > 1 else "passed"
+            else:
+                disposition = result.status  # partial / deferred / failed
+
+            return IssueOutcome(
+                issue_id=issue.id,
+                disposition=disposition,
+                tiers_used=tiers_used,
+                final_result=result,
+            )
+
+    # ── Status ─────────────────────────────────────────────────────────
+
+    def _log(self, msg: str) -> None:
+        if self._on_status is not None:
+            try:
+                self._on_status(msg)
+            except Exception:
+                pass
