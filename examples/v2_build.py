@@ -317,6 +317,11 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         # issue_store_factory it receives (passed below).
         issue_store=None,
         on_status=on_status,
+        # --retry-service / --retry-failed flow through here so the
+        # dispatcher reuses existing planned issues instead of paying
+        # for ServicePlanner re-runs.
+        only_service=getattr(args, "retry_service", None),
+        skip_planning=bool(getattr(args, "retry_failed", False)),
     )
 
     def http_tester_factory(workspace):

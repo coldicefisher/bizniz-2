@@ -76,12 +76,22 @@ class MilestoneCodeDispatcher:
         progression_factory: ProgressionFactory,
         issue_store: Optional[IssueStateStore] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        only_service: Optional[str] = None,
+        skip_planning: bool = False,
     ):
         self._planner_factory = service_planner_factory
         self._coder_factory = coder_factory
         self._progression_factory = progression_factory
         self._issue_store = issue_store
         self._on_status = on_status
+        # Restrict dispatch to one service (skips others entirely).
+        # Used by --retry-service to avoid burning ServicePlanner +
+        # Coder spend on services we're not iterating on.
+        self._only_service = only_service
+        # Skip ServicePlanner LLM calls — use existing rows from the
+        # store. Used by --retry-failed to avoid re-planning when the
+        # plan already exists in the DB.
+        self._skip_planning = skip_planning
 
     def run(
         self,
@@ -123,37 +133,63 @@ class MilestoneCodeDispatcher:
                         f"materialized it; nothing to code)"
                     )
                     continue
-                self._log(
-                    f"MilestoneCodeDispatcher: planning service "
-                    f"`{service.name}` ({service.framework}/{service.language})"
-                )
-                planner = self._planner_factory(service)
+                if (self._only_service is not None
+                        and service.name != self._only_service):
+                    self._log(
+                        f"MilestoneCodeDispatcher: skipping `{service.name}` "
+                        f"(only_service={self._only_service!r})"
+                    )
+                    continue
                 skeleton_md = (
                     skeleton_md_for_service(service.name)
                     if skeleton_md_for_service else None
                 )
-                try:
-                    issues = planner.plan_service(
-                        architecture=architecture,
-                        enriched_spec=enriched_spec,
-                        service=service,
-                        skeleton_md=skeleton_md,
-                        auth_contract=auth_contract,
+                # --retry-failed path: skip ServicePlanner LLM call;
+                # use existing rows from the store.
+                if self._skip_planning and active_store is not None:
+                    issues = self._load_issues_from_store(
+                        active_store, service.name,
                     )
-                except Exception as e:
-                    # ServicePlannerError or any other planner-side
-                    # failure should not kill the whole milestone — skip
-                    # this service and continue with the rest.
+                    if not issues:
+                        self._log(
+                            f"MilestoneCodeDispatcher: `{service.name}` has "
+                            f"no rows in the store and --skip-planning is "
+                            f"on — skipping"
+                        )
+                        continue
+                    self._log(
+                        f"MilestoneCodeDispatcher: `{service.name}` "
+                        f"reusing {len(issues)} issue(s) from store "
+                        f"(--skip-planning)"
+                    )
+                else:
+                    self._log(
+                        f"MilestoneCodeDispatcher: planning service "
+                        f"`{service.name}` ({service.framework}/{service.language})"
+                    )
+                    planner = self._planner_factory(service)
+                    try:
+                        issues = planner.plan_service(
+                            architecture=architecture,
+                            enriched_spec=enriched_spec,
+                            service=service,
+                            skeleton_md=skeleton_md,
+                            auth_contract=auth_contract,
+                        )
+                    except Exception as e:
+                        # ServicePlannerError or any other planner-side
+                        # failure should not kill the whole milestone — skip
+                        # this service and continue with the rest.
+                        self._log(
+                            f"MilestoneCodeDispatcher: `{service.name}` "
+                            f"planner raised {type(e).__name__}: "
+                            f"{str(e)[:200]} — skipping service"
+                        )
+                        continue
                     self._log(
                         f"MilestoneCodeDispatcher: `{service.name}` planner "
-                        f"raised {type(e).__name__}: {str(e)[:200]} — "
-                        f"skipping service"
+                        f"emitted {len(issues)} issues"
                     )
-                    continue
-                self._log(
-                    f"MilestoneCodeDispatcher: `{service.name}` planner "
-                    f"emitted {len(issues)} issues"
-                )
 
                 # Persist planned issues immediately so resume sees them
                 # even if the dispatcher dies mid-run.
@@ -213,6 +249,18 @@ class MilestoneCodeDispatcher:
             deferred_issue_ids=deferred_ids,
             notes=_collect_notes(per_service),
         )
+
+    # ── Helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_issues_from_store(
+        store: IssueStateStore, service_name: str,
+    ) -> List[CoderIssue]:
+        """Hydrate CoderIssue objects from existing store rows for one
+        service. Used by --skip-planning to avoid re-running ServicePlanner
+        when the plan already exists in the DB."""
+        rows = store.all_rows(service=service_name)
+        return [_row_to_coder_issue(r) for r in rows]
 
     # ── Repair ─────────────────────────────────────────────────────────
 
