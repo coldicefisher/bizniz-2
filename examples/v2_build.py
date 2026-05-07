@@ -50,6 +50,7 @@ from bizniz.integration.worker_tester import WorkerTester
 from bizniz.planner.planner import Planner
 from bizniz.provisioner.provisioner import Provisioner
 from bizniz.quality_engineer.agent import QualityEngineer
+from bizniz.sidecars import ensure_sidecars_built
 from bizniz.workspace.local_workspace import LocalWorkspace
 
 
@@ -162,6 +163,13 @@ def _new_job_id() -> str:
 
 
 def _build_pipeline(args, on_status) -> V2Pipeline:
+    # Sidecar preflight: every test run depends on bizniz-test-pytest
+    # (and bizniz-test-playwright for frontend). Build them up front
+    # rather than lazy-on-first-call so the failure mode is "pipeline
+    # halts at startup with a clear message" instead of "Coder iter 12
+    # mysteriously fails to run tests."
+    ensure_sidecars_built(on_status=on_status)
+
     config = BiznizConfig.find_and_load()
 
     planner_client = _client_for(config.planner_model or config.architect_model, "planner")

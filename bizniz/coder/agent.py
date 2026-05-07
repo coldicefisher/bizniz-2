@@ -88,6 +88,28 @@ class Coder(ToolLoopAgent):
     def tool_handlers(self) -> Dict[str, ToolHandler]:
         return self._handlers
 
+    def _log_action(self, agent_name, action_type, action, turn=None, total=None):
+        """Override to prefix every action log with ``[service:issue_id
+        iter N/M]`` so the user can see which issue is grinding and
+        how many iterations it has left."""
+        bits = []
+        for key in ("path", "url", "command"):
+            v = action.get(key)
+            if v:
+                v_str = str(v)
+                if len(v_str) > 80:
+                    v_str = v_str[:77] + "..."
+                bits.append(f"{key}={v_str!r}")
+        suffix = f" ({', '.join(bits)})" if bits else ""
+
+        scope = f"{self._target_service}"
+        if self._issue is not None:
+            scope = f"{self._target_service}:{self._issue.id}"
+        iter_str = ""
+        if turn is not None and total is not None:
+            iter_str = f" iter {turn}/{total}"
+        self._log(f"[{scope}{iter_str}] {action_type}{suffix}")
+
     def parse_terminal_action(self, action: dict) -> CoderResult:
         if self._issue is None:
             raise CoderError("submit_code reached without an active issue")

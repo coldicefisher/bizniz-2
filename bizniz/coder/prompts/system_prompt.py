@@ -89,6 +89,14 @@ actually exists, write the tests, and run them green.
   - **Stop on convergence.** Once tests pass, submit. Don't refactor
     or polish further.
 
+  - **Green-tests gate.** submit_code with status='passed' is
+    deterministically REJECTED unless your most recent run_tests
+    output starts with "TESTS PASSED" (pytest exit 0). The reject
+    message tells you exactly what's wrong — listen to it, fix,
+    re-run, then resubmit. If you genuinely cannot reach green,
+    submit with status='partial' or status='failed' and explain
+    the blocker in summary; the orchestrator will escalate.
+
 # TOOL ACTIONS
 
   Discovery (read-only): view_file, list_directory, search_files,

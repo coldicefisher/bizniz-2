@@ -296,7 +296,10 @@ class ToolLoopAgent(ABC):
                 })
                 continue
 
-            self._log_action(agent_name, action_type, action)
+            self._log_action(
+                agent_name, action_type, action,
+                turn=turn, total=self._tool_iterations,
+            )
 
             # Stall detection. Signature is the action dict minus
             # ``thinking`` (free-text reasoning that varies legitimately
@@ -385,11 +388,19 @@ class ToolLoopAgent(ABC):
             )
         return kept
 
-    def _log_action(self, agent_name: str, action_type: str, action: dict) -> None:
+    def _log_action(
+        self,
+        agent_name: str,
+        action_type: str,
+        action: dict,
+        turn: Optional[int] = None,
+        total: Optional[int] = None,
+    ) -> None:
         """One-line action log. Subclasses can override for richer logging.
 
-        Default formatting: include path / service / command / url if
-        present, since those are the most informative bits at a glance.
+        Default formatting: include the iteration counter (so the user
+        can see grind progress vs. silence) and the most informative
+        action fields at a glance.
         """
         bits = []
         for key in ("service", "path", "url", "command"):
@@ -400,7 +411,10 @@ class ToolLoopAgent(ABC):
                     v_str = v_str[:77] + "..."
                 bits.append(f"{key}={v_str!r}")
         suffix = f" ({', '.join(bits)})" if bits else ""
-        self._log(f"{agent_name}: {action_type}{suffix}")
+        prefix = ""
+        if turn is not None and total is not None:
+            prefix = f"[iter {turn}/{total}] "
+        self._log(f"{prefix}{agent_name}: {action_type}{suffix}")
 
     def _call_llm(
         self,
