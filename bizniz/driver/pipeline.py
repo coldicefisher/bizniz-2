@@ -508,47 +508,99 @@ class V2Pipeline:
         # No-op when no FA URL is set (projects without auth).
         self._wait_for_fusionauth(timeout_s=120)
 
-    def _wait_for_fusionauth(self, *, timeout_s: int = 120) -> None:
-        """Poll the FusionAuth host until it answers the version
-        endpoint or the timeout elapses. Logs progress every 5s. Does
-        NOT halt on timeout — AuthAgent's audit will catch genuinely-
-        broken FA, and the gate will fire cleanly there. This is a
-        readiness convenience, not a correctness gate.
+    def _wait_for_fusionauth(self, *, timeout_s: int = 600) -> None:
+        """Poll FusionAuth until the api_key actually authenticates,
+        or the deadline expires. Two-stage check (mirrors the v1
+        FusionAuthOrchestrator.wait_until_fully_ready pattern):
+
+          1. /api/status returns 200 — HTTP server is up
+          2. /api/application with the Authorization: <api_key> header
+             returns 200 — kickstart has processed the apiKeys block
+             and the orchestrator's key actually works
+
+        Stage 1 is necessary but not sufficient; FA reports healthy
+        before kickstart finishes. Stage 2 is the real readiness
+        signal — without it, AuthAgent's preflight (and the LLM's
+        first apiKey call) hits 401/connection-reset and gives up.
+
+        5-second polls, 10-minute default deadline. Generous because
+        FA on a slow machine + a fresh kickstart can take 30-60s. We'd
+        rather wait than burn an AuthAgent run on a connection reset
+        that costs 18-23 LLM calls in an idempotent retry loop.
+
+        Re-reads .env from the project's infra/development first —
+        the .env doesn't exist when the pipeline starts on a fresh
+        project (provisioner writes it), so the FA URL+key live there
+        but not in os.environ.
         """
         import os
         import time
         import urllib.request
         import urllib.error
 
+        # Re-seed FUSIONAUTH_* from the just-written .env. _build_pipeline's
+        # initial seed runs at startup before provision, so on a fresh
+        # project the env is empty until now.
+        slug = self._project_name
+        env_path = (
+            Path(os.environ.get("BIZNIZ_PROJECTS_ROOT")
+                 or str(Path.home() / "bizniz_projects"))
+            / slug / "infra" / "development" / ".env"
+        )
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if line.startswith("FUSIONAUTH_") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k, v.strip())
+
         fa_url = os.environ.get("FUSIONAUTH_HOST_URL")
+        api_key = os.environ.get("FUSIONAUTH_API_KEY") or ""
         if not fa_url:
             return
+
         deadline = time.time() + timeout_s
+        start = time.time()
         last_log = 0.0
+        stage_1_done = False
+
         while time.time() < deadline:
             try:
-                req = urllib.request.Request(
-                    f"{fa_url.rstrip('/')}/api/status",
-                    method="GET",
-                )
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    if 200 <= resp.status < 500:
-                        self._log(
-                            f"V2Pipeline: FusionAuth ready at {fa_url} "
-                            f"(after {int(time.time() - (deadline - timeout_s))}s)"
-                        )
-                        return
-            except (urllib.error.URLError, ConnectionError, OSError):
+                # Stage 1: HTTP server up
+                if not stage_1_done:
+                    req = urllib.request.Request(
+                        f"{fa_url.rstrip('/')}/api/status", method="GET",
+                    )
+                    with urllib.request.urlopen(req, timeout=3) as resp:
+                        if resp.status == 200:
+                            stage_1_done = True
+                # Stage 2: api_key works
+                if stage_1_done:
+                    req = urllib.request.Request(
+                        f"{fa_url.rstrip('/')}/api/application", method="GET",
+                    )
+                    if api_key:
+                        req.add_header("Authorization", api_key)
+                    with urllib.request.urlopen(req, timeout=3) as resp:
+                        if resp.status == 200:
+                            self._log(
+                                f"V2Pipeline: FusionAuth fully ready at "
+                                f"{fa_url} (after {int(time.time() - start)}s)"
+                            )
+                            return
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    ConnectionError, OSError):
                 pass
             now = time.time()
             if now - last_log > 5:
+                stage = "api_key" if stage_1_done else "http server"
                 self._log(
-                    f"V2Pipeline: waiting for FusionAuth at {fa_url}..."
+                    f"V2Pipeline: waiting for FusionAuth at {fa_url} "
+                    f"({stage}; {int(now - start)}s elapsed)..."
                 )
                 last_log = now
-            time.sleep(1)
+            time.sleep(5)
         self._log(
-            f"V2Pipeline: FusionAuth not reachable at {fa_url} after "
+            f"V2Pipeline: FusionAuth not fully ready at {fa_url} after "
             f"{timeout_s}s — proceeding anyway (audit will catch)"
         )
 

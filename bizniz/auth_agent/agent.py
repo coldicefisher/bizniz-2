@@ -439,43 +439,68 @@ class AuthAgent(ToolLoopAgent):
         pipeline gate will halt the run before code generation. Defense
         in depth: best-effort here, hard-gate later.
         """
-        try:
-            from bizniz.auth_orchestrators.kickstart import _deterministic_uuid
-            key_id = _deterministic_uuid("signing-key", primary_app_id)
-            self._log(
-                f"AuthAgent: preflight — ensuring RS256 signing key "
-                f"{key_id} bound to app {primary_app_id} + tenant {tenant_id}"
-            )
-            self._fa_orchestrator.generate_signing_key(
-                key_id=key_id,
-                name=f"bizniz-app-{primary_app_id}-rs256",
-                algorithm="RS256",
-                length=2048,
-            )
-            # Try tenant-level binding first (audit looks here). May
-            # fail on fresh tenants due to FA's blank/duplicate name
-            # validator — log and continue, app-level still works.
+        # Retry the whole sequence on transient connection errors. The
+        # pipeline-level FA readiness wait normally handles this, but
+        # FA can also drop the very first connection right after coming
+        # up — this catches the residual race.
+        import time as _time
+        last_exc = None
+        for attempt in range(3):
             try:
-                self._fa_orchestrator.set_tenant_signing_key(
-                    tenant_id=tenant_id, key_id=key_id,
+                from bizniz.auth_orchestrators.kickstart import _deterministic_uuid
+                key_id = _deterministic_uuid("signing-key", primary_app_id)
+                if attempt == 0:
+                    self._log(
+                        f"AuthAgent: preflight — ensuring RS256 signing "
+                        f"key {key_id} bound to app {primary_app_id} + "
+                        f"tenant {tenant_id}"
+                    )
+                else:
+                    self._log(
+                        f"AuthAgent: preflight retry {attempt}/2 after "
+                        f"transient error: {type(last_exc).__name__}"
+                    )
+                self._fa_orchestrator.generate_signing_key(
+                    key_id=key_id,
+                    name=f"bizniz-app-{primary_app_id}-rs256",
+                    algorithm="RS256",
+                    length=2048,
                 )
+                # Try tenant-level binding first (audit looks here). May
+                # fail on fresh tenants due to FA's blank/duplicate name
+                # validator — log and continue, app-level still works.
+                try:
+                    self._fa_orchestrator.set_tenant_signing_key(
+                        tenant_id=tenant_id, key_id=key_id,
+                    )
+                except Exception as e:
+                    self._log(
+                        f"AuthAgent: preflight tenant binding skipped "
+                        f"({type(e).__name__}: {str(e)[:120]}) — "
+                        f"falling back to app-level"
+                    )
+                # Always bind at the application level. This is what
+                # actually issues RS256 tokens at /api/login time.
+                self._fa_orchestrator.set_application_signing_key(
+                    app_id=primary_app_id, key_id=key_id,
+                )
+                return
             except Exception as e:
-                self._log(
-                    f"AuthAgent: preflight tenant binding skipped "
-                    f"({type(e).__name__}: {str(e)[:120]}) — "
-                    f"falling back to app-level"
+                last_exc = e
+                # Connection-level errors are retryable; everything
+                # else is a real misconfiguration.
+                msg = str(e).lower()
+                is_transient = (
+                    "connection" in msg or "unreachable" in msg
+                    or "timeout" in msg or "reset" in msg
                 )
-            # Always bind at the application level. This is what
-            # actually issues RS256 tokens at /api/login time.
-            self._fa_orchestrator.set_application_signing_key(
-                app_id=primary_app_id, key_id=key_id,
-            )
-        except Exception as e:
-            # Don't break the run — let the audit catch and halt cleanly.
-            self._log(
-                f"AuthAgent: preflight RS256 binding raised "
-                f"{type(e).__name__}: {e} (audit will catch)"
-            )
+                if not is_transient or attempt == 2:
+                    self._log(
+                        f"AuthAgent: preflight RS256 binding raised "
+                        f"{type(e).__name__}: {e} (audit will catch)"
+                    )
+                    return
+                _time.sleep(2 + attempt * 3)  # 2s, 5s
 
     def _run_audit_battery(
         self,
