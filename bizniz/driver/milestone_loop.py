@@ -495,9 +495,21 @@ class MilestoneLoop:
             state.mark_phase(target, spec)
 
         elif target == SubPhase.IMPLEMENT:
-            result = self._phase_implement(
-                milestone, architecture, spec, auth_contract, prior_list,
+            # Mirror _run_full's IMPLEMENT branch: stash the per-
+            # milestone store on self so _phase_implement_with_escalation
+            # passes it to the dispatcher (where skip_planning needs
+            # it to be non-None to honor --retry-failed).
+            store_for_implement = (
+                self._issue_store_factory(state.milestone_index)
+                if self._issue_store_factory is not None else None
             )
+            self._current_milestone_store = store_for_implement
+            try:
+                result = self._phase_implement(
+                    milestone, architecture, spec, auth_contract, prior_list,
+                )
+            finally:
+                self._current_milestone_store = None
             state.mark_phase(target, result)
 
         elif target in (SubPhase.REVIEW_INITIAL, SubPhase.REVIEW_FINAL):
