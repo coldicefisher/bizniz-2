@@ -27,6 +27,7 @@ from bizniz.code_reviewer.agent import CodeReviewer
 from bizniz.code_reviewer.types import CodeReviewReport
 from bizniz.driver.gates import GatePolicy, GateViolation
 from bizniz.driver.integration_phase import IntegrationPhase, IntegrationPhaseResult
+from bizniz.driver.milestone_code_dispatcher import MilestoneCodeDispatcher
 from bizniz.driver.state import MilestoneState, SubPhase, next_subphase
 from bizniz.engineer.agent import Engineer
 from bizniz.engineer.types import EngineerResult
@@ -82,6 +83,7 @@ class MilestoneLoop:
         repair_budget: int = 3,
         repair_engineer_factory: Optional[Callable[[int], Engineer]] = None,
         engineer_escalation_factory: Optional[Callable[[int], Engineer]] = None,
+        code_dispatcher: Optional[MilestoneCodeDispatcher] = None,
         cost_tracker=None,
         workspace_summary: Optional[str] = None,
         on_status: Optional[Callable[[str], None]] = None,
@@ -100,6 +102,10 @@ class MilestoneLoop:
         # Escalation factory for IMPLEMENT (called on stall detection).
         # Tier 0 = the default engineer; tier N>0 = next-tier model.
         self._engineer_escalation_factory = engineer_escalation_factory
+        # v2.5 dispatcher — when set, supersedes the v2 Engineer for the
+        # IMPLEMENT phase. Repair phases still use the v2 Engineer until
+        # the v2.5 review-and-repair path is built.
+        self._code_dispatcher = code_dispatcher
         self._cost_tracker = cost_tracker
         self._workspace_summary = workspace_summary
         self._on_status = on_status
@@ -547,10 +553,26 @@ class MilestoneLoop:
     def _phase_implement_with_escalation(
         self, milestone, architecture, spec, auth_contract, prior_list,
     ) -> EngineerResult:
-        """Try implement on the default Engineer. On stall, escalate
+        """Run the IMPLEMENT phase.
+
+        v2.5 path: if a ``code_dispatcher`` was injected, route through
+        ServicePlanner → Orchestrator → Coder. Stall handling is
+        per-issue inside the Orchestrator, so we don't wrap this branch
+        in the escalation loop below.
+
+        v2 path (fallback): try the default Engineer; on stall, escalate
         through ``engineer_escalation_factory`` tiers (1, 2, ...) until
         one converges or we exhaust the chain.
         """
+        if self._code_dispatcher is not None:
+            self._log("MilestoneLoop: implement via v2.5 code dispatcher")
+            return self._code_dispatcher.run(
+                architecture=architecture,
+                enriched_spec=spec,
+                auth_contract=auth_contract,
+                workspace_summary=self._workspace_summary,
+            )
+
         # Tier 0 = self._engineer (default model).
         attempt = 0
         last_engineer = self._engineer

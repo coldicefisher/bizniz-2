@@ -103,6 +103,7 @@ def _build_loop(
     *,
     engineer=None, qe=None, cr=None, integration=None,
     workspace=None, gates=None, factory=None, tracker=None,
+    code_dispatcher=None,
 ):
     eng = engineer or MagicMock()
     qe_m = qe or MagicMock()
@@ -123,6 +124,7 @@ def _build_loop(
         project_root=Path("/p"),
         repair_budget=3,
         repair_engineer_factory=factory,
+        code_dispatcher=code_dispatcher,
         cost_tracker=tracker,
     )
 
@@ -596,6 +598,67 @@ class TestSinglePhase:
         assert outcome.final_subphase == SubPhase.INTEGRATION_API
         ip.run_api.assert_called_once()
         ip.run_web.assert_not_called()
+
+
+class TestCodeDispatcher:
+    """v2.5 path: when code_dispatcher is provided, it supersedes the
+    v2 Engineer for the IMPLEMENT phase."""
+
+    def test_dispatcher_supersedes_engineer_implement(self, tmp_path):
+        eng = MagicMock()
+        eng.implement.return_value = _engineer_result()
+        dispatcher = MagicMock()
+        dispatcher.run.return_value = _engineer_result()
+        qe = MagicMock()
+        qe.enrich.return_value = _spec()
+        qe.review.return_value = _coverage(approved=True)
+        cr = MagicMock()
+        cr.review.return_value = _code_review(approved=True)
+        ip = MagicMock()
+        ip.run_api.return_value = _integration_result(passed=True, phase="api")
+        ip.run_worker.return_value = _integration_result(passed=True, phase="worker")
+        ip.run_web.return_value = _integration_result(passed=True, phase="web")
+
+        loop = _build_loop(
+            engineer=eng, qe=qe, cr=cr, integration=ip,
+            code_dispatcher=dispatcher,
+        )
+        state = MilestoneState(tmp_path / "m1", 1)
+
+        outcome = loop.run(
+            milestone=_milestone(), architecture=_arch(),
+            prior_specs=[], auth_contract=None, state=state,
+        )
+        assert outcome.final_subphase == SubPhase.DONE
+        # v2.5 dispatcher used; v2 Engineer.implement bypassed.
+        dispatcher.run.assert_called_once()
+        eng.implement.assert_not_called()
+
+    def test_dispatcher_receives_spec_and_arch(self, tmp_path):
+        dispatcher = MagicMock()
+        dispatcher.run.return_value = _engineer_result()
+        qe = MagicMock()
+        qe.enrich.return_value = _spec()
+        qe.review.return_value = _coverage(approved=True)
+        cr = MagicMock()
+        cr.review.return_value = _code_review(approved=True)
+        ip = MagicMock()
+        ip.run_api.return_value = _integration_result(passed=True, phase="api")
+        ip.run_worker.return_value = _integration_result(passed=True, phase="worker")
+        ip.run_web.return_value = _integration_result(passed=True, phase="web")
+
+        loop = _build_loop(
+            qe=qe, cr=cr, integration=ip, code_dispatcher=dispatcher,
+        )
+        state = MilestoneState(tmp_path / "m1", 1)
+        loop.run(
+            milestone=_milestone(), architecture=_arch(),
+            prior_specs=[], auth_contract="JWT", state=state,
+        )
+        kwargs = dispatcher.run.call_args.kwargs
+        assert kwargs["architecture"].project_name == "P"
+        assert kwargs["enriched_spec"].milestone_name == "M1"
+        assert kwargs["auth_contract"] == "JWT"
 
 
 class TestMergeRepairReport:

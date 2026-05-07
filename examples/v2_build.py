@@ -32,14 +32,18 @@ from bizniz.code_reviewer.agent import CodeReviewer
 from bizniz.config.bizniz_config import BiznizConfig
 from bizniz.cost import get_tracker
 from bizniz.cost.ledger import CostLedger, get_default_ledger_path
+from bizniz.coder.agent import Coder
 from bizniz.driver.gates import GatePolicy
 from bizniz.driver.integration_phase import IntegrationPhase
+from bizniz.driver.milestone_code_dispatcher import MilestoneCodeDispatcher
 from bizniz.driver.milestone_loop import MilestoneLoop
 from bizniz.driver.pipeline import V2Pipeline
 from bizniz.driver.state import RunState
 from bizniz.agents.debugger.agentic import AgenticDebugger
 from bizniz.engineer.agent import Engineer
 from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
+from bizniz.lib.model_progression import ModelProgression
+from bizniz.service_planner.agent import ServicePlanner
 from bizniz.integration.http_api_tester import HTTPApiTester
 from bizniz.integration.web_ui_tester import WebUITester
 from bizniz.integration.worker_tester import WorkerTester
@@ -235,6 +239,42 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
             on_status=on_status,
         )
 
+    # ── v2.5 dispatcher wiring ────────────────────────────────────────
+    # ServicePlanner: shared client (planner-tier reasoning, single call
+    # per service per milestone). Coder: per-tier client built fresh.
+    # Progression: per-service fresh ModelProgression so escalation in
+    # one service doesn't leak to another.
+    sp_client = _client_for(
+        getattr(config, "planner_model", None) or config.architect_model,
+        "service_planner",
+    )
+
+    def service_planner_factory(_service):
+        return ServicePlanner(client=sp_client, on_status=on_status)
+
+    def coder_factory(model: str, service):
+        return Coder(
+            client=_client_for(model, f"coder:{service.name}"),
+            workspace=workspace_for_service(service.workspace_name),
+            compose_path=compose_path,
+            target_service=service.name,
+            on_status=on_status,
+        )
+
+    coder_tiers = list(
+        getattr(config, "coder_models", []) or [config.engineer_model]
+    )
+
+    def progression_factory(_service):
+        return ModelProgression(list(coder_tiers))
+
+    code_dispatcher = MilestoneCodeDispatcher(
+        service_planner_factory=service_planner_factory,
+        coder_factory=coder_factory,
+        progression_factory=progression_factory,
+        on_status=on_status,
+    )
+
     def http_tester_factory(workspace):
         return HTTPApiTester(client=tester_client, workspace=workspace)
 
@@ -327,6 +367,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         repair_budget=len(repair_tiers),
         repair_engineer_factory=repair_engineer_factory,
         engineer_escalation_factory=engineer_escalation_factory,
+        code_dispatcher=code_dispatcher,
         cost_tracker=cost_tracker,
         workspace_summary=workspace_summary,
         on_status=on_status,
