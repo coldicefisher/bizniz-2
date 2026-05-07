@@ -11,7 +11,7 @@ from bizniz.clients.chatgpt.chatgpt_client_config import ChatGPTClientConfig
 # a single model per agent (no in-agent escalation). Keeping the
 # import + factory methods working until v2 entry points land so
 # the config module itself doesn't fail to load.
-from bizniz._deprecated.orchestrator.model_progression import ModelProgression
+from bizniz.lib.model_progression import ModelProgression
 
 
 CLAUDE_MODEL_PREFIXES = ("claude-",)

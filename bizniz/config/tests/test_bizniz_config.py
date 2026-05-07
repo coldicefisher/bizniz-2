@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from bizniz.config.bizniz_config import BiznizConfig
-from bizniz._deprecated.orchestrator.model_progression import ModelProgression
+from bizniz.lib.model_progression import ModelProgression
 
 
 # Minimum viable per-agent model lists for tests that don't care about
