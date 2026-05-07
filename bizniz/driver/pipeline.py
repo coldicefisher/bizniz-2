@@ -431,6 +431,18 @@ class V2Pipeline:
             tenant_id=_resolve_fa_tenant_id(),
         )
 
+        # Gate on AuthAgent crash-before-submit. AuthAgent.configure
+        # synthesizes an empty-contract result if the tool loop stalls
+        # / errors so the audit can still run, but downstream code
+        # generation has nothing useful to consume — halt.
+        if not result.contract_markdown:
+            self._state.mark_top_phase(TopPhase.AUTH, result)
+            self._gates.hard(
+                "auth_agent_crashed",
+                f"AuthAgent.configure returned without a contract — "
+                f"summary: {(result.summary or '(no summary)')[:300]}",
+            )
+
         # Gate on critical audit checks. AuthAgent's tool-loop submission
         # is self-reported, so we trust the deterministic post-loop
         # battery — not the agent's own claim of success. A failure on
@@ -487,6 +499,58 @@ class V2Pipeline:
             self._gates.hard("docker_unavailable", "docker not on PATH")
         except subprocess.TimeoutExpired:
             self._gates.hard("compose_up_timeout", "docker compose up timed out (10m)")
+
+        # FusionAuth readiness wait. compose-up reports rc=0 as soon as
+        # containers are STARTED, but FA's HTTP API takes ~5–15s after
+        # the container starts to become reachable. AuthAgent's
+        # preflight runs immediately after compose_up returns, so
+        # without this wait the very first FA call hits ConnectionReset.
+        # No-op when no FA URL is set (projects without auth).
+        self._wait_for_fusionauth(timeout_s=120)
+
+    def _wait_for_fusionauth(self, *, timeout_s: int = 120) -> None:
+        """Poll the FusionAuth host until it answers the version
+        endpoint or the timeout elapses. Logs progress every 5s. Does
+        NOT halt on timeout — AuthAgent's audit will catch genuinely-
+        broken FA, and the gate will fire cleanly there. This is a
+        readiness convenience, not a correctness gate.
+        """
+        import os
+        import time
+        import urllib.request
+        import urllib.error
+
+        fa_url = os.environ.get("FUSIONAUTH_HOST_URL")
+        if not fa_url:
+            return
+        deadline = time.time() + timeout_s
+        last_log = 0.0
+        while time.time() < deadline:
+            try:
+                req = urllib.request.Request(
+                    f"{fa_url.rstrip('/')}/api/status",
+                    method="GET",
+                )
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    if 200 <= resp.status < 500:
+                        self._log(
+                            f"V2Pipeline: FusionAuth ready at {fa_url} "
+                            f"(after {int(time.time() - (deadline - timeout_s))}s)"
+                        )
+                        return
+            except (urllib.error.URLError, ConnectionError, OSError):
+                pass
+            now = time.time()
+            if now - last_log > 5:
+                self._log(
+                    f"V2Pipeline: waiting for FusionAuth at {fa_url}..."
+                )
+                last_log = now
+            time.sleep(1)
+        self._log(
+            f"V2Pipeline: FusionAuth not reachable at {fa_url} after "
+            f"{timeout_s}s — proceeding anyway (audit will catch)"
+        )
 
     # ── Misc ────────────────────────────────────────────────────────────
 

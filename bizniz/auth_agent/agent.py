@@ -179,7 +179,26 @@ class AuthAgent(ToolLoopAgent):
             existing_contract=existing_contract,
         )
 
-        result: AuthAgentResult = self.run(initial)
+        try:
+            result: AuthAgentResult = self.run(initial)
+        except Exception as e:
+            # Stalled / bad-response / timeout / etc. Don't propagate —
+            # synthesize a stub result with empty contract so the audit
+            # battery still runs and the pipeline gates cleanly on
+            # auth_audit_failed instead of crashing with a traceback.
+            self._log(
+                f"AuthAgent: tool loop failed ({type(e).__name__}: "
+                f"{str(e)[:200]}) — proceeding to audit on current state"
+            )
+            result = AuthAgentResult(
+                mode=mode,
+                contract_markdown="",
+                summary=(
+                    f"AuthAgent.{mode} crashed before submit_contract: "
+                    f"{type(e).__name__}: {str(e)[:200]}"
+                ),
+                applied_changes=[],
+            )
 
         # Post-loop reconciliation (configure mode only). The LLM's
         # contract_markdown is the source of truth for which test users
