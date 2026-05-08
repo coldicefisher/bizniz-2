@@ -294,6 +294,24 @@ class ToolLoopAgent(ABC):
                         f"{', '.join(sorted(handlers.keys()) + [terminal])}."
                     ),
                 })
+                # Count repeated unknown/empty actions so the loop
+                # doesn't burn the full iter budget when the model
+                # gets stuck emitting blank actions. v33 round 7
+                # lesson: flash-lite emitted ``action=''`` for 10+
+                # consecutive turns at ~1 min/turn; without this
+                # signature, ``recent_actions`` stayed empty and stall
+                # never fired.
+                recent_actions.append(f"__unknown__:{action_type}")
+                stall_count = sum(
+                    1 for s in recent_actions
+                    if s.startswith("__unknown__:")
+                )
+                if stall_count >= self._stall_threshold:
+                    raise ToolLoopAgentStalledError(
+                        f"{agent_name}: stalled — "
+                        f"emitted {stall_count} unknown/empty actions in "
+                        f"{len(recent_actions)} iterations"
+                    )
                 continue
 
             self._log_action(

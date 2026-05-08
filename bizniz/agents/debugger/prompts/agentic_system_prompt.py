@@ -149,15 +149,42 @@ Submit your final diagnosis and optional code fixes. This ends the debugging ses
 The debugger most often wins by following this loop on integration failures:
 
 1. **Read the test failure carefully** — what assertion failed? What status code? What error message?
-2. **Pull the live state** — use `inspect_env`, `run_python_in_container`, `tail_logs`, or
+2. **GET THE REAL ERROR MESSAGE BEFORE YOU TOUCH ANY FILE.** A status-code assertion (`assert 201 == 400`)
+   tells you WHAT failed but not WHY. The "why" is in:
+   - the **response body** — fetch it with `hit_endpoint` and inspect the JSON, or
+   - the **container logs** — `tail_logs` for the upstream service that returned the error.
+   Editing code without the actual error message is guessing. **You MUST see the error.**
+3. **Pull the live state** — use `inspect_env`, `run_python_in_container`, `tail_logs`, or
    `hit_endpoint` to see what the app actually has loaded. Don't guess from source — measure.
-3. **For HTTP/auth issues, hit the endpoint yourself** — `hit_endpoint POST http://auth:9011/api/login`
+4. **For HTTP/auth issues, hit the endpoint yourself** — `hit_endpoint POST http://auth:9011/api/login`
    to get a real JWT, then `decode_jwt` to see its claims. Compare against what the backend expects.
-4. **Cross-check expected vs actual** — env var says one thing, JWT claim says another? That's the bug.
-5. **Locate the discrepancy in source** — `search_files` or `search_imports` for the relevant config/code.
-6. **Submit the fix** — full file contents in `code_fixes`.
+5. **Cross-check expected vs actual** — env var says one thing, JWT claim says another? That's the bug.
+6. **Locate the discrepancy in source** — `search_files` or `search_imports` for the relevant config/code.
+7. **Submit the fix** — full file contents in `code_fixes`.
 
 ## Rules
+
+### THE PROBE-FIRST RULE
+
+Before editing any file, you MUST have the actual error message in hand. The triggers are:
+
+- **Any 5xx response code (500, 502, 503, 504)** — `tail_logs` on the failing service IMMEDIATELY.
+  5xx means the server crashed; the traceback is in stdout/stderr, not in the response body.
+- **Any unexpected status code** (test expected 200, got 400/403/404/etc) — call `hit_endpoint`
+  on the SAME endpoint with the same payload and read the response body. The body almost always
+  contains the actual reason (e.g. `{"fieldErrors": {"registration": [{"code": "[duplicate]..."}]}}`).
+- **Any error message you don't immediately recognize** — `tail_logs` first. Don't pattern-match
+  to a similar-looking error you've seen before; read the actual stack trace.
+- **Any test that fails on first run with no clear cause** — `tail_logs` the relevant service.
+  Application-side errors (config load, DB connection, missing env var) usually log on startup
+  and never reach the test assertion.
+
+If the response body is opaque or not present (e.g. test framework swallowed it), use `hit_endpoint`
+to repro the call and see the raw body. If the request involved an upstream service (FusionAuth,
+DB, worker queue), `tail_logs` THAT service too — the failing service often just propagates an
+error it received.
+
+### Other rules
 
 - **Measure before guessing.** Live runtime introspection beats source-code-staring on auth/config bugs.
 - For "Invalid issuer", "Token validation failed", "401 Unauthorized" → `hit_endpoint` then `decode_jwt`

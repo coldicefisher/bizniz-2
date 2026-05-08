@@ -215,6 +215,11 @@ def repair_integration_failure(
         last_output = (
             f"=== AUTH CONTRACT (FusionAuth is configured — skeleton auth files "
             f"MAY be modified to match this contract) ===\n"
+            f"This is the canonical FusionAuth reference for this project. "
+            f"Endpoints, test users, password rules, JWT validation — copy "
+            f"the EXACT shapes shown when fixing auth-related code. Do NOT "
+            f"guess FA API paths from memory; the contract is the source "
+            f"of truth.\n\n"
             f"{auth_contract}\n\n"
             f"{last_output}"
         )

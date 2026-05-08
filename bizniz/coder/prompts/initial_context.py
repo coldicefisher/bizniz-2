@@ -80,6 +80,12 @@ def build_coder_initial_context(
 
     if auth_contract:
         parts.append("\n## Auth contract\n")
+        parts.append(
+            "**This is your canonical FusionAuth reference.** Endpoints, "
+            "test users, password rules, JWT validation — copy the EXACT "
+            "shapes shown below when your code touches auth. Do NOT guess "
+            "FA API paths from memory; the contract is the source of truth.\n\n"
+        )
         parts.append("```markdown\n")
         parts.append(auth_contract.strip() + "\n")
         parts.append("```\n")
@@ -96,6 +102,12 @@ def build_coder_initial_context(
 
     if skeleton_md:
         parts.append("\n## SKELETON.md (conventions for this skeleton)\n")
+        parts.append(
+            "**This is your service's structural contract.** Read the "
+            "extension points and conventions before adding files. "
+            "Files outside the declared extension points are dead code "
+            "in the running container.\n\n"
+        )
         parts.append("```markdown\n")
         parts.append(skeleton_md.strip() + "\n")
         parts.append("```\n")

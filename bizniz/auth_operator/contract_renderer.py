@@ -86,4 +86,103 @@ def render_auth_contract(manifest: AuthManifest) -> str:
             )
         lines.append("")
 
+    # ── Deterministic FusionAuth API reference ──────────────────────────
+    # The code-samples section (LLM-generated, optional) covers idiomatic
+    # snippets. This block is the canonical fact sheet so engineers
+    # can't get the URL shape wrong even if samples are missing or
+    # ambiguous. Source of every "registered for application [X] / user
+    # [X] already exists" 400 is putting the app ID where the user ID
+    # goes — call this out unambiguously here.
+    lines.append("## FusionAuth API — endpoint reference")
+    lines.append("")
+    lines.append(
+        "Auth header for ALL admin calls below: "
+        "`Authorization: <FUSIONAUTH_API_KEY>` (raw API key, NOT "
+        "`Bearer ...`). Read the key from the `FUSIONAUTH_API_KEY` "
+        "env var. The API key is provisioned by the auth orchestrator "
+        "and injected into every service container."
+    )
+    lines.append("")
+    lines.append("### Login (issue a JWT for an existing user)")
+    lines.append("")
+    lines.append("- Method: `POST`")
+    lines.append("- URL: `http://auth:9011/api/login` (no path arg)")
+    lines.append("- No `Authorization` header required.")
+    lines.append(
+        "- Body: `{\"loginId\": \"<email>\", \"password\": \"...\", "
+        "\"applicationId\": \"" + str(manifest.primary_app_id) + "\"}`"
+    )
+    lines.append("- Returns: `{\"token\": \"<JWT>\", \"user\": {...}}`")
+    lines.append("")
+    lines.append("### Register a NEW user (combined create-user + register)")
+    lines.append("")
+    lines.append("- Method: `POST`")
+    lines.append(
+        "- URL: `http://auth:9011/api/user/registration` "
+        "(**no path argument**)"
+    )
+    lines.append("- Header: `Authorization: <FUSIONAUTH_API_KEY>`")
+    lines.append(
+        "- Body: `{\"user\": {\"email\": \"...\", \"password\": \"...\", "
+        "\"fullName\": \"...\"}, \"registration\": {\"applicationId\": "
+        "\"" + str(manifest.primary_app_id) + "\", \"roles\": "
+        "[\"<role>\"]}}`"
+    )
+    lines.append("- Returns: `{\"user\": {\"id\": \"<uuid>\", ...}, \"registration\": {...}}`")
+    lines.append("")
+    lines.append(
+        "**Pitfall — do NOT use the path-arg form for new users.** "
+        "`POST /api/user/registration/{userId}` registers an "
+        "**existing** user for an application; it requires the user "
+        "to already exist. Passing the app ID in that path slot "
+        "(common mistake — they're both UUIDs) returns 400 with "
+        "`{\"fieldErrors\":{\"registration\":[{\"code\":"
+        "\"[duplicate]registration\"...}]}}` and `userId` "
+        "echoed as the same UUID you sent. If you see that error, "
+        "switch to the no-path-arg URL above."
+    )
+    lines.append("")
+    lines.append("### Change a user's roles")
+    lines.append("")
+    lines.append("- Method: `PATCH`")
+    lines.append(
+        "- URL: `http://auth:9011/api/user/registration/{userId}` "
+        "(this IS the path-arg endpoint — for updates, not creation)"
+    )
+    lines.append("- Header: `Authorization: <FUSIONAUTH_API_KEY>`")
+    lines.append(
+        "- Body: `{\"registration\": {\"applicationId\": "
+        "\"" + str(manifest.primary_app_id) + "\", \"roles\": "
+        "[\"<role>\", ...]}}`"
+    )
+    lines.append("")
+    lines.append("### Password policy (default tenant settings)")
+    lines.append("")
+    lines.append(
+        "- Minimum length: 8 characters"
+    )
+    lines.append(
+        "- Required character classes: mixed case, digit, symbol"
+    )
+    lines.append(
+        "- Weak-password rejection: 400 with "
+        "`fieldErrors.user.password = [...]`"
+    )
+    lines.append(
+        "- Test-friendly password that passes: `Password123!`"
+    )
+    lines.append("")
+    lines.append("### Validate a JWT")
+    lines.append("")
+    lines.append(
+        "- Fetch JWKS from `http://auth:9011/.well-known/jwks.json` "
+        "(no auth header)."
+    )
+    lines.append(
+        f"- Decode with algorithms=`[\"{sk.algorithm}\"]`, "
+        f"audience=`{manifest.primary_app_id}`, "
+        f"issuer=`{manifest.issuer or '(see iss claim)'}`."
+    )
+    lines.append("")
+
     return "\n".join(lines).rstrip() + "\n"

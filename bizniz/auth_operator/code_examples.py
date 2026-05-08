@@ -37,7 +37,30 @@ For EACH language in the stack, emit one fenced code block per
 operation:
   - Login (POST /api/login → JWT token)
   - Decode / validate JWT (RS256 via JWKS)
-  - Use a logged-in user in an integration test
+  - **Register / create a user** (combined create-user-and-register
+    via ``POST /api/user/registration`` — body holds
+    ``user.email``, ``user.password``, and ``registration.applicationId``
+    + ``registration.roles``. CRITICAL: do NOT put a UUID in the URL
+    path; ``POST /api/user/registration/{userId}`` is a DIFFERENT
+    endpoint that registers an EXISTING user — passing the application
+    ID there triggers a "user already exists" 400 with the same UUID
+    echoed as both userId and registration target. The url
+    ``POST /api/user/registration`` with no path arg is the right
+    endpoint for new-user signup.)
+  - **Assign / change roles for a user** (PATCH the user's
+    registration: ``PATCH /api/user/registration/{userId}`` with body
+    ``{"registration": {"applicationId": "...", "roles": [...]}}``).
+  - **Use a logged-in user in an integration test**
+
+For password policy: FusionAuth's default minimum password length
+is 8, requires mixed case, number, and symbol. If you write a test
+that creates a user, the password MUST satisfy these rules
+(``Password123!`` works). A weak password returns 400 with
+``fieldErrors.user.password``.
+
+Auth API key header is ``Authorization: <api_key>`` (raw, no
+``Bearer ``). The api key is read from the
+``FUSIONAUTH_API_KEY`` env var inside service containers.
 
 Use the actual values from the manifest (URL, app_id, etc.). Use
 ``http://auth:9011`` as the URL when running inside the docker
@@ -107,8 +130,10 @@ def generate_code_examples(
         f"\n## Your job\n\n"
         f"Emit the ``## Code samples`` markdown section. One subsection "
         f"per language. Code blocks for: login, decode/validate JWT, "
-        f"integration-test usage. Reference the live URLs/IDs above. "
-        f"Use http://auth:9011 inside containers."
+        f"REGISTER a new user (POST /api/user/registration with no "
+        f"path arg), CHANGE a user's roles, integration-test usage. "
+        f"Reference the live URLs/IDs above. Use http://auth:9011 "
+        f"inside containers."
     )
 
     if on_status:

@@ -102,7 +102,14 @@ class Orchestrator:
                     skeleton_md=skeleton_md,
                 )
                 result.issues.append(outcome)
-                if not outcome.passed:
+                # Only mark as failed for dependency purposes if the
+                # issue actually FAILED. ``deferred`` is "intentionally
+                # not run" (e.g. work was absorbed into a sibling fix
+                # issue) and shouldn't block downstream issues. Real
+                # failures: failed/partial/stalled/errored/skipped.
+                # Treat ``deferred`` like ``passed``/``escalated`` for
+                # dep satisfaction.
+                if outcome.disposition not in ("passed", "escalated", "deferred"):
                     failed_ids.add(issue.id)
         return result
 

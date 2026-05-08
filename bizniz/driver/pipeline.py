@@ -589,6 +589,26 @@ class V2Pipeline:
                     f"V2Pipeline: failed to write AUTH_CONTRACT.md "
                     f"({type(e).__name__}: {e})"
                 )
+            # Also copy into each service's workspace so any agent that
+            # browses the workspace on disk (Coder via view_file,
+            # debugger probing files) can read the contract right next
+            # to the code. The Coder also gets it via initial-context
+            # injection — this is belt-and-suspenders for agents that
+            # discover-by-listing.
+            for svc in architecture.services:
+                if svc.service_type not in ("backend", "frontend", "worker"):
+                    continue
+                svc_root = self._project_root / svc.workspace_name
+                if not svc_root.exists():
+                    continue
+                try:
+                    (svc_root / "AUTH_CONTRACT.md").write_text(contract_md)
+                except Exception as e:
+                    self._log(
+                        f"V2Pipeline: failed to copy AUTH_CONTRACT.md "
+                        f"into {svc.workspace_name} "
+                        f"({type(e).__name__}: {e})"
+                    )
             self._emit_v2_contract_tests(manifest, architecture)
 
         # Stage 5 — gate on manifest. Deterministic checks.

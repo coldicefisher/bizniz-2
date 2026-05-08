@@ -53,6 +53,7 @@ def make_run_tests(
     target_service: str,
     base_url: Optional[str] = None,
     timeout_s: float = 180.0,
+    auxiliary_log_services: Optional[list] = None,
 ) -> ToolHandler:
     """Run pytest INSIDE the target service's running container.
 
@@ -76,6 +77,15 @@ def make_run_tests(
     up at the top of the pipeline guarantees this; if the container
     isn't running, the error is clear (``docker compose exec`` fails
     fast with a useful message).
+
+    On TEST FAILURE, this handler ALSO auto-appends container log
+    tails for ``target_service`` and any ``auxiliary_log_services``
+    (typically ``auth`` for FusionAuth, ``db`` for postgres). This is
+    the deterministic-context fix for v33 round 5: cheap-tier models
+    refuse to call ``tail_logs`` even when the system prompt commands
+    it (round-5 telemetry: 0 tail_logs across 27 iterations of a stuck
+    issue). Forcing the log context into the test output makes the
+    "why" of a failure impossible to ignore.
     """
     def handler(action: Dict) -> str:
         if not compose_path or not target_service:
@@ -115,12 +125,120 @@ def make_run_tests(
             return f"ERROR: run_tests failed: {type(e).__name__}: {e}"
 
         output = (proc.stdout or "") + (proc.stderr or "")
-        verdict = "TESTS PASSED" if proc.returncode == 0 else "TESTS FAILED"
-        return _truncate(
+        passed = proc.returncode == 0
+        verdict = "TESTS PASSED" if passed else "TESTS FAILED"
+        body = (
             f"{verdict}\n(exit code: {proc.returncode}, "
             f"ran inside service '{target_service}')\n\n{output}"
         )
+        if not passed:
+            body += _gather_failure_context(
+                compose_path=compose_path,
+                target_service=target_service,
+                aux_services=auxiliary_log_services or [],
+            )
+        return _truncate(body)
     return handler
+
+
+# ── Failure-context gathering ──────────────────────────────────────────
+
+
+def _gather_failure_context(
+    *,
+    compose_path: str,
+    target_service: str,
+    aux_services: list,
+    target_lines: int = 30,
+    aux_lines: int = 15,
+    max_chars: int = 6000,
+) -> str:
+    """Collect container logs for the target + auxiliary services
+    after a failed test run. Returns markdown-ish text appended to the
+    pytest output.
+
+    Why: cheap-tier models won't call ``tail_logs`` on their own (v33
+    round-5 telemetry: 0 of 21 failed runs prompted a ``tail_logs``
+    call, even with the rule explicit in the system prompt). Auto-
+    appending logs makes the "why" of a 4xx/5xx impossible to miss —
+    the Coder doesn't have to remember to ask.
+
+    The auxiliary services are the upstream dependencies whose error
+    responses the target service propagates: FusionAuth (``auth``)
+    for auth failures, postgres (``db``) for DB failures. A 400 from
+    an FA registration call shows up in the auth container's access
+    log even when the backend's own log only says "FA returned 400".
+
+    Best-effort: if any docker call fails or returns nothing, the
+    section is silently skipped — never break the run_tests result.
+    """
+    parts: list = []
+
+    # Target service logs — the failing service's own traceback +
+    # access log goes here.
+    target_logs = _tail_compose_logs(compose_path, target_service, target_lines)
+    if target_logs:
+        parts.append(
+            f"\n\n=== Container logs: {target_service} "
+            f"(last {target_lines} lines, auto-attached on failure) ===\n"
+            f"{target_logs}"
+        )
+
+    # Auxiliary services — auth, db, etc. Their error responses are
+    # often the actual reason the target failed.
+    for svc in aux_services:
+        if not svc or svc == target_service:
+            continue
+        svc_logs = _tail_compose_logs(compose_path, svc, aux_lines)
+        if svc_logs:
+            parts.append(
+                f"\n\n=== Container logs: {svc} "
+                f"(upstream — last {aux_lines} lines) ===\n"
+                f"{svc_logs}"
+            )
+
+    if not parts:
+        return ""
+    parts.insert(0, "\n\n--- AUTO-APPENDED FAILURE CONTEXT ---")
+    parts.append(
+        "\n\n--- end auto-context ---\n"
+        "Read the logs above before editing. The actual error "
+        "(traceback, upstream 4xx/5xx body, missing env var) is "
+        "almost always there. If the response body of an upstream "
+        "call is still unclear, use ``hit_endpoint`` to repro the "
+        "request and read the response directly."
+    )
+    full = "".join(parts)
+    # Cap total bytes to keep history compact across many iterations.
+    # v33 round 7 lesson: 80+40+40 lines blew context past flash-lite's
+    # tolerance and the model started returning empty actions after
+    # iter 18. Tight per-call cap keeps the signal without bloat.
+    if len(full) > max_chars:
+        full = full[:max_chars] + (
+            f"\n... (auto-context truncated to {max_chars} chars; "
+            f"use ``tail_logs`` for more)"
+        )
+    return full
+
+
+def _tail_compose_logs(
+    compose_path: str, service: str, lines: int
+) -> Optional[str]:
+    """``docker compose logs --tail N --no-color <svc>``. Returns the
+    captured output or None on any failure."""
+    cmd = [
+        "docker", "compose", "-f", compose_path,
+        "logs", "--tail", str(lines), "--no-color", service,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return None
+    out = (proc.stdout or "") + (proc.stderr or "")
+    out = out.strip()
+    return out or None
 
 
 # ── smoke_import ───────────────────────────────────────────────────────
@@ -194,11 +312,22 @@ def build_test_handlers(
     target_service: str,
     base_url: Optional[str] = None,
     timeout_s: float = 180.0,
+    auxiliary_log_services: Optional[list] = None,
 ) -> Dict[str, ToolHandler]:
     """Standard test-execution toolkit: run_tests + smoke_import.
 
     The Engineer composes this into its ``tool_handlers()`` dict.
+
+    ``auxiliary_log_services``: services whose container logs should
+    auto-append on test failure (auth, db, etc). Call sites that
+    don't pass this fall back to a sensible default — see
+    ``_default_aux_services``.
     """
+    aux = (
+        list(auxiliary_log_services)
+        if auxiliary_log_services is not None
+        else _default_aux_services(target_service)
+    )
     return {
         "run_tests": make_run_tests(
             compose_path=compose_path,
@@ -206,6 +335,16 @@ def build_test_handlers(
             target_service=target_service,
             base_url=base_url,
             timeout_s=timeout_s,
+            auxiliary_log_services=aux,
         ),
         "smoke_import": make_smoke_import(compose_path, target_service),
     }
+
+
+def _default_aux_services(target_service: str) -> list:
+    """Default upstream services to tail on failure. Conservative —
+    only well-known names. Caller can override by passing
+    ``auxiliary_log_services`` explicitly.
+    """
+    candidates = ["auth", "db", "postgres", "redis"]
+    return [s for s in candidates if s != target_service]

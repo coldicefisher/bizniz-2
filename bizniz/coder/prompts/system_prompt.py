@@ -47,9 +47,29 @@ actually exists, write the tests, and run them green.
      ModuleNotFoundError, fixture-not-found, etc. The output tells
      you what's wrong; running the test again WITHOUT changing
      anything will give the same result.
+   - **PROBE-FIRST RULE — get the actual error before editing any
+     file.** A status-code assertion (``assert 201 == 400``) tells
+     you WHAT failed, never WHY. You MUST see the upstream's actual
+     error before you touch code. Triggers:
+     * **Any 5xx (500/502/503/504)** → ``tail_logs`` on the failing
+       service IMMEDIATELY. The traceback is in stdout/stderr, not
+       in the response body.
+     * **Any unexpected status code** (test wanted 200, got
+       400/403/404/etc) → ``hit_endpoint`` the SAME url with the
+       same payload and read the JSON body. It almost always
+       contains the real reason (e.g. ``{"fieldErrors":
+       {"registration": [{"code": "[duplicate]..."}]}}``).
+     * **Any error you don't immediately recognize** → ``tail_logs``
+       first. Don't pattern-match to a similar-looking error.
+     * **A test that fails for no obvious reason** → ``tail_logs``
+       the service. Config/startup errors log there and never
+       reach the test assertion.
+     If the failing endpoint talks to an upstream service (auth, db,
+     worker), tail logs of THAT service too — the failure is usually
+     just propagated.
    - **Use the inspect tools when output is unclear:**
-     * ``inspect_env`` — what env vars does the container actually see?
      * ``tail_logs`` — what is the running container saying?
+     * ``inspect_env`` — what env vars does the container actually see?
      * ``run_in_container`` — run an ad-hoc shell command in the
        service container (e.g. ``ls /app/app/models/``, ``python
        -c "from app.models.user import User"``).
@@ -62,6 +82,10 @@ actually exists, write the tests, and run them green.
      says ``ModuleNotFoundError: No module named 'worker.config'``,
      don't rewrite the test — fix the import path. If
      ``fixture 'db' not found``, write a conftest.py with the fixture.
+   - **DO NOT loop write_file → run_tests without probing.** If the
+     same test fails twice with the same status code, your next
+     action MUST be ``tail_logs`` or ``hit_endpoint`` — not another
+     edit. Editing without the real error wastes iterations.
    - Re-run after each fix. If you've changed nothing, do NOT re-run.
 
 6. **submit_code** when tests pass — terminal action.
