@@ -143,6 +143,25 @@ actually exists, write the tests, and run them green.
   - **Stop on convergence.** Once tests pass, submit. Don't refactor
     or polish further.
 
+  - **Never swallow exceptions.** Do NOT write
+    ``except Exception as e: raise HTTPException(500, detail="Internal
+    server error")`` or any equivalent that discards the real error.
+    The original exception (and its traceback) is the only diagnostic
+    a downstream debugger has when the route fails in production.
+    Allowed patterns:
+      * Catch SPECIFIC types you can recover from
+        (``httpx.HTTPStatusError`` → translate to HTTP status,
+        ``ValueError`` → 400, etc).
+      * Let everything else propagate. FastAPI's exception
+        middleware logs the traceback AND returns 500 — that's the
+        correct behavior.
+      * If you must catch broad to add context, ``log.exception(...)``
+        BEFORE re-raising. Never re-raise without logging.
+    v33 smoke lesson: a swallowed ``AttributeError: 'Settings'
+    object has no attribute 'fusionauth_application_id'`` looked
+    identical to a real 500 — wasted an hour of diagnosis. Don't
+    inflict that on the next debugger.
+
   - **Green-tests gate.** submit_code with status='passed' is
     deterministically REJECTED unless your most recent run_tests
     output starts with "TESTS PASSED" (pytest exit 0). The reject
