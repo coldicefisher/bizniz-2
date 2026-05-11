@@ -1,6 +1,8 @@
 # Pluggable LLM backend — strategic direction
 
-**Status:** approved 2026-05-07. Build AFTER first clean M1 + M2 ship on Gemini.
+**Status:** approved 2026-05-07. Updated 2026-05-11 — **M1 on Gemini was
+sufficient validation; pivoting now without M2.** See "M2-on-Gemini
+dropped" section below.
 
 ## Goal
 
@@ -84,21 +86,53 @@ backends:
     additional_args: ["--print", "--output-format=json"]
 ```
 
-## Order of operations
+## Order of operations (updated 2026-05-11)
 
-1. **NOW:** ship M1 on Gemini. Validates pipeline shape end-to-end.
-2. Ship M2 on Gemini (evolve mode). Validates iteration loop.
+1. ~~ship M1 on Gemini~~ ✅ done — bookshelf greenfield ran end-to-end
+   on 2026-05-11. Plan → Architect → Provision → Auth → Engineer →
+   Smoke → Review (QE+CR) → 2× Repair → milestone_unapproved gate
+   halted cleanly on 2 critical CR findings. $1.49, ~50min.
+2. ~~ship M2 on Gemini~~ **dropped** — M1 evidence is sufficient. See
+   "M2-on-Gemini dropped" below.
 3. Refactor for backend pluggability — extract `BackendFactory`
    interface, route through bizniz.yaml. ~4 hours.
 4. Build `ClaudeCliClient` (single-call seam). ~4 hours.
 5. Build `ClaudeCliCoder` (tool-loop seam). ~1 day.
 6. Build `bizniz_mcp` server. ~1 day.
-7. Validate Claude CLI backend on property_manager (same project,
-   different driver). Compare time, quality, $0 vs Gemini cost.
-8. Run trading platform with Claude as default. Real test.
+7. Validate Claude CLI backend on bookshelf (same project,
+   different driver). Compare time, quality, $0 vs Gemini's $1.49.
+8. Then M2 / evolve mode on Claude. THEN trading platform.
 
 Total post-validation effort: ~2 days for backend pluggability +
 ~1 day for MCP. Then ongoing.
+
+## M2-on-Gemini dropped
+
+Original plan said ship M1 + M2 on Gemini, then refactor. M1 ran
+end-to-end on bookshelf greenfield on 2026-05-11; the pipeline
+self-healed through 2 repair iterations and halted at the
+milestone gate on real CR findings (hardcoded app_id, missing
+409 mapping). The plan-validation goal was met.
+
+M2 on Gemini would re-confirm what M1 already showed: pipeline
+shape works, but Gemini Flash is the quality ceiling. Observed
+patterns on M1:
+
+- 0/21 diagnostic-tool calls on cheap tiers despite explicit
+  PROBE-FIRST prompt rules (auto-tail-on-failure was the unlock,
+  not the rule)
+- Frequent "verified manually" lies — green-tests gate catches
+  them, but the gate is a symptom not a cause
+- 2 critical CR findings (hardcoded application ID, missing 409
+  duplicate-email mapping) that flash-top couldn't fix in 2 repair
+  iters; flash-top stalled out 13 minutes on BE-005-fix2
+
+Bumping repair budget to 5 would probably converge — at $0.15-0.30
+per iter on flash-top, that's another $1+ to grind through findings
+Claude would one-shot. Bad ROI vs pivoting.
+
+The new signal is Claude vs Gemini on the SAME pipeline. M2 on
+Gemini doesn't produce that signal; the pluggable backend does.
 
 ## What NOT to do
 
