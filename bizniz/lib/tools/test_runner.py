@@ -109,12 +109,15 @@ def make_run_tests(
         if runner == "pytest":
             run_cmd = env_prefix + f"pytest {path_spec} -v --tb=short --no-header"
         elif runner in ("jest", "npm-test"):
-            # ``npm test`` is the package.json contract — works for
-            # whatever the frontend skeleton wired (jest, vitest, etc).
-            # ``--`` forwards the rest as jest CLI args. ``--ci`` makes
-            # jest non-interactive (no watch prompt).
-            arg = f" {path_spec}" if path_spec else ""
-            run_cmd = env_prefix + f"npm test --silent -- --ci{arg}"
+            # ``npm test`` is the package.json contract — runs whatever
+            # the project's ``scripts.test`` is. We can't pass
+            # runner-specific flags (jest's ``--ci``, vitest's lack
+            # thereof) because we don't know which one is actually
+            # wired — for that, use the explicit ``vitest`` or
+            # explicit jest runner. ``--`` separator forwards any
+            # path arg to the underlying runner.
+            arg = f" -- {path_spec}" if path_spec else ""
+            run_cmd = env_prefix + f"npm test --silent{arg}"
         elif runner == "vitest":
             arg = f" {path_spec}" if path_spec else ""
             run_cmd = env_prefix + f"npx vitest run{arg}"

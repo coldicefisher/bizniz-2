@@ -166,16 +166,16 @@ def _runner_for_service(service) -> str:
     """Map a service's language to its test runner.
 
     Python → pytest (the v33 backend stack).
-    TypeScript / JavaScript → npm-test (executes whatever
-    ``package.json`` ``scripts.test`` is wired to: jest, vitest,
-    etc — the skeleton owns that choice).
-    Unknown → pytest as the safe default; if it's not really
-    pytest, run_tests will fail visibly inside the container
-    rather than silently misbehave.
+    TypeScript / JavaScript → vitest (the v33 frontend stack, and the
+    current bizniz-skeleton-react default). vitest is invoked as
+    ``npx vitest run`` so we don't depend on ``package.json scripts.test``
+    being wired correctly. v33 lesson: ``npm test --silent -- --ci``
+    blew up because vitest CACErrors on the jest-only ``--ci`` flag.
+    Unknown → pytest as the safe default.
     """
     lang = (getattr(service, "language", "") or "").lower()
     if lang in ("typescript", "javascript", "ts", "js"):
-        return "npm-test"
+        return "vitest"
     return "pytest"
 
 
