@@ -69,7 +69,13 @@ def _render_application(spec: AuthSpec, app: AppSpec) -> Dict[str, Any]:
         "loginConfiguration": {
             "allowTokenRefresh": app.issues_refresh_tokens,
             "generateRefreshTokens": app.issues_refresh_tokens,
-            "requireAuthentication": True,
+            # ``False`` so the SPA frontend can call ``POST /api/login``
+            # without an API key. FA's default is ``True``, which makes
+            # every public login 401 regardless of credentials — v33
+            # frontend-login bug. Pipeline tests pass because they use
+            # the admin API key; real users do not (and should not)
+            # have it.
+            "requireAuthentication": False,
         },
         "oauthConfiguration": {
             "authorizedRedirectURLs": app.redirect_urls,

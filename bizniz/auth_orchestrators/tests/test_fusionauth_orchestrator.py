@@ -69,13 +69,38 @@ def test_request_raises_on_unreachable(orch):
     assert "unreachable" in str(exc.value).lower()
 
 
-def test_ensure_application_skips_when_exists(orch):
+def test_ensure_application_skips_create_when_exists_with_correct_config(orch):
+    # Existing app already has requireAuthentication=false — no PATCH.
     with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
-        m.return_value = _resp(200, {"application": {"id": "app-1", "name": "X"}})
+        m.return_value = _resp(200, {"application": {
+            "id": "app-1", "name": "X",
+            "loginConfiguration": {"requireAuthentication": False},
+        }})
         result = orch.ensure_application("app-1", name="X")
-    # Single request — only the GET, no POST to create.
+    # GET only — no PATCH, no POST.
     assert result == "app-1"
     assert m.call_count == 1
+
+
+def test_ensure_application_patches_when_exists_with_wrong_login_config(orch):
+    # Existing app has requireAuthentication=true (FA default) — must PATCH.
+    responses = [
+        _resp(200, {"application": {
+            "id": "app-1", "name": "X",
+            "loginConfiguration": {"requireAuthentication": True},
+        }}),
+        _resp(200, {}),
+    ]
+    with patch("bizniz.auth_orchestrators.fusionauth_orchestrator.requests.request") as m:
+        m.side_effect = responses
+        result = orch.ensure_application("app-1", name="X")
+    assert result == "app-1"
+    # GET + PATCH to set requireAuthentication=false.
+    assert m.call_count == 2
+    patch_call = m.call_args_list[1]
+    assert patch_call.kwargs["method"] == "PATCH"
+    sent = patch_call.kwargs["json"]["application"]["loginConfiguration"]
+    assert sent["requireAuthentication"] is False
 
 
 def test_ensure_application_creates_when_missing(orch):
@@ -86,6 +111,11 @@ def test_ensure_application_creates_when_missing(orch):
     assert result == "app-1"
     # GET (404) + POST (create)
     assert m.call_count == 2
+    post_call = m.call_args_list[1]
+    assert post_call.kwargs["method"] == "POST"
+    # POST body carries the SPA-friendly login config.
+    sent = post_call.kwargs["json"]["application"]["loginConfiguration"]
+    assert sent["requireAuthentication"] is False
 
 
 def test_ensure_role_idempotent(orch):

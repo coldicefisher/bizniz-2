@@ -146,19 +146,49 @@ class FusionAuthOrchestrator:
         name: str,
         verification_strategy: str = "FormField",
     ) -> ApplicationId:
-        """Idempotent: ensure an application with this ID + name exists.
+        """Idempotent: ensure an application with this ID + name exists,
+        with login configuration suitable for an SPA frontend.
 
         Returns the application_id (same as input). Safe to call
-        repeatedly; existing applications are left in place.
+        repeatedly; existing applications get their login config
+        reconciled to the desired SPA-friendly defaults.
         """
+        # SPA-friendly defaults: ``requireAuthentication=false`` so the
+        # frontend can call ``POST /api/login`` without an API key.
+        # FA defaults this to ``true``, which makes every public login
+        # 401 regardless of credentials. v33 lesson: pipeline tests
+        # used the API key path and saw login_verified=true; real
+        # frontend users hit 401 because they correctly omit the key.
+        login_config = {
+            "requireAuthentication": False,
+            "allowTokenRefresh": True,
+            "generateRefreshTokens": True,
+        }
+
         existing = self.get_application(app_id)
         if existing is not None:
+            # Idempotent reconcile: PATCH login config so previously-
+            # provisioned apps get the SPA defaults without needing a
+            # full re-provision. Skip if already matching.
+            existing_lc = (
+                (existing.get("application") or {}).get("loginConfiguration") or {}
+            )
+            if existing_lc.get("requireAuthentication") is not False:
+                self._log(
+                    f"FusionAuth: PATCHing application {name!r} login "
+                    f"config to requireAuthentication=false"
+                )
+                self.request(
+                    "PATCH", f"/api/application/{app_id}",
+                    body={"application": {"loginConfiguration": login_config}},
+                )
             return app_id
         self._log(f"FusionAuth: creating application {name!r} ({app_id})")
         body = {
             "application": {
                 "name": name,
                 "verificationStrategy": verification_strategy,
+                "loginConfiguration": login_config,
             }
         }
         self.request("POST", f"/api/application/{app_id}", body=body)
