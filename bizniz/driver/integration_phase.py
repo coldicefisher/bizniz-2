@@ -167,7 +167,7 @@ class IntegrationPhase:
                 all_passed = False
                 continue
 
-            ws.write_text("tests/integration/test_api.py", source)
+            ws.write_file("tests/integration/test_api.py", source)
 
             passed, output = self._run_pytest_with_repair(
                 backend=backend, workspace=ws, compose_path=compose_path,
@@ -263,7 +263,7 @@ class IntegrationPhase:
                 all_passed = False
                 continue
 
-            ws.write_text("tests/integration/test_worker.py", source)
+            ws.write_file("tests/integration/test_worker.py", source)
 
             passed, output = self._run_pytest_with_repair(
                 backend=worker, workspace=ws, compose_path=compose_path,
@@ -344,7 +344,7 @@ class IntegrationPhase:
                 all_passed = False
                 continue
 
-            ws.write_text("tests/integration/ui.spec.cjs", source)
+            ws.write_file("tests/integration/ui.spec.cjs", source)
 
             passed, output = _run_playwright_in_sidecar(
                 service=frontend,

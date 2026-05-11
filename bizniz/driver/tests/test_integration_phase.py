@@ -43,7 +43,7 @@ def _milestone():
 def _make_workspace(tmp_path, name):
     ws = MagicMock()
     ws.root = tmp_path / name
-    ws.write_text = MagicMock()
+    ws.write_file = MagicMock()
     return ws
 
 
@@ -84,7 +84,7 @@ class TestRunApi:
             )
         assert result.passed is True
         assert "backend" in result.backend_contracts
-        assert ws.write_text.called
+        assert ws.write_file.called
 
     def test_no_workspace_marks_failed(self, tmp_path):
         ip = IntegrationPhase(
@@ -304,8 +304,8 @@ class TestRunWorker:
         assert "backend_contracts" in kwargs
         assert "depends_on_services" in kwargs
         # The consumer's workspace got the test file written.
-        ws.write_text.assert_called_once()
-        path_arg, source_arg = ws.write_text.call_args.args
+        ws.write_file.assert_called_once()
+        path_arg, source_arg = ws.write_file.call_args.args
         assert path_arg == "tests/integration/test_worker.py"
 
     def test_consumer_service_type_alias(self, tmp_path):
@@ -390,7 +390,7 @@ class TestRunWeb:
                 backend_contracts={"backend": {}},
             )
         assert result.passed is True
-        assert ws.write_text.called
+        assert ws.write_file.called
 
     def test_failed_playwright_marks_failed(self, tmp_path):
         tester = MagicMock()

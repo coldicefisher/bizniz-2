@@ -44,6 +44,7 @@ from bizniz.driver.state import RunState
 from bizniz.agents.debugger.agentic import AgenticDebugger
 from bizniz.engineer.agent import Engineer
 from bizniz.environment.docker_pytest_environment import DockerPytestEnvironment
+from bizniz.environment.python_environment import PythonSandboxExecutionEnvironment
 from bizniz.lib.model_progression import ModelProgression
 from bizniz.service_planner.agent import ServicePlanner
 from bizniz.integration.http_api_tester import HTTPApiTester
@@ -343,13 +344,28 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     )
 
     def http_tester_factory(workspace):
-        return HTTPApiTester(client=tester_client, workspace=workspace)
+        return HTTPApiTester(
+            client=tester_client,
+            workspace=workspace,
+            environment=PythonSandboxExecutionEnvironment(),
+            on_status_message=on_status,
+        )
 
     def web_tester_factory(workspace):
-        return WebUITester(client=tester_client, workspace=workspace)
+        return WebUITester(
+            client=tester_client,
+            workspace=workspace,
+            environment=PythonSandboxExecutionEnvironment(),
+            on_status_message=on_status,
+        )
 
     def worker_tester_factory(workspace):
-        return WorkerTester(client=tester_client, workspace=workspace)
+        return WorkerTester(
+            client=tester_client,
+            workspace=workspace,
+            environment=PythonSandboxExecutionEnvironment(),
+            on_status_message=on_status,
+        )
 
     debugger_client = _client_for(
         getattr(config, "debugger_model", config.architect_model), "debugger",
