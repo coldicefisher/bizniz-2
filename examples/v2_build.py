@@ -312,6 +312,21 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     )
 
     def coder_factory(model: str, service):
+        # Route to ClaudeCliCoder when the model name says so. Same
+        # constructor surface (kwargs ignored if irrelevant), same
+        # CoderResult return type — the orchestrator + dispatcher
+        # don't see the difference.
+        if model.startswith("claude-cli"):
+            from bizniz.coder.claude_cli_coder import ClaudeCliCoder
+            return ClaudeCliCoder(
+                workspace=workspace_for_service(service.workspace_name),
+                compose_path=compose_path,
+                target_service=service.name,
+                workspace_name=service.workspace_name,
+                on_status=on_status,
+                runner=_runner_for_service(service),
+                model_name=model,
+            )
         return Coder(
             client=_client_for(model, f"coder:{service.name}"),
             workspace=workspace_for_service(service.workspace_name),
