@@ -505,4 +505,23 @@ class ToolLoopAgent(ABC):
             )
 
         self._log(f"{agent_name}: terminal action submitted (forced)")
-        return self.parse_terminal_action(action)
+        try:
+            return self.parse_terminal_action(action)
+        except TerminalActionRejected as e:
+            # On the forced-final path, we can't loop the model again
+            # to retry a rejected terminal — there's no budget left.
+            # Convert to a clean stall so the orchestrator can escalate
+            # to the next tier instead of marking the issue ``errored``
+            # (which is non-recoverable). v33 round 8 lesson: BE-007 hit
+            # iter 20/20 on flash-top, claimed status='passed' with no
+            # green run_tests, the green-tests gate rejected it, and the
+            # exception bubbled — issue ended ``errored`` despite the
+            # progression having more headroom on retry.
+            self._log(
+                f"{agent_name}: forced-final terminal rejected "
+                f"({e.reason[:120]}) — converting to stall"
+            )
+            raise ToolLoopAgentStalledError(
+                f"{agent_name}: forced-final terminal rejected: "
+                f"{e.reason[:200]}"
+            )
