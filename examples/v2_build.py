@@ -66,8 +66,18 @@ def _client_for(model: str, agent_label: str = "unknown"):
     ``agent_label`` is stamped onto the client as ``_caller_agent`` so
     the cost tracker can group records per agent (clients auto-record
     on every call and read this attribute).
+
+    Prefix routing:
+      - ``claude-cli`` / ``claude-cli:*`` → subprocess to the Claude
+        Code CLI (free on Max plan; uses user's logged-in session).
+      - ``claude-*``                       → Anthropic API client (paid).
+      - ``gemini-*``                       → Gemini API client.
+      - otherwise                          → ChatGPT client (OpenAI).
     """
-    if model.startswith("claude"):
+    if model.startswith("claude-cli"):
+        from bizniz.clients.claude_cli import ClaudeCliClient
+        client = ClaudeCliClient(model_name=model)
+    elif model.startswith("claude"):
         from bizniz.clients.claude.claude_client import ClaudeClient
         client = ClaudeClient(model_name=model)
     elif model.startswith("gemini"):
