@@ -250,12 +250,35 @@ class IssueStateStore:
                 eng_status = "pending"
                 deferred_ids.append(r["issue_id"])
 
+            # Prepend the service's workspace name to each file path so
+            # the assembled result has project-rooted paths. Coder stores
+            # paths workspace-relative (``app/models/user.py``); QE/CR/
+            # IntegrationPhase read from the project-rooted
+            # primary_workspace and need ``backend/app/models/user.py``.
+            # Worker is already project-rooted in some rows because
+            # the planner emits the worker prefix; idempotent guard.
+            svc = r["service"] or ""
+            raw_target = json.loads(r["target_files"] or "[]")
+            raw_test = json.loads(r["test_files"] or "[]")
+
+            def _prefix(paths):
+                if not svc:
+                    return paths
+                prefix = svc + "/"
+                out = []
+                for p in paths:
+                    if p.startswith(prefix) or p.startswith("/"):
+                        out.append(p)
+                    else:
+                        out.append(prefix + p)
+                return out
+
             issues.append(EngineerIssue(
                 id=r["issue_id"],
                 title=r["title"],
                 description=r["description"],
-                target_files=json.loads(r["target_files"] or "[]"),
-                test_files=json.loads(r["test_files"] or "[]"),
+                target_files=_prefix(raw_target),
+                test_files=_prefix(raw_test),
                 success_criteria=json.loads(r["success_criteria"] or "[]"),
                 spec_refs=json.loads(r["spec_refs"] or "[]"),
                 depends_on=json.loads(r["depends_on"] or "[]"),
