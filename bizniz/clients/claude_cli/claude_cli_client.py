@@ -209,11 +209,13 @@ class ClaudeCliClient(BaseAIClient):
         elapsed = time.time() - t0
 
         # Add this turn to the local history so subsequent calls in
-        # the same client instance see it (matches Gemini/ClaudeClient
-        # behavior).
+        # the same client instance see it. Store ONLY dicts (matching
+        # the shape ``_build_prompt_text`` reads) — earlier bug:
+        # mixed Message objects + dicts in the history crashed the
+        # second call with ``'Message' object is not subscriptable``.
         assistant_msg = Message(role="assistant", content=text)
         self._message_history.extend(user_messages)
-        self._message_history.append(assistant_msg)
+        self._message_history.append({"role": "assistant", "content": text})
         if self._on_message_callback:
             try:
                 self._on_message_callback(assistant_msg)

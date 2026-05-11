@@ -206,6 +206,12 @@ class BiznizConfig(BaseModel):
         return ChatGPTClient(config=config, api_key=api_key)
 
     def _make_claude_client(self, model: str) -> BaseAIClient:
+        # ``claude-cli*`` routes to the subprocess client (Max plan,
+        # $0 marginal). Anything else under the claude-* prefix hits
+        # the (paid) Anthropic API client.
+        if model.startswith("claude-cli"):
+            from bizniz.clients.claude_cli import ClaudeCliClient
+            return ClaudeCliClient(model_name=model)
         from bizniz.clients.claude.claude_client import ClaudeClient
         api_key = self.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
         return ClaudeClient(api_key=api_key, model_name=model)

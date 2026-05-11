@@ -177,6 +177,39 @@ class TestGetText:
         assert "timed out" in str(exc.value)
 
 
+class TestHistory:
+    def _client(self):
+        with patch(
+            "bizniz.clients.claude_cli.claude_cli_client.shutil.which",
+            return_value="/usr/bin/claude",
+        ):
+            return ClaudeCliClient()
+
+    def test_history_round_trip_doesnt_crash_on_second_call(self):
+        """Regression: ``_message_history`` used to mix Message and
+        dict entries, crashing ``_build_prompt_text`` on the second
+        call with ``'Message' object is not subscriptable``."""
+        c = self._client()
+        with patch(
+            "bizniz.clients.claude_cli.claude_cli_client.subprocess.run",
+            return_value=_fake_proc(text="A1"),
+        ):
+            c.get_text(messages="first", use_message_history=True)
+
+        # Second call with history must succeed and see prior context.
+        with patch(
+            "bizniz.clients.claude_cli.claude_cli_client.subprocess.run",
+            return_value=_fake_proc(text="A2"),
+        ) as m:
+            c.get_text(messages="second", use_message_history=True)
+        prompt = m.call_args.kwargs["input"]
+        # Both prior user msg, prior assistant, and current user
+        # should appear in the assembled prompt.
+        assert "first" in prompt
+        assert "A1" in prompt
+        assert "second" in prompt
+
+
 class TestPromptAssembly:
     def test_single_user_is_bare(self):
         out = ClaudeCliClient._build_prompt_text([
