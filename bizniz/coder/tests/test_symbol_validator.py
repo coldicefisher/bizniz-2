@@ -204,3 +204,120 @@ class TestValidateFiles:
         ts.write_text("import { something } from 'pkg';\n")
         report = validate_files([py, ts], ws)
         assert report.file_count == 1  # only py counted
+
+
+# ── Attribute-access validation (v33 lesson: settings.bad_field) ──────
+
+
+class TestAttributeAccess:
+    def _make_config_module(self, ws: Path) -> None:
+        """The classic Pydantic Settings + singleton pattern."""
+        (ws / "app").mkdir()
+        (ws / "app" / "__init__.py").write_text("")
+        (ws / "app" / "core").mkdir()
+        (ws / "app" / "core" / "__init__.py").write_text("")
+        (ws / "app" / "core" / "config.py").write_text(
+            "from pydantic_settings import BaseSettings\n"
+            "class Settings(BaseSettings):\n"
+            "    fusionauth_app_id: str = ''\n"
+            "    fusionauth_url: str = ''\n"
+            "def get_settings() -> Settings:\n"
+            "    return Settings()\n"
+            "settings = get_settings()\n"
+        )
+
+    def test_flags_bad_attribute_on_imported_singleton(self, tmp_path):
+        ws = _ws(tmp_path)
+        self._make_config_module(ws)
+        bad = ws / "app" / "auth.py"
+        bad.write_text(
+            "from app.core.config import settings\n"
+            "def f():\n"
+            "    return settings.fusionauth_application_id\n"
+        )
+        report = validate_files([bad], ws)
+        assert not report.passed
+        assert len(report.unresolved_attributes) == 1
+        u = report.unresolved_attributes[0]
+        assert u.attribute == "fusionauth_application_id"
+        assert u.var == "settings"
+        assert "fusionauth_app_id" in u.available
+        out = report.render()
+        assert "fusionauth_application_id" in out
+        assert "fusionauth_app_id" in out
+
+    def test_accepts_real_attribute(self, tmp_path):
+        ws = _ws(tmp_path)
+        self._make_config_module(ws)
+        ok = ws / "app" / "auth.py"
+        ok.write_text(
+            "from app.core.config import settings\n"
+            "def f():\n"
+            "    return settings.fusionauth_app_id\n"
+        )
+        report = validate_files([ok], ws)
+        assert report.passed
+
+    def test_flags_attribute_on_locally_instantiated_class(self, tmp_path):
+        ws = _ws(tmp_path)
+        self._make_config_module(ws)
+        bad = ws / "app" / "service.py"
+        bad.write_text(
+            "from app.core.config import Settings\n"
+            "s = Settings()\n"
+            "x = s.bogus_field\n"
+        )
+        report = validate_files([bad], ws)
+        assert not report.passed
+        assert any(
+            a.attribute == "bogus_field" and "fusionauth_app_id" in a.available
+            for a in report.unresolved_attributes
+        )
+
+    def test_typed_local_var_via_get_callable(self, tmp_path):
+        ws = _ws(tmp_path)
+        self._make_config_module(ws)
+        bad = ws / "app" / "route.py"
+        bad.write_text(
+            "from app.core.config import get_settings\n"
+            "def handler():\n"
+            "    s = get_settings()\n"
+            "    return s.fusionauth_application_id\n"
+        )
+        report = validate_files([bad], ws)
+        assert any(
+            a.attribute == "fusionauth_application_id"
+            for a in report.unresolved_attributes
+        )
+
+    def test_skips_when_class_not_in_workspace(self, tmp_path):
+        """External classes (FastAPI Request, Pydantic BaseModel)
+        shouldn't be flagged — we can't see their field sets, so we
+        say nothing rather than false-positive."""
+        ws = _ws(tmp_path)
+        bad = ws / "x.py"
+        bad.write_text(
+            "from fastapi import Request\n"
+            "def f(req):\n"
+            "    return req\n"  # no resolvable .attr to flag
+        )
+        report = validate_files([bad], ws)
+        assert not report.unresolved_attributes
+
+    def test_inherited_fields_resolve(self, tmp_path):
+        ws = _ws(tmp_path)
+        (ws / "models.py").write_text(
+            "class Base:\n"
+            "    a: int = 0\n"
+            "class Child(Base):\n"
+            "    b: int = 0\n"
+        )
+        ok = ws / "use.py"
+        ok.write_text(
+            "from models import Child\n"
+            "c = Child()\n"
+            "x = c.a\n"   # inherited
+            "y = c.b\n"   # direct
+        )
+        report = validate_files([ok], ws)
+        assert report.passed
