@@ -288,12 +288,18 @@ class Orchestrator:
         actually observed in the wild:
           - ToolLoopAgentBadResponseError("LLM call failed N times")
             raised after the Coder hit 3 consecutive Gemini 503s.
+          - ToolLoopAgentBadResponseError("failed to parse LLM response
+            N times") — model returned non-JSON N times in a row.
+            Same shape: the issue isn't the issue, it's the model
+            tier choking. Escalate.
           - 503 / UNAVAILABLE / overload language in the message.
           - Connection-class network errors (reset, timeout).
         """
         msg = str(exc).lower()
         cls = type(exc).__name__
         if "llm call failed" in msg:
+            return True
+        if "failed to parse llm response" in msg:
             return True
         if "503" in msg or "unavailable" in msg or "overload" in msg:
             return True
