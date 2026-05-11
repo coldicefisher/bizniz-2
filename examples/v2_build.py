@@ -162,6 +162,23 @@ def _resolve_runs_root(project_slug: str) -> Path:
     return base / project_slug / "docs" / "runs"
 
 
+def _runner_for_service(service) -> str:
+    """Map a service's language to its test runner.
+
+    Python → pytest (the v33 backend stack).
+    TypeScript / JavaScript → npm-test (executes whatever
+    ``package.json`` ``scripts.test`` is wired to: jest, vitest,
+    etc — the skeleton owns that choice).
+    Unknown → pytest as the safe default; if it's not really
+    pytest, run_tests will fail visibly inside the container
+    rather than silently misbehave.
+    """
+    lang = (getattr(service, "language", "") or "").lower()
+    if lang in ("typescript", "javascript", "ts", "js"):
+        return "npm-test"
+    return "pytest"
+
+
 def _new_job_id() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
 
@@ -291,6 +308,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
             workspace_name=service.workspace_name,
             tool_iterations=tier_iterations.get(model, default_iterations),
             on_status=on_status,
+            runner=_runner_for_service(service),
         )
 
     def progression_factory(_service):

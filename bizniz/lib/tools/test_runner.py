@@ -54,6 +54,7 @@ def make_run_tests(
     base_url: Optional[str] = None,
     timeout_s: float = 180.0,
     auxiliary_log_services: Optional[list] = None,
+    runner: str = "pytest",
 ) -> ToolHandler:
     """Run pytest INSIDE the target service's running container.
 
@@ -91,7 +92,11 @@ def make_run_tests(
         if not compose_path or not target_service:
             return "ERROR: run_tests unavailable (missing compose_path/service)."
 
-        path_spec = (action.get("path") or "tests/").strip() or "tests/"
+        # Per-runner default path:
+        # pytest defaults to "tests/" (collection root)
+        # jest/vitest default to "" (run every test file)
+        default_path = "tests/" if runner == "pytest" else ""
+        path_spec = (action.get("path") or default_path).strip()
         # Light normalization — refuse absolute paths that escape the
         # workspace mount.
         for p in path_spec.split():
@@ -99,10 +104,25 @@ def make_run_tests(
                 return f"ERROR: test path must be relative to workspace: {p!r}"
 
         env_url = base_url or ""
-        run_cmd = (
-            (f"API_BASE_URL={shlex.quote(env_url)} " if env_url else "")
-            + f"pytest {path_spec} -v --tb=short --no-header"
-        )
+        env_prefix = f"API_BASE_URL={shlex.quote(env_url)} " if env_url else ""
+
+        if runner == "pytest":
+            run_cmd = env_prefix + f"pytest {path_spec} -v --tb=short --no-header"
+        elif runner in ("jest", "npm-test"):
+            # ``npm test`` is the package.json contract — works for
+            # whatever the frontend skeleton wired (jest, vitest, etc).
+            # ``--`` forwards the rest as jest CLI args. ``--ci`` makes
+            # jest non-interactive (no watch prompt).
+            arg = f" {path_spec}" if path_spec else ""
+            run_cmd = env_prefix + f"npm test --silent -- --ci{arg}"
+        elif runner == "vitest":
+            arg = f" {path_spec}" if path_spec else ""
+            run_cmd = env_prefix + f"npx vitest run{arg}"
+        else:
+            return (
+                f"ERROR: unknown runner '{runner}'. "
+                f"Supported: pytest, jest, npm-test, vitest."
+            )
 
         cmd = [
             "docker", "compose", "-f", compose_path,
@@ -116,7 +136,7 @@ def make_run_tests(
         except subprocess.TimeoutExpired as e:
             partial = (e.stdout or "") + (e.stderr or "")
             return _truncate(
-                f"ERROR: pytest in {target_service} timed out after "
+                f"ERROR: {runner} in {target_service} timed out after "
                 f"{timeout_s:.0f}s\n{partial}"
             )
         except FileNotFoundError:
@@ -313,10 +333,16 @@ def build_test_handlers(
     base_url: Optional[str] = None,
     timeout_s: float = 180.0,
     auxiliary_log_services: Optional[list] = None,
+    runner: str = "pytest",
 ) -> Dict[str, ToolHandler]:
     """Standard test-execution toolkit: run_tests + smoke_import.
 
     The Engineer composes this into its ``tool_handlers()`` dict.
+
+    ``runner``: which test runner to invoke in the container.
+    ``pytest`` (Python services), ``jest`` / ``npm-test`` (frontend),
+    or ``vitest``. ``smoke_import`` is python-specific; for non-python
+    services it returns a stub handler that explains the limitation.
 
     ``auxiliary_log_services``: services whose container logs should
     auto-append on test failure (auth, db, etc). Call sites that
@@ -328,7 +354,7 @@ def build_test_handlers(
         if auxiliary_log_services is not None
         else _default_aux_services(target_service)
     )
-    return {
+    handlers: Dict[str, ToolHandler] = {
         "run_tests": make_run_tests(
             compose_path=compose_path,
             workspace_path=workspace_path,
@@ -336,9 +362,17 @@ def build_test_handlers(
             base_url=base_url,
             timeout_s=timeout_s,
             auxiliary_log_services=aux,
+            runner=runner,
         ),
-        "smoke_import": make_smoke_import(compose_path, target_service),
     }
+    # smoke_import is python-import semantics; skip it for non-python
+    # services rather than emit a misleading handler. Coder's prompt
+    # already lists it under "Python only".
+    if runner == "pytest":
+        handlers["smoke_import"] = make_smoke_import(
+            compose_path, target_service
+        )
+    return handlers
 
 
 def _default_aux_services(target_service: str) -> list:

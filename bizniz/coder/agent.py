@@ -53,6 +53,7 @@ class Coder(ToolLoopAgent):
         timeout_seconds: int = 1200,
         base_url: Optional[str] = None,
         workspace_name: Optional[str] = None,
+        runner: str = "pytest",
     ):
         super().__init__(
             client=client,
@@ -65,6 +66,7 @@ class Coder(ToolLoopAgent):
         self._compose_path = compose_path
         self._target_service = target_service
         self._base_url = base_url
+        self._runner = runner
         # ServicePlanner sometimes emits paths like "backend/app/users.py"
         # treating workspace as project-rooted; the actual workspace IS
         # the service dir, so unstripped paths land at "backend/backend/
@@ -236,6 +238,7 @@ class Coder(ToolLoopAgent):
                 if hasattr(self._workspace, "root") else Path("."),
                 target_service=target_service,
                 base_url=self._base_url,
+                runner=self._runner,
             )
         )
         h.update(build_database_handlers(self._compose_path))
