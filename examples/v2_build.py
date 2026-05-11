@@ -37,6 +37,7 @@ from bizniz.cost.ledger import CostLedger, get_default_ledger_path
 from bizniz.coder.agent import Coder
 from bizniz.driver.gates import GatePolicy
 from bizniz.driver.integration_phase import IntegrationPhase
+from bizniz.driver.smoke_phase import SmokePhase
 from bizniz.driver.milestone_code_dispatcher import MilestoneCodeDispatcher
 from bizniz.driver.milestone_loop import MilestoneLoop
 from bizniz.driver.pipeline import V2Pipeline
@@ -405,6 +406,8 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         on_status=on_status,
     )
 
+    smoke_phase = SmokePhase(on_status=on_status)
+
     gate_mode = "auto" if args.auto else ("interactive" if args.interactive else "strict")
     gates = GatePolicy(mode=gate_mode, on_status=on_status)
 
@@ -447,6 +450,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         quality_engineer=qe,
         code_reviewer=cr,
         integration_phase=integration_phase,
+        smoke_phase=smoke_phase,
         gates=gates,
         workspace_for_service=workspace_for_service,
         primary_workspace=primary_workspace,

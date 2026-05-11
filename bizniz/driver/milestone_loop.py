@@ -27,6 +27,7 @@ from bizniz.code_reviewer.agent import CodeReviewer
 from bizniz.code_reviewer.types import CodeReviewReport
 from bizniz.driver.gates import GatePolicy, GateViolation
 from bizniz.driver.integration_phase import IntegrationPhase, IntegrationPhaseResult
+from bizniz.driver.smoke_phase import SmokePhase, SmokePhaseResult
 from bizniz.driver.milestone_code_dispatcher import MilestoneCodeDispatcher
 from bizniz.driver.state import MilestoneState, SubPhase, next_subphase
 from bizniz.engineer.agent import Engineer
@@ -76,6 +77,7 @@ class MilestoneLoop:
         quality_engineer: QualityEngineer,
         code_reviewer: CodeReviewer,
         integration_phase: IntegrationPhase,
+        smoke_phase: "SmokePhase",
         gates: GatePolicy,
         workspace_for_service: Callable[[str], BaseWorkspace],
         primary_workspace: BaseWorkspace,
@@ -94,6 +96,7 @@ class MilestoneLoop:
         self._qe = quality_engineer
         self._cr = code_reviewer
         self._integration = integration_phase
+        self._smoke = smoke_phase
         self._gates = gates
         self._workspace_for_service = workspace_for_service
         self._primary_workspace = primary_workspace
@@ -236,6 +239,30 @@ class MilestoneLoop:
             result = result or self._reload_required(
                 state, SubPhase.IMPLEMENT, EngineerResult,
             )
+
+        # Smoke — deterministic curl gate. Cheap; no LLM. Catches
+        # the v33-class bug where the milestone shipped "green" but
+        # the live container 500s or auth is misconfigured. Hard-gate
+        # on critical failures (health, auth_login, route 5xx).
+        if not _has(state, SubPhase.SMOKE):
+            self._tag(state.milestone_index, SubPhase.SMOKE)
+            smoke_result = self._smoke.run(
+                milestone=milestone,
+                architecture=architecture,
+                project_root=self._project_root,
+                auth_contract=auth_contract,
+            )
+            state.mark_phase(SubPhase.SMOKE, smoke_result.model_dump())
+            if not smoke_result.passed:
+                self._gates.hard(
+                    "smoke_failed",
+                    f"smoke phase critical failures: "
+                    f"{'; '.join(smoke_result.critical_failures[:3])}"
+                    + (
+                        f" (+{len(smoke_result.critical_failures) - 3} more)"
+                        if len(smoke_result.critical_failures) > 3 else ""
+                    ),
+                )
 
         # Reviews + repairs.
         repair_phases = (
@@ -460,7 +487,8 @@ class MilestoneLoop:
         spec = self._reload_required(state, SubPhase.ENRICH, EnrichedSpec) \
             if target != SubPhase.ENRICH else None
         result = None
-        if target in (SubPhase.REVIEW_INITIAL, SubPhase.REPAIR_ITER_0,
+        if target in (SubPhase.SMOKE, SubPhase.REVIEW_INITIAL,
+                      SubPhase.REPAIR_ITER_0,
                       SubPhase.REPAIR_ITER_1, SubPhase.REPAIR_ITER_2,
                       SubPhase.REVIEW_FINAL,
                       SubPhase.INTEGRATION_API, SubPhase.INTEGRATION_WORKER,
@@ -511,6 +539,21 @@ class MilestoneLoop:
             finally:
                 self._current_milestone_store = None
             state.mark_phase(target, result)
+
+        elif target == SubPhase.SMOKE:
+            smoke_result = self._smoke.run(
+                milestone=milestone,
+                architecture=architecture,
+                project_root=self._project_root,
+                auth_contract=auth_contract,
+            )
+            state.mark_phase(target, smoke_result.model_dump())
+            if not smoke_result.passed:
+                self._gates.hard(
+                    "smoke_failed",
+                    f"smoke phase critical failures: "
+                    f"{'; '.join(smoke_result.critical_failures[:3])}",
+                )
 
         elif target in (SubPhase.REVIEW_INITIAL, SubPhase.REVIEW_FINAL):
             coverage, code_review = self._phase_review(

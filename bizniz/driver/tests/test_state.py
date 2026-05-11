@@ -14,7 +14,8 @@ class TestNextSubphase:
 
     def test_progression(self):
         assert next_subphase(SubPhase.ENRICH) == SubPhase.IMPLEMENT
-        assert next_subphase(SubPhase.IMPLEMENT) == SubPhase.REVIEW_INITIAL
+        assert next_subphase(SubPhase.IMPLEMENT) == SubPhase.SMOKE
+        assert next_subphase(SubPhase.SMOKE) == SubPhase.REVIEW_INITIAL
         assert next_subphase(SubPhase.REVIEW_INITIAL) == SubPhase.REPAIR_ITER_0
         assert next_subphase(SubPhase.REPAIR_ITER_0) == SubPhase.REPAIR_ITER_1
         assert next_subphase(SubPhase.REPAIR_ITER_2) == SubPhase.REVIEW_FINAL

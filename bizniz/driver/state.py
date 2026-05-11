@@ -46,6 +46,7 @@ class SubPhase(str, Enum):
     """
     ENRICH = "enrich"
     IMPLEMENT = "implement"
+    SMOKE = "smoke"
     REVIEW_INITIAL = "review_initial"
     REPAIR_ITER_0 = "repair_iter_0"
     REPAIR_ITER_1 = "repair_iter_1"

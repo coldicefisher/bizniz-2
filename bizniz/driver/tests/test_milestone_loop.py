@@ -112,11 +112,17 @@ def _build_loop(
     ws = workspace or MagicMock()
     g = gates or GatePolicy(mode="strict")
 
+    sp = MagicMock()
+    sp.run.return_value = MagicMock(
+        passed=True, model_dump=lambda: {}, critical_failures=[],
+    )
+
     return MilestoneLoop(
         engineer=eng,
         quality_engineer=qe_m,
         code_reviewer=cr_m,
         integration_phase=ip,
+        smoke_phase=sp,
         gates=g,
         workspace_for_service=lambda name: ws,
         primary_workspace=ws,
