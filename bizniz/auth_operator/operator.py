@@ -287,11 +287,20 @@ class FusionAuthOperator:
     def _smoke_login(
         self, email: str, password: str, primary_app_id: str,
     ) -> bool:
-        try:
-            token = self._orch.get_token(primary_app_id, email, password)
-            return bool(token)
-        except Exception:
-            return False
+        """Verify the user can log in via the PUBLIC ``/api/login``
+        flow (no API key). This is what the SPA frontend does — and
+        what we want the manifest's ``login_verified`` to reflect.
+
+        Do NOT use ``get_token`` here: it sends the API key, which
+        FA's admin path accepts even when public login is blocked
+        by ``loginConfiguration.requireAuthentication=true`` or by
+        password-policy lockout. v33 ran for 4 days with
+        ``login_verified=true`` while the frontend got 401 on every
+        attempt — that's what we're closing here.
+        """
+        return self._orch.public_login_succeeds(
+            primary_app_id, email, password,
+        )
 
     # ── Stage 5 ────────────────────────────────────────────────────────
 

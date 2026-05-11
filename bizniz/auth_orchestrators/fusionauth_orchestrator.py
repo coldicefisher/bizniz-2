@@ -819,6 +819,13 @@ class FusionAuthOrchestrator:
 
         Raises FusionAuthError on bad credentials or account
         deactivation.
+
+        Uses the admin path (Authorization: <api_key>) — bypasses
+        ``loginConfiguration.requireAuthentication`` and rate
+        limiting. Suitable for orchestrator-side flows where the
+        provisioner needs a token for follow-on calls. For verifying
+        that the public ``/api/login`` flow works (what the SPA
+        frontend would do), use ``public_login_succeeds`` instead.
         """
         result = self.request(
             "POST", "/api/login",
@@ -835,6 +842,46 @@ class FusionAuthOrchestrator:
                 f"keys present: {list(result.keys())}",
             )
         return token
+
+    def public_login_succeeds(
+        self, app_id: ApplicationId, email: str, password: str,
+    ) -> bool:
+        """Verify the PUBLIC login flow works — no API key, no admin
+        bypass. Mirrors exactly what the SPA frontend does.
+
+        Returns True iff FusionAuth returns 200 + a token to a
+        ``POST /api/login`` call WITHOUT the ``Authorization`` header.
+        Returns False on 4xx/5xx, network errors, or empty-token
+        responses. Never raises — the caller's smoke-test wants a
+        clean True/False.
+
+        v33 lesson: the admin path ``get_token`` returns 200 even
+        when ``loginConfiguration.requireAuthentication=true`` blocks
+        the public flow. The manifest's ``login_verified`` field
+        should be grounded in this method, not ``get_token``.
+        """
+        try:
+            resp = requests.request(
+                method="POST",
+                url=f"{self.base_url}/api/login",
+                # CRITICAL: no Authorization header. We're testing
+                # the same flow the frontend uses.
+                headers={"Content-Type": "application/json"},
+                json={
+                    "applicationId": app_id,
+                    "loginId": email,
+                    "password": password,
+                },
+                timeout=self.timeout_s,
+            )
+        except Exception:
+            return False
+        if resp.status_code != 200:
+            return False
+        try:
+            return bool(resp.json().get("token"))
+        except Exception:
+            return False
 
     def get_user_info(self, token: str) -> dict:
         """Decode + introspect an access token via FusionAuth's
