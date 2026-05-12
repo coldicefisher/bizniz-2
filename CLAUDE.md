@@ -21,100 +21,112 @@ Playwright tests → both run against the live stack →
 a `~/bizniz_projects/<slug>/` directory with running code, tests,
 SKELETON.md contracts, captured OpenAPI, and a per-run report.
 
-## What's in flight (as of 2026-05-03)
+## What's in flight (as of 2026-05-12)
 
-- **V11 ran**: full pipeline end-to-end including AgenticDebugger.
-  Backend 5/5 engineering, 9/11 integration tests passed.
-  Frontend 4/4 engineering but no react skeleton (GitHub auth
-  failure on auto-clone → fell back to generated boilerplate).
-- **Debugger works**: three bugs found and fixed in the integration
-  debug loop. The debugger now repairs integration failures in
-  1 iteration ($0.05) instead of exhausting 3 and escalating.
-  - Container restart after code fixes (commit `bd24e90`)
-  - System prompt tuned for Docker context (commit `bd24e90`)
-  - Server-side logs auto-tailed to debugger (commit `5ad097a`)
-  - `inspect_container` tool for on-demand log/exec (commit `f11ba67`)
-- **Standalone harness**: `examples/debug_integration.py` runs only
-  the integration phase against an already-built project — no need
-  to re-pay engineering cost while tuning the debugger.
-- **Workspace filtering fixed**: `list_relative_files()` now prunes
-  node_modules + framework caches (Angular, Astro, SvelteKit, Vue/Nuxt,
-  Turbo, Parcel, etc.) at the walk level. V11 frontend: 527 → 27 files.
-  Debug loop also sends manifests (package.json, requirements.txt)
-  first, excludes lockfiles.
-- **Milestone builds wired**: `build_with_plan` now runs integration
-  tests after each milestone. `examples/milestone_build.py` supports
-  `--plan-only`, `--milestone N`, `--resume` for human-gated flow.
-- **Property Manager test**: first full-lifecycle test in
-  `tests/e2e/property_manager/`. Real Postgres, JWT auth, two roles,
-  4 domains. Exercises planner → evolve → engineer → integration →
-  debugger across multiple milestones.
-- **Stack validation**: provisioner now brings stack up + health
-  checks all services before engineering starts. Infra debugger
-  dispatched on failure (Dockerfile, compose, init.sql).
-- **Image rebuild**: Docker images rebuilt after engineering so
-  integration tests run against final code, not skeleton state.
-  Integration repair uses `--build --force-recreate` (not restart).
-- **Import tools**: `search_imports` and `list_all_imports` available
-  to all agents (coder, tester, debugger). Full signatures + docstrings.
-  Preflight "did you mean?" hints injected into repair prompts.
-- **FusionAuth skeleton**: fastapi skeleton delegates all auth to
-  FusionAuth. No local JWT minting or password hashing.
-- **Case normalization**: `ServiceDefinition` normalizes service_type,
-  framework, language to lowercase via Pydantic validator. Template
-  lookup case-insensitive with aliases.
-- **FusionAuth agent**: reads problem statement → extracts roles +
-  tenancy model → creates roles/test users via FusionAuth API →
-  writes AUTH_CONTRACT.md for engineers. Sequencing fix needed
-  (must run while stack is up, before teardown).
-- **Pre-built test sidecars**: `bizniz-test-pytest:latest` and
-  `bizniz-test-playwright:latest` eliminate runtime pip/npm install.
-  30-60s saved per test execution. Auto-built if missing.
-- **Design systems**: React skeleton → Tailwind CSS v4, Angular
-  skeleton → Angular Material (already had it, now documented).
-- **Milestone-scoped integration**: integration tests receive
-  `milestone.problem_slice`, not the full problem statement.
-- **FusionAuth sequencing fixed**: stack stays up through FusionAuth
-  agent, tears down after. No more "Connection refused."
-- **UX Designer agent**: screenshots frontend views via Playwright
-  sidecar → sends to Gemini vision for design evaluation → dispatches
-  Coder to apply fixes → re-screenshots to verify. Pipeline placement:
-  after image rebuild, before integration tests. Uses `gemini-flash`
-  for the screenshot script and vision evaluation.
-- **Gemini vision**: GeminiClient now supports `get_text_with_images()`
-  for multimodal prompts. 19 unit + 4 functional tests.
-- **Debugger cost fixes**: duplicate fix bail (same code_fixes twice →
-  stop), error signatures persist across agentic debugger (no 3-failure
-  re-confirm), repair history persists Phase 2 → Phase 3 (deduplicated),
-  OrchestratorMaxIterationsError propagates instead of being swallowed.
-- **Image capture**: `_compose_up_and_capture_images()` runs
-  `docker compose up -d --build`, reads image names from
-  `docker compose ps --format json`, stamps onto ServiceDefinition.
-  Fixed root cause of M1 unit test failures (tests ran in generic
-  bizniz-python-runner instead of service image).
-- **FusionAuth auto-create**: agent now creates the application if
-  missing (kickstart only runs on first boot; stale DB = missing app).
-- **Config**: gemini-pro → gemini-flash-top across bizniz.yaml. Pro
-  quota hit at 250/day; flash-top (gemini-3-flash-preview) has same
-  vision support and no daily cap.
-- **Auth contract in debugger**: integration debugger now loads
-  AUTH_CONTRACT.md and injects it into the debug context. Tells the
-  debugger that skeleton auth files MAY be modified to match the
-  FusionAuth contract. Previously the debugger diagnosed auth
-  mismatches correctly but couldn't fix skeleton-provided files.
-- **UX designer screenshot waits**: 5s waitForTimeout after every
-  navigation (was 1s), 30s goto timeout (was 15s), 180s subprocess
-  timeout. SPAs need time for Vite HMR + React hydration.
-- **M1 status**: engineering passes (backend 3/3, frontend 5/5).
-  FusionAuth auto-create works (smoke PASS, valid JWT). UX designer
-  runs and dispatches coder fixes. Integration auth failures are
-  the last blocker — auth contract context fix is deployed but not
-  yet validated (M1 currently running). Backend had 9/12 integration
-  pass in prior run, 3 auth route mismatches.
-- **Pending**: M1 is running now. If auth integration passes, run M2.
-  If not, investigate the specific auth route mismatch — the debugger
-  has the contract now, so it should be able to fix the skeleton's
-  auth routes to match FusionAuth's actual behavior.
+### Pluggable LLM backend — Architecture C ✅ complete
+
+The pipeline now runs on either Gemini API or Claude Code CLI
+(subprocess) interchangeably. Same orchestrator, same agents, same
+workspace artifacts — config selects per-agent per-service.
+
+- **`bizniz/clients/claude_cli/`** — `ClaudeCliClient(BaseAIClient)`
+  shells out to `claude --print --output-format=json`. Free on Max
+  plan, metered API rates on Pro/Free. Routes via `claude-cli` model
+  prefix. Single-call agents (Planner, Architect, ServicePlanner,
+  AuthPlanner, QE, CR, code_examples) just work.
+- **`bizniz/coder/claude_cli_coder.py`** — `ClaudeCliCoder` for the
+  tool-loop. Same constructor surface as `Coder`; the dispatcher
+  swap is config-only (`coder_factory` checks the model name).
+  Claude uses native Edit/Write/Read/Bash/Glob/Grep tools with
+  `--permission-mode=bypassPermissions` against the service workspace.
+  Final output: a CoderResult JSON we parse.
+- **`bizniz/mcp_server/`** — MCP server exposing five Bizniz tools to
+  Claude on demand: `get_prior_issues`, `get_issue_test_output`,
+  `validate_python_imports`, `read_audit_findings`,
+  `read_auth_contract`. ClaudeCliCoder writes a temp mcp-config.json
+  per-issue pointing at the server (launched as `python -m
+  bizniz.mcp_server.server` with `BIZNIZ_PROJECT_ROOT` +
+  `BIZNIZ_JOB_ID` env vars). Live-verified: Claude called
+  `mcp__bizniz__get_prior_issues` against bookshelf_claude's DB and
+  returned the right 8 issue IDs.
+
+### Full MilestoneLoop — all phases wired
+
+`ENRICH → IMPLEMENT → SMOKE → REVIEW_INITIAL → REPAIR_ITER_{0,1,2} →
+REVIEW_FINAL → INTEGRATION_API → INTEGRATION_WORKER → INTEGRATION_WEB
+→ DONE`. Each step has a hard gate via `GatePolicy`.
+
+- **`bizniz/driver/smoke_phase.py`** — new SubPhase.SMOKE. Pure curl
+  against the live compose stack: backend `/health` + public-flow
+  `/api/login` (no API key — same path the SPA uses) + GET probes on
+  every registered OpenAPI route. Any 5xx fails the gate. Catches
+  the "tests pass but app 500s" class.
+- **QualityEngineer + CodeReviewer** — wired in MilestoneLoop's
+  `_phase_review` after IMPLEMENT. QE checks coverage by capability
+  (returns CoverageReport with missing scenarios); CR checks code
+  quality (flagged_symbols, ungated_auth, missing_error_handling).
+  Drives REPAIR_ITER iterations.
+- **IntegrationPhase** — `run_api`, `run_worker`, `run_web` for
+  HTTPApiTester + WorkerTester + WebUITester + AgenticDebugger.
+  Fully end-to-end: capture OpenAPI → write tests → run pytest
+  sidecar → on fail dispatch debugger → iterate.
+
+### Coder hardening
+
+- **`bizniz/coder/symbol_validator.py`** — AST walker catches
+  hallucinated imports AND attribute access on Pydantic/dataclass
+  classes (`settings.foo_bar` when only `foo_baz` exists).
+  Caught two real v33 bugs the pipeline had shipped.
+- **Don't-swallow-exceptions** prompt rule — Coder forbidden from
+  generic `except Exception: raise HTTPException(500, "Internal
+  server error")` patterns. v33 wasted an hour diagnosing a swallowed
+  AttributeError.
+- **Probe-first rule** in Coder + AgenticDebugger prompts (cheap
+  tiers ignore it; auto-tail-on-failure in `lib/tools/test_runner.py`
+  is the deterministic forcing function — it auto-appends container
+  logs of target + auxiliary services to every TESTS FAILED output).
+- **Forced-final TerminalActionRejected → stall** (not errored).
+  Issue gets cleanly escalated to the next tier instead of marked
+  non-recoverable.
+- **Unknown/empty action stall detection** — `tool_loop_agent` counts
+  empty `action: ""` in `recent_actions` so 3-of-5 fires the stall
+  signal. Without this, flash-lite's empty-action loops burned the
+  iter budget.
+
+### AuthOperator now matches user-facing reality
+
+- **`requireAuthentication=false`** on app create + reconcile PATCH
+  on existing apps. SPA frontend can call `/api/login` without an
+  API key (FA default `true` blocked this).
+- **`_smoke_login` uses public flow** (no API key) — the manifest's
+  `login_verified=true` field is now grounded in the same path the
+  frontend takes.
+- **Contract extension**: deterministic FusionAuth API endpoint
+  reference (login, register, role-change, password policy, JWT
+  validation). Calls out the `[duplicate]registration` 400 pitfall
+  (putting app ID where user ID goes). Per-service workspace copies.
+
+### Validation runs
+
+- **bookshelf greenfield on Gemini** (2026-05-11): 6 issues +
+  3 fixes, 2 repair iterations, halted at milestone_unapproved gate
+  with 4 critical CR findings. ~50min, $1.49.
+- **bookshelf_claude greenfield on Claude** (2026-05-11): 8 issues,
+  **0 escalations, 0 stalls, 0 repair iterations**. QE approved
+  5/5 capabilities first try. CR approved with 2 findings, 0 critical.
+  ~40min, **$0 marginal** (Max plan).
+- Same problem, same pipeline. The Gemini-flash quality ceiling vs
+  Claude is dramatic. See
+  `docs/changes/2026-05-12_full_pipeline_and_claude_pivot.md`.
+
+### Pending
+
+- **Container rebuild on requirements.txt edit** (#72). Coder
+  workaround is hot-install via `pip install` inside the container.
+- **Harder greenfield on Claude+MCP** — bookshelf was small enough
+  Claude one-shotted without MCP. Need a property_manager-scale run
+  to stress-test MCP under load.
+- **M2 / evolve mode on Claude** — not yet exercised.
 
 ## Where things live
 
