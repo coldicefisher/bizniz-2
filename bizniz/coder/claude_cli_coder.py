@@ -24,9 +24,12 @@ becomes a high-level brief here.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -161,6 +164,13 @@ class ClaudeCliCoder:
         )
 
         ws_root = self._resolve_workspace_root()
+
+        # MCP config exposes bizniz tools (get_prior_issues,
+        # validate_python_imports, read_audit_findings, etc.) to
+        # Claude on demand. Written to a tempfile because Claude
+        # CLI's --mcp-config takes a path, not inline JSON.
+        mcp_config_path = self._write_mcp_config()
+
         cmd = [
             self._command, "--print",
             "--output-format=json",
@@ -168,7 +178,14 @@ class ClaudeCliCoder:
             "--permission-mode", "bypassPermissions",
             "--allowed-tools", " ".join(_ALLOWED_TOOLS),
             "--add-dir", str(ws_root),
+            "--mcp-config", str(mcp_config_path),
         ] + self._additional_args
+
+        # Pass project context to the MCP server via env so its tools
+        # can find the DB + run state without parsing args.
+        env = os.environ.copy()
+        env["BIZNIZ_PROJECT_ROOT"] = str(self._project_root_for_mcp())
+        env["BIZNIZ_JOB_ID"] = self._infer_job_id() or ""
 
         t0 = time.time()
         try:
@@ -179,6 +196,7 @@ class ClaudeCliCoder:
                 text=True,
                 timeout=self._timeout_s,
                 cwd=str(ws_root),
+                env=env,
             )
         except subprocess.TimeoutExpired as e:
             self._log(
@@ -239,6 +257,59 @@ class ClaudeCliCoder:
             return Path(self._workspace.root)
         return Path(".")
 
+    def _project_root_for_mcp(self) -> Path:
+        """Project root = workspace's parent (each service workspace
+        lives at ``<project_root>/<service_name>/``). The MCP server
+        needs project_root to find ``.bizniz/project.db`` and
+        ``AUTH_CONTRACT.md``.
+        """
+        ws = self._resolve_workspace_root()
+        return ws.parent
+
+    def _infer_job_id(self) -> Optional[str]:
+        """Best-effort: find the newest job dir under
+        ``docs/runs/`` so the MCP server can locate the right
+        review artifact. Returns None if no runs exist yet (first
+        invocation in a fresh project).
+        """
+        runs = self._project_root_for_mcp() / "docs" / "runs"
+        if not runs.exists():
+            return None
+        dirs = sorted(
+            [p.name for p in runs.iterdir() if p.is_dir()],
+            reverse=True,
+        )
+        return dirs[0] if dirs else None
+
+    def _write_mcp_config(self) -> Path:
+        """Write a tempfile MCP config that Claude CLI loads via
+        ``--mcp-config``. Launches ``bizniz.mcp_server`` as a
+        stdio subprocess with the project's PYTHONPATH set.
+
+        The config is rewritten per ``code_issue`` call (cheap) so
+        environment changes between issues are honored.
+        """
+        # The bizniz repo root — needed on PYTHONPATH for the server
+        # subprocess to import bizniz packages.
+        bizniz_root = Path(__file__).resolve().parent.parent.parent
+        config = {
+            "mcpServers": {
+                "bizniz": {
+                    "command": sys.executable,
+                    "args": ["-m", "bizniz.mcp_server.server"],
+                    "env": {
+                        "PYTHONPATH": str(bizniz_root),
+                        "BIZNIZ_PROJECT_ROOT": str(self._project_root_for_mcp()),
+                        "BIZNIZ_JOB_ID": self._infer_job_id() or "",
+                    },
+                },
+            },
+        }
+        fd, path = tempfile.mkstemp(prefix="bizniz_mcp_", suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump(config, f)
+        return Path(path)
+
     def _build_user_prompt(
         self,
         issue: Issue,
@@ -274,6 +345,29 @@ class ClaudeCliCoder:
             f"<cmd>`` (e.g. pip list, env, python -c).\n"
             f"- For upstream service logs: ``docker compose -f "
             f"{self._compose_path} logs --tail 50 <svc>``\n"
+            f"\n## Bizniz MCP tools (call when you need cross-issue "
+            f"context)\n"
+            f"- ``mcp__bizniz__get_prior_issues(milestone, service)`` "
+            f"— see what other issues in this milestone already did "
+            f"(target_files, test_files, status). Use this when "
+            f"you're about to write something that another issue may "
+            f"have covered.\n"
+            f"- ``mcp__bizniz__get_issue_test_output(issue_id)`` — "
+            f"pytest output tail for another issue. Useful when "
+            f"debugging a test that depends on another issue's setup.\n"
+            f"- ``mcp__bizniz__validate_python_imports(file_paths)`` "
+            f"— AST-walk validator. Catches hallucinated imports + "
+            f"attribute access on Pydantic/dataclass classes "
+            f"(``settings.foo_bar`` when only ``foo_baz`` exists). "
+            f"CHEAP — call this on your target files before running "
+            f"pytest to catch import-time bugs without a full test run.\n"
+            f"- ``mcp__bizniz__read_audit_findings(milestone)`` — "
+            f"prior CodeReviewer findings. Avoid re-introducing "
+            f"patterns the reviewer already flagged.\n"
+            f"- ``mcp__bizniz__read_auth_contract()`` — full "
+            f"AUTH_CONTRACT.md. The Bizniz prompt already includes "
+            f"it; this is a re-fetch path if you've drifted from "
+            f"your context.\n"
         )
         return base + orientation
 
