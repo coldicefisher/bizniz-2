@@ -334,31 +334,17 @@ def repair_integration_failure(
                 f"{len(diagnosis.code_fixes)} direct fix(es)"
             )
 
-            if not diagnosis.code_fixes:
-                # No applicable fixes from this attempt. Record and
-                # continue to next attempt / tier.
-                if ws_root_path is not None:
-                    _log_append(ws_root_path, _LogEntry(
-                        agent="agenticdebugger",
-                        tier=tier.model_label,
-                        attempt=tier_attempt,
-                        trigger=last_output[:500],
-                        diagnosis=diagnosis.diagnosis[:500],
-                        outcome="no_fixes",
-                    ))
-                _log(
-                    on_status,
-                    f"Integration debug: '{service.name}' [{tier.model_label}] "
-                    f"attempt {tier_attempt} produced no fixes — continuing chain"
-                )
-                continue
-
-            # Apply fixes. Hallucination check moved to post-engineer
-            # phase as a single AI-reviewed checkpoint (see
-            # bizniz/checks/hallucination_review.py); the path-level
-            # guard is gone because hardcoded vocab couldn't keep up
-            # with codebases like vehinexa whose domain words are by
-            # definition outside any pre-curated list.
+            # Apply fixes. Two debugger flavors land here:
+            #   - Legacy AgenticDebugger emits ``code_fixes`` list of
+            #     {filepath, new_content} dicts that this loop writes.
+            #   - ClaudeCliDebugger applies edits directly via the
+            #     ``Edit``/``Write`` tools and returns an empty
+            #     ``code_fixes`` (the fix is already on disk).
+            # For the second case, ``code_fixes == []`` is NOT "no
+            # progress" — it means the file system already reflects
+            # the fix. Either way, re-run the tests to see if it
+            # converged. Only escalate to the next tier when the
+            # rerun ALSO fails.
             applied_fixes = []
             for fix in diagnosis.code_fixes:
                 try:
@@ -374,6 +360,14 @@ def repair_integration_failure(
                         f"Integration debug: failed to apply fix to "
                         f"{fix.filepath}: {e}"
                     )
+            if not diagnosis.code_fixes:
+                _log(
+                    on_status,
+                    f"Integration debug: '{service.name}' attempt "
+                    f"{tier_attempt} returned no ``code_fixes`` (Claude-"
+                    f"style debugger writes via Edit) — re-running tests "
+                    f"against the live workspace"
+                )
 
             repair_history.append(
                 f"[{tier.model_label} attempt {tier_attempt}]: "
