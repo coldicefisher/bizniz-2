@@ -393,18 +393,28 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
             on_status_message=on_status,
         )
 
-    debugger_client = _client_for(
-        getattr(config, "debugger_model", config.architect_model), "debugger",
-    )
+    debugger_model = getattr(config, "debugger_model", config.architect_model)
 
     def debugger_factory(workspace, service):
-        """Build a fresh AgenticDebugger bound to ``service``'s container.
+        """Build a fresh debugger bound to ``service``'s container.
 
-        The pytest environment uses the service's built image so imports
-        of the service's runtime deps resolve at debugger-call time.
-        Falls back to a generic image if the service has no image_name
-        recorded yet (early M1 runs before image stamping).
+        Routing: ``claude-cli`` model name → ClaudeCliDebugger
+        (subprocess + native tools). Anything else → legacy
+        AgenticDebugger (JSON-schema action loop). Both implement
+        ``diagnose(error_output, source_files, test_files,
+        architecture_context, repair_history) -> AgenticDiagnosis``.
         """
+        if debugger_model.startswith("claude-cli"):
+            from bizniz.agents.debugger.claude_cli_debugger import ClaudeCliDebugger
+            return ClaudeCliDebugger(
+                workspace=workspace,
+                compose_path=compose_path,
+                service_name=service.name,
+                on_status_message=on_status,
+                model_name=debugger_model,
+            )
+
+        debugger_client = _client_for(debugger_model, "debugger")
         image = getattr(service, "image_name", None) or "python:3.12-slim"
         env = DockerPytestEnvironment(
             workspace_root=workspace.root if hasattr(workspace, "root") else project_root,
