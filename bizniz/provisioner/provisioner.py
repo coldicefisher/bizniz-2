@@ -26,6 +26,7 @@ from bizniz.architect.types import (
     SystemArchitecture,
 )
 from bizniz.architect.skeletons import get_skeleton, seed_workspace
+from bizniz.provisioner.skeleton_substitutions import apply_substitutions
 from bizniz.project.project import Project
 from bizniz.provisioner.ai_fallback import (
     AIClientFactory,
@@ -477,6 +478,19 @@ class Provisioner:
                 skeleton_dockerfile = Path(workspace.root) / "Dockerfile"
                 if skeleton_dockerfile.exists():
                     (docker_dir / "Dockerfile").write_text(skeleton_dockerfile.read_text())
+                # Rewrite skeleton-shipped hardcoded service refs to
+                # match the architecture's actual service names. e.g.
+                # react skeleton's vite proxy hardcodes
+                # ``http://api:8000`` — if Architect named the backend
+                # ``backend`` we rewrite to ``http://backend:8000`` so
+                # the SPA's API calls don't 502.
+                apply_substitutions(
+                    skeleton_name=skeleton.name,
+                    workspace_root=Path(workspace.root),
+                    architecture=architecture,
+                    service=service,
+                    on_status=log,
+                )
                 skeleton_used = skeleton.name
             except FileNotFoundError as e:
                 log(

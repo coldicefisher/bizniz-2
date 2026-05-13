@@ -171,6 +171,51 @@ class SmokePhase:
                             f"5xx {check.status_code}"
                         )
 
+        # ── 4. Frontend probes ─────────────────────────────────────────
+        # Deterministic checks the SPA can actually serve and proxy.
+        # Catches the v33-era class of bugs where Coder shipped
+        # correct code but skeleton/provisioner glue prevented it
+        # from reaching the user. Currently three checks:
+        #   - GET / on the frontend port — index HTML responds
+        #   - POST /api/v1/auth/login through the frontend proxy —
+        #     catches "vite proxy target points at wrong service"
+        #   - GET /login on the frontend port — HTML contains an
+        #     <input> tag (catches "skeleton placeholder shadowing
+        #     Coder's real form")
+        frontends = [
+            s for s in architecture.services
+            if (s.service_type or "").lower() == "frontend"
+        ]
+        # Use one of the test-user credentials for the proxy login probe.
+        proxy_creds = test_users[0] if test_users else None
+        for frontend in frontends:
+            base = f"http://localhost:{frontend.port}"
+
+            index_check = self._probe_frontend_index(frontend.name, base)
+            checks.append(index_check)
+            if not index_check.passed:
+                critical_failures.append(
+                    f"frontend_index[{frontend.name}] {index_check.detail}"
+                )
+
+            if proxy_creds and app_id:
+                email, password = proxy_creds
+                proxy_check = self._probe_frontend_proxy_login(
+                    frontend.name, base, email, password,
+                )
+                checks.append(proxy_check)
+                if not proxy_check.passed:
+                    critical_failures.append(
+                        f"frontend_proxy[{frontend.name}] {proxy_check.detail}"
+                    )
+
+            login_check = self._probe_frontend_login_route_has_form(
+                frontend.name, base,
+            )
+            checks.append(login_check)
+            # Non-critical: SPAs may legitimately render forms in JS
+            # only (no <input> in initial HTML). Treat as warning.
+
         passed = len(critical_failures) == 0
         duration = time.time() - t0
         self._log(
@@ -183,6 +228,135 @@ class SmokePhase:
             checks=checks,
             duration_s=duration,
             critical_failures=critical_failures,
+        )
+
+    # ── Frontend probes ────────────────────────────────────────────────
+
+    def _probe_frontend_index(
+        self, service_name: str, base: str,
+    ) -> SmokeCheck:
+        """GET /. Expect 200 + non-empty HTML."""
+        try:
+            resp = requests.get(base + "/", timeout=self._timeout_s)
+        except Exception as e:
+            return SmokeCheck(
+                name=f"frontend_index:{service_name}",
+                category="frontend",
+                target=base + "/",
+                passed=False,
+                detail=f"{type(e).__name__}: {e}",
+            )
+        ok = resp.status_code == 200 and bool((resp.text or "").strip())
+        return SmokeCheck(
+            name=f"frontend_index:{service_name}",
+            category="frontend",
+            target=base + "/",
+            passed=ok,
+            status_code=resp.status_code,
+            detail=(
+                "ok" if ok else
+                f"status={resp.status_code}, body={len(resp.text or '')} bytes"
+            ),
+        )
+
+    def _probe_frontend_proxy_login(
+        self, service_name: str, base: str, email: str, password: str,
+    ) -> SmokeCheck:
+        """POST /api/v1/auth/login through the frontend's dev-server
+        proxy. Mirrors the path the browser takes when the SPA's API
+        client calls backend routes. 502 here means the proxy target
+        is wrong (skeleton hardcoded the wrong service name).
+
+        We don't fail on a 4xx — the backend may legitimately reject
+        these credentials. We fail on 5xx, network errors, or "no
+        backend reachable through proxy."
+        """
+        url = base + "/api/v1/auth/login"
+        try:
+            resp = requests.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json={"email": email, "password": password},
+                timeout=self._timeout_s,
+            )
+        except Exception as e:
+            return SmokeCheck(
+                name=f"frontend_proxy:{service_name}",
+                category="frontend",
+                target=url,
+                passed=False,
+                detail=f"{type(e).__name__}: {e}",
+            )
+        # 502 = bad gateway = vite proxy can't reach upstream.
+        # Other 5xx = backend crashed or wiring broken.
+        if resp.status_code >= 500:
+            return SmokeCheck(
+                name=f"frontend_proxy:{service_name}",
+                category="frontend",
+                target=url,
+                passed=False,
+                status_code=resp.status_code,
+                detail=(
+                    f"5xx through proxy ({resp.status_code}) — "
+                    f"check vite.config.ts proxy target matches the "
+                    f"actual backend service name"
+                ),
+            )
+        return SmokeCheck(
+            name=f"frontend_proxy:{service_name}",
+            category="frontend",
+            target=url,
+            passed=True,
+            status_code=resp.status_code,
+            detail=(
+                f"proxy reaches backend (got {resp.status_code} — "
+                f"4xx fine, means backend responded)"
+            ),
+        )
+
+    def _probe_frontend_login_route_has_form(
+        self, service_name: str, base: str,
+    ) -> SmokeCheck:
+        """GET /login. Look for any <input> tag in the response body.
+        Non-critical: many SPAs render forms via JS-only, so the
+        initial HTML may not contain inputs. A warning when we don't
+        find any — the user can investigate.
+
+        Catches the "skeleton placeholder still rendering instead of
+        Coder's real form" class — the placeholder is usually a
+        styled <div> with no inputs.
+        """
+        url = base + "/login"
+        try:
+            resp = requests.get(url, timeout=self._timeout_s)
+        except Exception as e:
+            return SmokeCheck(
+                name=f"frontend_login_form:{service_name}",
+                category="frontend",
+                target=url,
+                passed=False,
+                detail=f"{type(e).__name__}: {e}",
+            )
+        body = (resp.text or "").lower()
+        # SPAs: the body is usually the vite-served index.html for ANY
+        # route (client-side router handles /login). So the absence of
+        # <input> in raw HTML isn't a hard fail — just a signal.
+        has_input = "<input" in body
+        return SmokeCheck(
+            name=f"frontend_login_form:{service_name}",
+            category="frontend",
+            target=url,
+            passed=resp.status_code < 500,
+            status_code=resp.status_code,
+            detail=(
+                "html served (form rendering is JS-driven for SPAs)"
+                if has_input else
+                "html served; no <input> in initial HTML "
+                "(expected for SPAs — JS will render). "
+                "If your /login shows a placeholder, check that "
+                "skeleton App.tsx mounts auto-discovered routes "
+                "BEFORE hardcoded placeholders."
+            ),
         )
 
     # ── Probes ──────────────────────────────────────────────────────────

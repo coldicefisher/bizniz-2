@@ -611,6 +611,33 @@ class MilestoneLoop:
                 auth_contract=auth_contract,
             )
             state.mark_phase(target, integration_api)
+            # Loud reminder: single-phase mode finished THIS phase
+            # but the milestone is not done until WORKER and WEB
+            # also run. Easy thing to overlook — and it bit us on
+            # property_manager_claude (saw passing integration_api
+            # and assumed M1 was demo-ready; the SPA was still
+            # broken because integration_web never executed).
+            has_worker = any(
+                (s.service_type or "").lower() == "worker"
+                for s in architecture.services
+            )
+            has_frontend = any(
+                (s.service_type or "").lower() == "frontend"
+                for s in architecture.services
+            )
+            pending = []
+            if has_worker:
+                pending.append("integration_worker")
+            if has_frontend:
+                pending.append("integration_web")
+            if pending:
+                self._log(
+                    f"MilestoneLoop: M{state.milestone_index} "
+                    f"NOT DONE — single-phase mode ran integration_api "
+                    f"only; still pending: {', '.join(pending)}. "
+                    f"Run without ``--phase`` to chain through all "
+                    f"integration phases, or fire each phase separately."
+                )
 
         elif target == SubPhase.INTEGRATION_WORKER:
             api_artifact = state.read_artifact(SubPhase.INTEGRATION_API) or {}

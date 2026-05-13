@@ -141,3 +141,97 @@ class TestResultAggregation:
         )
         assert result.passed
         assert result.checks == []
+
+
+class TestFrontendProbes:
+    def _arch(self):
+        return SystemArchitecture(
+            project_name="t", project_slug="t",
+            services=[
+                ServiceDefinition(
+                    name="frontend", service_type="frontend",
+                    framework="react", language="typescript",
+                    description="", workspace_name="frontend", port=5173,
+                ),
+                ServiceDefinition(
+                    name="backend", service_type="backend",
+                    framework="fastapi", language="python",
+                    description="", workspace_name="backend", port=8000,
+                ),
+            ],
+            description="",
+        )
+
+    def _milestone(self):
+        return Milestone(
+            name="M1", description="d",
+            problem_slice="ps", sequence_index=0,
+        )
+
+    def test_frontend_proxy_502_is_critical(self):
+        """Property_manager_claude bug: vite proxy → wrong service →
+        browser 502 on /api calls. SmokePhase must catch."""
+        phase = SmokePhase()
+
+        def fake_get(url, **kw):
+            r = MagicMock()
+            if "/openapi" in url:
+                r.status_code = 200
+                r.json = lambda: {"paths": {}}
+            elif "/health" in url:
+                r.status_code = 200
+            else:
+                # frontend index + /login
+                r.status_code = 200
+                r.text = "<html><body>SPA shell</body></html>"
+            return r
+
+        def fake_post(url, **kw):
+            r = MagicMock()
+            if "/api/login" in url and "9011" not in url:
+                # FA login probe (via auth port) — succeeds
+                r.status_code = 200
+                r.json = lambda: {"token": "tok"}
+            elif "/api/v1/auth/login" in url:
+                # Frontend proxy probe — 502 (the bug)
+                r.status_code = 502
+                r.text = "Bad Gateway"
+            else:
+                r.status_code = 200
+                r.json = lambda: {"token": "tok"}
+            return r
+
+        contract = (
+            "- Primary application ID: `app-id-x`\n"
+            "## Test users\n\n- u@e.com / pw — roles user ✓\n"
+        )
+        with patch("requests.get", side_effect=fake_get), \
+             patch("requests.post", side_effect=fake_post):
+            result = phase.run(
+                milestone=self._milestone(),
+                architecture=self._arch(),
+                project_root=Path("/tmp"),
+                auth_contract=contract,
+            )
+        assert not result.passed
+        assert any(
+            "frontend_proxy" in f
+            for f in result.critical_failures
+        ), f"expected frontend_proxy in critical failures; got {result.critical_failures}"
+
+    def test_frontend_index_unreachable_is_critical(self):
+        phase = SmokePhase()
+        with patch(
+            "requests.get",
+            side_effect=ConnectionError("connection refused"),
+        ):
+            result = phase.run(
+                milestone=self._milestone(),
+                architecture=self._arch(),
+                project_root=Path("/tmp"),
+                auth_contract=None,
+            )
+        assert not result.passed
+        assert any(
+            "frontend_index" in f for f in result.critical_failures
+        )
