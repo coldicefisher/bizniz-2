@@ -268,20 +268,23 @@ class ServicePlanner:
     ) -> List[Issue]:
         """Auto-repair instead of raising:
 
-        - Empty test_files: auto-fill with ``tests/test_<id>.py`` (or
-          ``tests/test_<lowercased_target>.py`` if a target file is
-          available). The LLM occasionally omits test_files; we'd
-          rather give the Coder a default path than lose the issue.
-        - Empty target_files: keep raising — there's nothing to code.
+        - Empty test_files: auto-fill with ``tests/test_<id>.py``.
+          The LLM occasionally omits test_files; we'd rather give the
+          Coder a default path than lose the issue.
+        - Empty target_files: drop the issue with a warning. Without
+          target_files there's nothing for the Coder to edit, and the
+          repair iteration is a side-channel — losing one fix-issue
+          is better than crashing the milestone. Recipe_box repair
+          iter 2 surfaced ``BA-fix2-1`` with empty target_files when
+          the LLM punted; the gate now drops it instead of raising.
         """
-        bad_no_target: List[str] = []
+        dropped_no_target: List[str] = []
         repaired: List[Issue] = []
         for i in issues:
             if not i.target_files:
-                bad_no_target.append(i.id)
+                dropped_no_target.append(i.id)
                 continue
             if not i.test_files:
-                # Derive a default test path from the issue id.
                 slug = i.id.lower().replace("-", "_").replace(":", "_")
                 default_test = f"tests/test_{slug}.py"
                 self._log(
@@ -290,10 +293,11 @@ class ServicePlanner:
                 )
                 i = i.model_copy(update={"test_files": [default_test]})
             repaired.append(i)
-        if bad_no_target:
-            raise ServicePlannerError(
-                f"ServicePlanner({service_name}): issues with empty "
-                f"target_files: {bad_no_target} — nothing to code"
+        if dropped_no_target:
+            self._log(
+                f"ServicePlanner({service_name}): dropped "
+                f"{len(dropped_no_target)} issue(s) with empty "
+                f"target_files: {dropped_no_target}"
             )
         return repaired
 

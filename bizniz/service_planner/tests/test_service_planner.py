@@ -155,15 +155,19 @@ class TestValidation:
                 architecture=_arch(), enriched_spec=_spec(), service=_service(),
             )
 
-    def test_missing_target_files_raises(self):
-        # No target_files = nothing to code. Still raises.
-        d = _issue_dict("BE-001", files=[])
-        client = _client_returning({"issues": [d]})
+    def test_missing_target_files_dropped(self):
+        # No target_files = nothing to code. Drop the issue with a
+        # warning rather than crash — repair iterations occasionally
+        # surface empty-target_files issues, and losing one fix is
+        # better than aborting the whole milestone.
+        bad = _issue_dict("BE-001", files=[])
+        good = _issue_dict("BE-002")
+        client = _client_returning({"issues": [bad, good]})
         planner = ServicePlanner(client=client)
-        with pytest.raises(ServicePlannerError, match="empty target_files"):
-            planner.plan_service(
-                architecture=_arch(), enriched_spec=_spec(), service=_service(),
-            )
+        issues = planner.plan_service(
+            architecture=_arch(), enriched_spec=_spec(), service=_service(),
+        )
+        assert [i.id for i in issues] == ["BE-002"]
 
     def test_missing_test_files_auto_filled(self):
         # No test_files = auto-fill with tests/test_<id>.py instead
