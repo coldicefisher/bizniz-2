@@ -476,10 +476,21 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     ux_phase = UXPhase(
         ux_factory=ux_designer_factory, on_status=on_status,
     )
-    # Stage 1 wiring still: RefactorPhase has no real agent. Stage 2b
-    # will provide a refactorer_factory.
+
+    # RefactorPhase factory: builds a Refactorer rooted at the
+    # project (so Claude can see all service workspaces). Runs at
+    # milestone boundaries the Planner flagged + always the final
+    # milestone.
+    def refactorer_factory():
+        from bizniz.refactorer.refactorer import Refactorer
+        return Refactorer(
+            project_root=project_root,
+            compose_path=compose_path,
+            on_status=on_status,
+        )
+
     refactor_phase = RefactorPhase(
-        refactorer_factory=None, on_status=on_status,
+        refactorer_factory=refactorer_factory, on_status=on_status,
     )
 
     gate_mode = "auto" if args.auto else ("interactive" if args.interactive else "strict")

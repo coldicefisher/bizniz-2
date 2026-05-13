@@ -110,7 +110,7 @@ class TestUXPhase:
 
 
 class TestRefactorPhase:
-    def test_stub_runs_no_op(self, tmp_path):
+    def test_no_factory_skips(self, tmp_path):
         phase = RefactorPhase(refactorer_factory=None)
         result = phase.run(
             milestone=_milestone(),
@@ -123,8 +123,13 @@ class TestRefactorPhase:
         assert result.ran is False
         assert result.skipped_reason == "not_implemented"
 
-    def test_final_milestone_still_no_op_until_stage2(self, tmp_path):
-        phase = RefactorPhase(refactorer_factory=None)
+    def test_factory_runs_and_captures_result(self, tmp_path):
+        from bizniz.refactorer.refactorer import RefactorerResult
+        refactorer = MagicMock()
+        refactorer.run.return_value = RefactorerResult(
+            status="no_op", summary="clean", notes=[],
+        )
+        phase = RefactorPhase(refactorer_factory=lambda: refactorer)
         result = phase.run(
             milestone=_milestone(idx=3),
             architecture=_arch(_backend()),
@@ -133,4 +138,23 @@ class TestRefactorPhase:
             is_final_milestone=True,
         )
         assert result.passed is True
+        assert result.ran is True
+        assert result.refactorer_result is not None
+        assert result.refactorer_result.get("status") == "no_op"
+
+    def test_factory_exception_does_not_gate(self, tmp_path):
+        phase = RefactorPhase(
+            refactorer_factory=lambda: (_ for _ in ()).throw(
+                RuntimeError("boom")
+            ),
+        )
+        result = phase.run(
+            milestone=_milestone(),
+            architecture=_arch(_backend()),
+            project_root=tmp_path,
+            service_workspaces={},
+            is_final_milestone=True,
+        )
+        assert result.passed is True
         assert result.ran is False
+        assert "RuntimeError" in (result.skipped_reason or "")

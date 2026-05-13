@@ -28,6 +28,10 @@ class RefactorPhaseResult(BaseModel):
     ran: bool = False
     skipped_reason: Optional[str] = None
     duration_s: float = 0.0
+    # When the real Refactorer ran, its full result dict lands here
+    # (extractions, skipped candidates, summary, notes). None when
+    # the phase was a no-op skip.
+    refactorer_result: Optional[Dict] = None
 
 
 class RefactorPhase:
@@ -58,19 +62,39 @@ class RefactorPhase:
         if self._refactorer_factory is None:
             scope = "final-milestone" if is_final_milestone else "mid-project"
             self._log(
-                f"RefactorPhase ({scope}): no refactorer wired — "
-                f"skipping (Stage 2 work)"
+                f"RefactorPhase ({scope}): no refactorer wired — skipping"
             )
             return RefactorPhaseResult(
                 passed=True, ran=False,
                 skipped_reason="not_implemented",
                 duration_s=time.time() - t0,
             )
-        # Stage 2: invoke the real refactorer here.
-        # refactorer = self._refactorer_factory()
-        # result = refactorer.run(...)
+        try:
+            refactorer = self._refactorer_factory()
+            result = refactorer.run(
+                milestone=milestone,
+                architecture=architecture,
+                is_final_milestone=is_final_milestone,
+            )
+        except Exception as e:
+            self._log(
+                f"RefactorPhase: raised {type(e).__name__}: {e}"
+            )
+            return RefactorPhaseResult(
+                passed=True, ran=False,
+                skipped_reason=f"{type(e).__name__}: {e}",
+                duration_s=time.time() - t0,
+            )
+        # Refactorer never gates the milestone — even on ``failed``
+        # the phase reports passed=True so the milestone reaches DONE.
+        # Result detail is in the artifact for human review.
+        result_dump = (
+            result.model_dump() if hasattr(result, "model_dump") else None
+        )
         return RefactorPhaseResult(
-            passed=True, ran=False,
-            skipped_reason="not_implemented",
+            passed=True,
+            ran=True,
+            skipped_reason=None,
             duration_s=time.time() - t0,
+            refactorer_result=result_dump,
         )
