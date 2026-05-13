@@ -35,7 +35,7 @@ from bizniz.clients.chatgpt.messages import Message, MessageList
 from bizniz.clients.chatgpt.types.response_format import ResponseFormat
 
 
-_DEFAULT_TIMEOUT_S = 600.0
+_DEFAULT_TIMEOUT_S = 1800.0
 
 
 class ClaudeCliClientError(Exception):

@@ -128,7 +128,7 @@ class ClaudeCliDebugger:
         workspace: Optional[BaseWorkspace] = None,
         environment=None,  # ignored
         tool_iterations: int = 15,  # ignored; Claude manages its own loop
-        timeout_seconds: int = 600,
+        timeout_seconds: int = 1800,
         on_status_message: Optional[Callable[[str], None]] = None,
         compose_path: Optional[str] = None,
         service_name: Optional[str] = None,

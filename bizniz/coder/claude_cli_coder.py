@@ -101,7 +101,7 @@ class ClaudeCliCoder:
         target_service: str = "",
         on_status: Optional[Callable[[str], None]] = None,
         tool_iterations: int = 30,  # unused; Claude manages its own loop
-        timeout_seconds: int = 1200,
+        timeout_seconds: int = 1800,
         base_url: Optional[str] = None,
         workspace_name: Optional[str] = None,
         runner: str = "pytest",  # informational; Claude reads from prompt
