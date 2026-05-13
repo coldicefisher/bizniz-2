@@ -579,25 +579,9 @@ class IntegrationPhase:
             self._on_status(msg)
 
 
-def _resolve_host_port_via_compose(
-    compose_path: str, service_name: str, container_port: int,
-) -> int:
-    """Ask docker compose for the actual host port bound to
-    ``<service_name>:<container_port>``. Falls back to ``container_port``
-    if the query fails. Mirrors SmokePhase._resolve_host_port, used by
-    the readiness gate in _rerun callbacks."""
-    try:
-        result = subprocess.run(
-            ["docker", "compose", "-f", compose_path,
-             "port", service_name, str(container_port)],
-            capture_output=True, text=True, timeout=10,
-        )
-        out = (result.stdout or "").strip()
-        if result.returncode == 0 and ":" in out:
-            return int(out.rsplit(":", 1)[1])
-    except Exception:
-        pass
-    return container_port
+# Re-export the resolver so call sites in this module don't depend
+# on an import path lower in the stack.
+from bizniz.integration.contracts import _resolve_host_port as _resolve_host_port_via_compose  # noqa: E402
 
 
 # ── helpers ─────────────────────────────────────────────────────────────

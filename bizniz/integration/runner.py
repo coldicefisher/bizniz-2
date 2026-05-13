@@ -30,6 +30,7 @@ from typing import Callable, Dict, List, Optional
 
 from bizniz.architect.types import ServiceDefinition, ServiceResult, SystemArchitecture
 from bizniz.integration.contracts import (
+    _resolve_host_port,
     _wait_for_openapi,
     capture_backend_contracts,
 )
@@ -473,7 +474,8 @@ def run_integration_phase(
 
             # Wait for the backend's /health (or /) to confirm it's up
             # post-stack-bringup (the contracts capture stopped them).
-            base = f"http://localhost:{backend.port}"
+            host_port = _resolve_host_port(compose_path, backend.name, backend.port)
+            base = f"http://localhost:{host_port}"
             if not _wait_http_ok(f"{base}/openapi.json", deadline_s=backend_wait_s):
                 _log(
                     on_status,
@@ -544,7 +546,8 @@ def run_integration_phase(
                                  "up", "-d", "--build", "--force-recreate", backend.name],
                                 capture_output=True, text=True, timeout=300,
                             )
-                            _wait_http_ok(f"http://localhost:{backend.port}/openapi.json", deadline_s=60)
+                            host_port = _resolve_host_port(compose_path, backend.name, backend.port)
+                            _wait_http_ok(f"http://localhost:{host_port}/openapi.json", deadline_s=60)
                         except Exception as e:
                             _log(on_status, f"Integration debug: rebuild failed ({e})")
                         return _run_pytest_in_sidecar(
@@ -602,7 +605,8 @@ def run_integration_phase(
                     continue
 
                 # Wait for frontend to actually serve content
-                fe_base = f"http://localhost:{frontend.port}"
+                fe_host_port = _resolve_host_port(compose_path, frontend.name, frontend.port)
+                fe_base = f"http://localhost:{fe_host_port}"
                 if not _wait_http_ok(f"{fe_base}/", deadline_s=backend_wait_s):
                     _log(
                         on_status,
@@ -664,7 +668,8 @@ def run_integration_phase(
                                      "up", "-d", "--build", "--force-recreate", svc.name],
                                     capture_output=True, text=True, timeout=300,
                                 )
-                                _wait_http_ok(f"http://localhost:{svc.port}/", deadline_s=60)
+                                host_port = _resolve_host_port(compose_path, svc.name, svc.port)
+                                _wait_http_ok(f"http://localhost:{host_port}/", deadline_s=60)
                             except Exception as e:
                                 _log(on_status, f"Integration debug: rebuild failed ({e})")
                             return _run_playwright_in_sidecar(

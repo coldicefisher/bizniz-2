@@ -50,6 +50,28 @@ def _wait_for_openapi(port: int, deadline_s: float) -> Optional[dict]:
     return None
 
 
+def _resolve_host_port(
+    compose_path: str, service_name: str, container_port: int,
+) -> int:
+    """Ask docker compose for the host port bound to
+    ``<service_name>:<container_port>``. Falls back to ``container_port``
+    if the query fails. Same approach SmokePhase uses — architecture
+    ports are container ports; host bindings may differ when
+    provisioner remaps to avoid collisions."""
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_path,
+             "port", service_name, str(container_port)],
+            capture_output=True, text=True, timeout=10,
+        )
+        out = (result.stdout or "").strip()
+        if result.returncode == 0 and ":" in out:
+            return int(out.rsplit(":", 1)[1])
+    except Exception:
+        pass
+    return container_port
+
+
 def _backends_with_ports(
     architecture: SystemArchitecture,
     only_names: Optional[List[str]] = None,
@@ -119,12 +141,15 @@ def capture_backend_contracts(
     captured: Dict[str, dict] = {}
     try:
         for backend in backends:
-            doc = _wait_for_openapi(backend.port, deadline_s=backend_wait_s)
+            host_port = _resolve_host_port(
+                compose_path, backend.name, backend.port,
+            )
+            doc = _wait_for_openapi(host_port, deadline_s=backend_wait_s)
             if doc is None:
                 _log(
                     on_status,
                     f"Contracts: '{backend.name}' did not expose /openapi.json "
-                    f"on :{backend.port} within {backend_wait_s:.0f}s — skipping"
+                    f"on :{host_port} within {backend_wait_s:.0f}s — skipping"
                 )
                 continue
             captured[backend.name] = doc
