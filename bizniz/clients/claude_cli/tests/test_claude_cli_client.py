@@ -75,11 +75,15 @@ class TestGetText:
         ):
             return ClaudeCliClient()
 
-    def test_allowed_tools_empty_disables_tool_use(self):
+    def test_tool_use_disabled(self):
         """Regression for recipe_box: WebUITester emitted a 700-byte
-        narrative summary instead of code because Claude treated the
-        prompt as a Write-tool task. The basic client is text-only —
-        must pass ``--allowed-tools ""`` to force pure text output."""
+        narrative ("Wrote 9 Playwright tests...") because Claude
+        treated the prompt as a Write-tool task. The basic client
+        is text-only — must explicitly disable the writing tools.
+
+        Note: ``--allowed-tools ""`` is interpreted as "use defaults"
+        by the CLI; the flag that actually works is ``--disallowedTools``
+        with explicit tool names."""
         c = self._client()
         with patch(
             "bizniz.clients.claude_cli.claude_cli_client.subprocess.run",
@@ -87,8 +91,10 @@ class TestGetText:
         ) as m:
             c.get_text(messages="hi", use_message_history=False)
         argv = m.call_args.args[0]
-        idx = argv.index("--allowed-tools")
-        assert argv[idx + 1] == ""
+        idx = argv.index("--disallowedTools")
+        disallowed = argv[idx + 1]
+        for tool in ("Edit", "Write", "Bash"):
+            assert tool in disallowed, f"{tool} must be in --disallowedTools"
 
     def test_returns_result_text_and_session_id(self):
         c = self._client()

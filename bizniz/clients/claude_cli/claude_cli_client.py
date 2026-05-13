@@ -160,14 +160,19 @@ class ClaudeCliClient(BaseAIClient):
             self._command, "--print",
             "--output-format=json",
             # Single-call agents are prompt-in, text-out by design — no
-            # tool use. Without this, recipe_box's WebUITester emitted a
-            # 700-byte narrative ("Wrote 9 Playwright tests at...")
-            # because Claude interpreted "Write the test file. Target
-            # path: tests/integration/ui.spec.cjs" as a Write-tool task
-            # instead of a code-generation prompt. Empty allowlist
-            # forces pure text output. Tool-using callers use
-            # ``ClaudeCliCoder`` which sets its own ``--allowed-tools``.
-            "--allowed-tools", "",
+            # tool use. Without disabling tools, recipe_box's
+            # WebUITester emitted a 700-byte narrative ("Wrote 9
+            # Playwright tests at...") because Claude interpreted
+            # "Write the test file. Target path: ..." as a Write-tool
+            # task and returned its action summary as the result text.
+            #
+            # ``--allowed-tools ""`` is a no-op in claude-cli (treated
+            # as "use defaults"). The flag that actually works is
+            # ``--disallowedTools`` with the full list. Verified
+            # empirically: with this list, the same prompt that
+            # produced narrative now returns clean JS source.
+            # Tool-using callers use ``ClaudeCliCoder``.
+            "--disallowedTools", "Edit Write Bash Read Glob Grep",
         ]
         if system_prompt:
             cmd.extend(["--append-system-prompt", system_prompt])
