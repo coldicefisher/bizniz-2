@@ -447,15 +447,17 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
 
     # UXPhase factory: per-frontend, builds a UXDesigner.
     #
-    # Picks the implementation by ``engineer_model``:
-    #   - claude-cli → ClaudeUXDesigner (vision via ``claude --print``
-    #                 + Read on PNG files; $0 on Max plan)
-    #   - anything else → legacy UXDesigner with GeminiClient inline
-    #                     image vision
+    # Picks the implementation by binary availability:
+    #   - ``claude`` on PATH → ClaudeUXDesigner (vision via
+    #     ``claude --print`` + Read on PNG files; $0 on Max plan)
+    #   - else → legacy UXDesigner with GeminiClient inline image
+    #     vision
     #
-    # Both wire the same ClaudeCliCoder for applying fixes; only the
-    # eval path differs.
-    use_claude_ux = (config.engineer_model or "").startswith("claude-cli")
+    # The UX fix path is ClaudeCliCoder regardless; only the eval
+    # mechanism differs. Choosing by binary (not config) means the
+    # selector survives bizniz.yaml flavors that mix Claude + Gemini.
+    import shutil as _shutil
+    use_claude_ux = _shutil.which("claude") is not None
 
     def ux_designer_factory(frontend_service):
         def ux_coder_factory(workspace):
