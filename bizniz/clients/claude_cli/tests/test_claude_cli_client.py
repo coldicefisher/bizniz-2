@@ -75,6 +75,21 @@ class TestGetText:
         ):
             return ClaudeCliClient()
 
+    def test_allowed_tools_empty_disables_tool_use(self):
+        """Regression for recipe_box: WebUITester emitted a 700-byte
+        narrative summary instead of code because Claude treated the
+        prompt as a Write-tool task. The basic client is text-only —
+        must pass ``--allowed-tools ""`` to force pure text output."""
+        c = self._client()
+        with patch(
+            "bizniz.clients.claude_cli.claude_cli_client.subprocess.run",
+            return_value=_fake_proc(),
+        ) as m:
+            c.get_text(messages="hi", use_message_history=False)
+        argv = m.call_args.args[0]
+        idx = argv.index("--allowed-tools")
+        assert argv[idx + 1] == ""
+
     def test_returns_result_text_and_session_id(self):
         c = self._client()
         with patch(

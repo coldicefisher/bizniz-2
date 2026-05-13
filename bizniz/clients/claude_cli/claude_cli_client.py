@@ -159,6 +159,15 @@ class ClaudeCliClient(BaseAIClient):
         cmd = [
             self._command, "--print",
             "--output-format=json",
+            # Single-call agents are prompt-in, text-out by design — no
+            # tool use. Without this, recipe_box's WebUITester emitted a
+            # 700-byte narrative ("Wrote 9 Playwright tests at...")
+            # because Claude interpreted "Write the test file. Target
+            # path: tests/integration/ui.spec.cjs" as a Write-tool task
+            # instead of a code-generation prompt. Empty allowlist
+            # forces pure text output. Tool-using callers use
+            # ``ClaudeCliCoder`` which sets its own ``--allowed-tools``.
+            "--allowed-tools", "",
         ]
         if system_prompt:
             cmd.extend(["--append-system-prompt", system_prompt])
