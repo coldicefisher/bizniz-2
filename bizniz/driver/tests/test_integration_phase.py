@@ -409,3 +409,58 @@ class TestRunWeb:
                 backend_contracts={},
             )
         assert result.passed is False
+
+    def test_web_debugger_repairs_then_passes(self, tmp_path):
+        """When debugger_factory is wired, web phase delegates to
+        repair_integration_failure on Playwright fail — symmetric to
+        the API phase. This was the gap recipe_box surfaced."""
+        tester = MagicMock()
+        tester.generate_test_file.return_value = "y"
+        ip = IntegrationPhase(
+            http_tester_factory=MagicMock(),
+            web_tester_factory=MagicMock(return_value=tester),
+            debugger_factory=MagicMock(return_value=MagicMock()),
+            debugger_max_iterations=3,
+        )
+        with patch("bizniz.driver.integration_phase._run_playwright_in_sidecar") as pw, \
+             patch("bizniz.driver.integration_phase.repair_integration_failure") as rep:
+            pw.return_value = (False, "locator.fill timeout")
+            rep.return_value = (True, "passed after debug")
+            result = ip.run_web(
+                milestone=_milestone(),
+                architecture=_arch(_frontend()),
+                project_root=tmp_path, compose_path="/p/c.yml",
+                service_workspaces={"frontend": _make_workspace(tmp_path, "frontend")},
+                backend_contracts={},
+            )
+        assert result.passed is True
+        assert rep.called
+        kwargs = rep.call_args.kwargs
+        assert kwargs["max_iterations"] == 3
+        assert kwargs["integration_test_rel"] == "tests/integration/ui.spec.cjs"
+        assert callable(kwargs["debugger_factory"])
+        assert callable(kwargs["rerun_tests"])
+        assert callable(kwargs["capture_logs"])
+
+    def test_web_no_debugger_factory_returns_failure(self, tmp_path):
+        """Without a debugger_factory the web phase still returns
+        the failure cleanly instead of crashing."""
+        tester = MagicMock()
+        tester.generate_test_file.return_value = "y"
+        ip = IntegrationPhase(
+            http_tester_factory=MagicMock(),
+            web_tester_factory=MagicMock(return_value=tester),
+            debugger_factory=None,
+        )
+        with patch("bizniz.driver.integration_phase._run_playwright_in_sidecar") as pw, \
+             patch("bizniz.driver.integration_phase.repair_integration_failure") as rep:
+            pw.return_value = (False, "1 failed")
+            result = ip.run_web(
+                milestone=_milestone(),
+                architecture=_arch(_frontend()),
+                project_root=tmp_path, compose_path="/p/c.yml",
+                service_workspaces={"frontend": _make_workspace(tmp_path, "frontend")},
+                backend_contracts={},
+            )
+        assert result.passed is False
+        assert not rep.called

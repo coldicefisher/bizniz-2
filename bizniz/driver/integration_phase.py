@@ -346,11 +346,12 @@ class IntegrationPhase:
 
             ws.write_file("tests/integration/ui.spec.cjs", source)
 
-            passed, output = _run_playwright_in_sidecar(
-                service=frontend,
-                workspace_path=Path(ws.root) if hasattr(ws, "root") else project_root,
+            passed, output = self._run_playwright_with_repair(
+                frontend=frontend,
+                workspace=ws,
                 compose_path=compose_path,
-                on_status=self._on_status,
+                project_root=project_root,
+                auth_contract=auth_contract,
             )
             if passed:
                 results.append(_passed_result(frontend.name, _log_tail(output, 60)))
@@ -453,6 +454,89 @@ class IntegrationPhase:
         except Exception as e:
             self._log(
                 f"IntegrationPhase API: debug loop raised "
+                f"{type(e).__name__}: {e}"
+            )
+            return False, output
+
+    def _run_playwright_with_repair(
+        self,
+        frontend: ServiceDefinition,
+        workspace: BaseWorkspace,
+        compose_path: str,
+        project_root: Path,
+        auth_contract: Optional[str],
+    ) -> tuple[bool, str]:
+        """Run Playwright in the sidecar; on fail, drive the agentic
+        debug loop. Symmetric to ``_run_pytest_with_repair`` but for
+        frontend services.
+        """
+        workspace_path = (
+            Path(workspace.root) if hasattr(workspace, "root") else project_root
+        )
+
+        def _rerun() -> tuple[bool, str]:
+            """Re-run Playwright after debugger applies fixes.
+
+            Rebuild + force-recreate the frontend container first so
+            edits to src/ take effect. Vite hot-reload usually picks
+            them up, but a rebuild is the deterministic forcing
+            function — same reasoning as the backend pytest path.
+            """
+            try:
+                subprocess.run(
+                    ["docker", "compose", "-f", compose_path, "up", "-d",
+                     "--build", "--force-recreate", frontend.name],
+                    capture_output=True, text=True, timeout=600,
+                )
+            except Exception as e:
+                self._log(
+                    f"IntegrationPhase Web: container rebuild raised "
+                    f"{type(e).__name__}: {e}"
+                )
+            return _run_playwright_in_sidecar(
+                service=frontend,
+                workspace_path=workspace_path,
+                compose_path=compose_path,
+                on_status=self._on_status,
+            )
+
+        passed, output = _run_playwright_in_sidecar(
+            service=frontend,
+            workspace_path=workspace_path,
+            compose_path=compose_path,
+            on_status=self._on_status,
+        )
+        if passed or self._debugger_factory is None:
+            return passed, output
+
+        self._log(
+            f"IntegrationPhase Web: '{frontend.name}' tests failed; "
+            f"dispatching debugger (max {self._debugger_max_iterations} iterations)"
+        )
+
+        def _wrapped_factory(ws, _frontend=frontend):
+            return self._debugger_factory(workspace=ws, service=_frontend)
+
+        def _capture_logs() -> str:
+            return _capture_container_logs(compose_path, frontend.name)
+
+        try:
+            return repair_integration_failure(
+                service=frontend,
+                workspace=workspace,
+                failure_output=output,
+                integration_test_rel="tests/integration/ui.spec.cjs",
+                debugger_factory=_wrapped_factory,
+                rerun_tests=_rerun,
+                on_status=self._on_status,
+                max_iterations=self._debugger_max_iterations,
+                capture_logs=_capture_logs,
+                compose_path=compose_path,
+                problem_statement=self._problem_statement,
+            )
+        except Exception as e:
+            self._log(
+                f"IntegrationPhase Web: debug loop raised "
                 f"{type(e).__name__}: {e}"
             )
             return False, output
