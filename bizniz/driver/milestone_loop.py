@@ -28,6 +28,8 @@ from bizniz.code_reviewer.types import CodeReviewReport
 from bizniz.driver.gates import GatePolicy, GateViolation
 from bizniz.driver.integration_phase import IntegrationPhase, IntegrationPhaseResult
 from bizniz.driver.smoke_phase import SmokePhase, SmokePhaseResult
+from bizniz.driver.ux_phase import UXPhase
+from bizniz.driver.refactor_phase import RefactorPhase
 from bizniz.driver.milestone_code_dispatcher import MilestoneCodeDispatcher
 from bizniz.driver.state import MilestoneState, SubPhase, next_subphase
 from bizniz.engineer.agent import Engineer
@@ -90,6 +92,9 @@ class MilestoneLoop:
         issue_store_factory: Optional[Callable[[int], IssueStateStore]] = None,
         cost_tracker=None,
         workspace_summary: Optional[str] = None,
+        ux_phase: Optional[UXPhase] = None,
+        refactor_phase: Optional[RefactorPhase] = None,
+        total_milestones: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
     ):
         self._engineer = engineer
@@ -97,6 +102,9 @@ class MilestoneLoop:
         self._cr = code_reviewer
         self._integration = integration_phase
         self._smoke = smoke_phase
+        self._ux_phase = ux_phase
+        self._refactor_phase = refactor_phase
+        self._total_milestones = total_milestones
         self._gates = gates
         self._workspace_for_service = workspace_for_service
         self._primary_workspace = primary_workspace
@@ -441,6 +449,64 @@ class MilestoneLoop:
                     "integration_web_failed",
                     integration_web.error_summary or "Web integration tests failed",
                 )
+
+        # ── UX_REVIEW ──────────────────────────────────────────────────
+        # Runs after the milestone's frontend integration verified the
+        # service is actually reachable. Self-skips when no frontend or
+        # no ux_factory is wired.
+        ux_result = None
+        if not _has(state, SubPhase.UX_REVIEW):
+            self._tag(state.milestone_index, SubPhase.UX_REVIEW)
+            if self._ux_phase is not None:
+                ux_result = self._ux_phase.run(
+                    milestone=milestone,
+                    architecture=architecture,
+                    project_root=self._project_root,
+                    service_workspaces={
+                        s.name: self._workspace_for_service(s.name)
+                        for s in architecture.services
+                    },
+                    compose_path=self._compose_path,
+                    auth_contract=auth_contract,
+                )
+            state.mark_phase(
+                SubPhase.UX_REVIEW,
+                ux_result.model_dump() if ux_result is not None
+                else {"skipped_reason": "no ux_phase wired"},
+            )
+
+        # ── REFACTOR ───────────────────────────────────────────────────
+        # Runs when the Planner flagged this milestone OR it's the final
+        # milestone (always treated as a refactor boundary). Currently a
+        # stub; real Refactorer ships in Stage 2.
+        refactor_result = None
+        if not _has(state, SubPhase.REFACTOR):
+            self._tag(state.milestone_index, SubPhase.REFACTOR)
+            should_refactor = (
+                getattr(milestone, "refactor_after", False)
+                or self._is_final_milestone(milestone)
+            )
+            if should_refactor and self._refactor_phase is not None:
+                refactor_result = self._refactor_phase.run(
+                    milestone=milestone,
+                    architecture=architecture,
+                    project_root=self._project_root,
+                    service_workspaces={
+                        s.name: self._workspace_for_service(s.name)
+                        for s in architecture.services
+                    },
+                    is_final_milestone=self._is_final_milestone(milestone),
+                )
+            state.mark_phase(
+                SubPhase.REFACTOR,
+                refactor_result.model_dump() if refactor_result is not None
+                else {
+                    "skipped_reason": (
+                        "refactor_after=False and not final milestone"
+                        if not should_refactor else "no refactor_phase wired"
+                    ),
+                },
+            )
 
         state.mark_phase(SubPhase.DONE)
         self._log(
@@ -913,6 +979,19 @@ class MilestoneLoop:
     def _log(self, msg: str) -> None:
         if self._on_status:
             self._on_status(msg)
+
+    def _is_final_milestone(self, milestone: Milestone) -> bool:
+        """True when this milestone is the last in the plan.
+
+        The final milestone is always treated as a refactor boundary
+        regardless of ``milestone.refactor_after``. Needs the loop's
+        constructor-provided ``total_milestones`` count to decide;
+        falls back to ``False`` if not known.
+        """
+        if self._total_milestones is None:
+            return False
+        # sequence_index is 0-based per planner/types.py
+        return milestone.sequence_index >= (self._total_milestones - 1)
 
 
 # ── Module-level helpers ────────────────────────────────────────────────

@@ -22,7 +22,9 @@ class TestNextSubphase:
         assert next_subphase(SubPhase.REVIEW_FINAL) == SubPhase.INTEGRATION_API
         assert next_subphase(SubPhase.INTEGRATION_API) == SubPhase.INTEGRATION_WORKER
         assert next_subphase(SubPhase.INTEGRATION_WORKER) == SubPhase.INTEGRATION_WEB
-        assert next_subphase(SubPhase.INTEGRATION_WEB) == SubPhase.DONE
+        assert next_subphase(SubPhase.INTEGRATION_WEB) == SubPhase.UX_REVIEW
+        assert next_subphase(SubPhase.UX_REVIEW) == SubPhase.REFACTOR
+        assert next_subphase(SubPhase.REFACTOR) == SubPhase.DONE
 
     def test_done_is_terminal(self):
         assert next_subphase(SubPhase.DONE) == SubPhase.DONE

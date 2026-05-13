@@ -60,6 +60,22 @@ Rules of thumb:
   - Milestone names are short labels (3–6 words). Use cases are full
     sentences in user-story form.
 
+  - **refactor_after**: set to ``true`` on milestones that complete a
+    coherent feature group, so a refactor pass can extract shared
+    helpers before duplication compounds. Heuristics:
+      * The milestone closes out a CRUD domain (after both "create"
+        and "edit/delete" land you can usefully dedup form/validation
+        logic across them).
+      * The milestone ships an admin surface that mirrors a
+        previously-shipped user surface (now you can extract shared
+        list/detail components).
+      * The milestone introduces a second service that uses the same
+        downstream API patterns (now there's something to abstract).
+    Default to ``false`` for early scaffolding, single-screen
+    additions, or milestones whose code is largely standalone.
+    The final milestone is treated as a refactor boundary
+    automatically — you don't need to set ``refactor_after`` on it.
+
 Return a JSON object matching the provided schema. Respond with ONLY
 the JSON — no markdown fences, no commentary before or after.
 """

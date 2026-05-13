@@ -323,6 +323,13 @@ class V2Pipeline:
         milestones_done: List[str] = []
         prior_specs: List[EnrichedSpec] = []
         last_milestone = target_milestone or len(plan.milestones)
+        # MilestoneLoop's REFACTOR phase needs to know whether the
+        # current milestone is the last in the plan (treated as a
+        # refactor boundary regardless of ``refactor_after``).
+        try:
+            self._milestone_loop._total_milestones = len(plan.milestones)
+        except Exception:
+            pass
 
         for i, milestone in enumerate(plan.milestones, start=1):
             if i > last_milestone:

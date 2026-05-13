@@ -38,6 +38,8 @@ from bizniz.coder.agent import Coder
 from bizniz.driver.gates import GatePolicy
 from bizniz.driver.integration_phase import IntegrationPhase
 from bizniz.driver.smoke_phase import SmokePhase
+from bizniz.driver.ux_phase import UXPhase
+from bizniz.driver.refactor_phase import RefactorPhase
 from bizniz.driver.milestone_code_dispatcher import MilestoneCodeDispatcher
 from bizniz.driver.milestone_loop import MilestoneLoop
 from bizniz.driver.pipeline import V2Pipeline
@@ -443,6 +445,15 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
 
     smoke_phase = SmokePhase(on_status=on_status)
 
+    # Stage 1 wiring: UXPhase + RefactorPhase are constructed without
+    # factories (no UXDesigner instance, no Refactorer agent). They
+    # self-skip with structured artifacts so resume sees the phases
+    # marked complete. Stage 2 will wire real factories.
+    ux_phase = UXPhase(ux_factory=None, on_status=on_status)
+    refactor_phase = RefactorPhase(
+        refactorer_factory=None, on_status=on_status,
+    )
+
     gate_mode = "auto" if args.auto else ("interactive" if args.interactive else "strict")
     gates = GatePolicy(mode=gate_mode, on_status=on_status)
 
@@ -498,6 +509,8 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         issue_store_factory=issue_store_factory,
         cost_tracker=cost_tracker,
         workspace_summary=workspace_summary,
+        ux_phase=ux_phase,
+        refactor_phase=refactor_phase,
         on_status=on_status,
     )
 

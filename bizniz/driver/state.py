@@ -55,6 +55,11 @@ class SubPhase(str, Enum):
     INTEGRATION_API = "integration_api"
     INTEGRATION_WORKER = "integration_worker"
     INTEGRATION_WEB = "integration_web"
+    # Post-integration phases. UX_REVIEW runs when the milestone
+    # touched a frontend service; REFACTOR runs when the milestone
+    # has ``refactor_after=True`` or is the final milestone.
+    UX_REVIEW = "ux_review"
+    REFACTOR = "refactor"
     DONE = "done"
 
 
