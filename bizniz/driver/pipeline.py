@@ -379,18 +379,9 @@ class V2Pipeline:
             try:
                 import json
                 raw = json.loads((self._state.root / f"{TopPhase.ARCHITECT.value}.json").read_text())
-                arch = SystemArchitecture.model_validate(raw)
+                return SystemArchitecture.model_validate(raw)
             except Exception as e:
                 self._gates.hard("architecture_reload_failed", f"could not reload architecture.json: {e}")
-            # architect.json keeps the original ports; the provisioner
-            # may have remapped them to avoid host-port collisions.
-            # Apply that remap so resumed runs see the actual host
-            # ports docker compose bound (recipe_box M2 SMOKE probed
-            # localhost:8000 expecting the recipe_box backend but a
-            # sibling project was holding that port; meanwhile
-            # compose.yml had remapped recipe_box to 8012).
-            self._apply_port_remap(arch)
-            return arch
         self._tag_top(TopPhase.ARCHITECT)
         architecture = self._architect.decompose(
             problem_statement=problem_statement,
@@ -398,31 +389,6 @@ class V2Pipeline:
         )
         self._state.mark_top_phase(TopPhase.ARCHITECT, architecture)
         return architecture
-
-    def _apply_port_remap(self, architecture: SystemArchitecture) -> None:
-        """Apply provision.json's ``port_remap`` to the in-memory
-        architecture so ``service.port`` is the actual host port,
-        not the original architect-emitted container port."""
-        import json
-        prov_path = self._state.root / f"{TopPhase.PROVISION.value}.json"
-        if not prov_path.exists():
-            return
-        try:
-            raw = json.loads(prov_path.read_text())
-        except Exception:
-            return
-        remap = raw.get("port_remap") or {}
-        if not remap:
-            return
-        for svc in architecture.services:
-            entry = remap.get(svc.name)
-            if entry and isinstance(entry, (list, tuple)) and len(entry) == 2:
-                _, new_port = entry
-                svc.port = int(new_port)
-        self._log(
-            f"V2Pipeline: applied port_remap from provision.json — "
-            f"{', '.join(f'{k}:{v[0]}→{v[1]}' for k, v in remap.items())}"
-        )
 
     def _top_provision(self, architecture: SystemArchitecture):
         if self._state.is_top_phase_done(TopPhase.PROVISION):

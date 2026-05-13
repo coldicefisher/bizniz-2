@@ -416,8 +416,11 @@ class IntegrationPhase:
                     f"IntegrationPhase API: container rebuild raised "
                     f"{type(e).__name__}: {e}"
                 )
+            host_port = _resolve_host_port_via_compose(
+                compose_path, backend.name, backend.port,
+            )
             ready = _wait_http_ok(
-                f"http://localhost:{backend.port}/health",
+                f"http://localhost:{host_port}/health",
                 deadline_s=60,
             )
             if not ready:
@@ -511,8 +514,11 @@ class IntegrationPhase:
                     f"IntegrationPhase Web: container rebuild raised "
                     f"{type(e).__name__}: {e}"
                 )
+            host_port = _resolve_host_port_via_compose(
+                compose_path, frontend.name, frontend.port,
+            )
             ready = _wait_http_ok(
-                f"http://localhost:{frontend.port}/",
+                f"http://localhost:{host_port}/",
                 deadline_s=60,
             )
             if not ready:
@@ -571,6 +577,27 @@ class IntegrationPhase:
     def _log(self, msg: str) -> None:
         if self._on_status:
             self._on_status(msg)
+
+
+def _resolve_host_port_via_compose(
+    compose_path: str, service_name: str, container_port: int,
+) -> int:
+    """Ask docker compose for the actual host port bound to
+    ``<service_name>:<container_port>``. Falls back to ``container_port``
+    if the query fails. Mirrors SmokePhase._resolve_host_port, used by
+    the readiness gate in _rerun callbacks."""
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_path,
+             "port", service_name, str(container_port)],
+            capture_output=True, text=True, timeout=10,
+        )
+        out = (result.stdout or "").strip()
+        if result.returncode == 0 and ":" in out:
+            return int(out.rsplit(":", 1)[1])
+    except Exception:
+        pass
+    return container_port
 
 
 # ── helpers ─────────────────────────────────────────────────────────────

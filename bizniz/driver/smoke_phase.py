@@ -70,10 +70,49 @@ class SmokePhase:
     ):
         self._timeout_s = timeout_s
         self._on_status = on_status
+        # Cache of (service_name, container_port) → host port, scoped
+        # per SmokePhase.run() invocation.
+        self._host_port_cache: Dict[tuple, int] = {}
+        self._compose_path: Optional[Path] = None
 
     def _log(self, msg: str) -> None:
         if self._on_status:
             self._on_status(msg)
+
+    def _resolve_host_port(
+        self, service_name: str, container_port: int,
+    ) -> int:
+        """Ask docker compose what host port is bound to
+        ``<service_name>:<container_port>``. Falls back to the
+        architecture's container port if compose query fails (the
+        legacy behaviour). Cached per-run.
+
+        Why: architecture.json holds container ports (8000, 9011,
+        5173). Provisioner's _allocate_ports_for_new may have
+        remapped host bindings to avoid collisions (e.g. recipe_box
+        backend is 8012:8000 because a sibling project held 8000).
+        Probing ``localhost:{architect_port}`` lands on the WRONG
+        project; query compose for ground truth instead.
+        """
+        key = (service_name, container_port)
+        if key in self._host_port_cache:
+            return self._host_port_cache[key]
+        port = container_port  # default
+        if self._compose_path and self._compose_path.exists():
+            import subprocess
+            try:
+                result = subprocess.run(
+                    ["docker", "compose", "-f", str(self._compose_path),
+                     "port", service_name, str(container_port)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                out = (result.stdout or "").strip()
+                if result.returncode == 0 and ":" in out:
+                    port = int(out.rsplit(":", 1)[1])
+            except Exception:
+                pass
+        self._host_port_cache[key] = port
+        return port
 
     def run(
         self,
@@ -86,6 +125,9 @@ class SmokePhase:
         t0 = time.time()
         checks: List[SmokeCheck] = []
         critical_failures: List[str] = []
+        # Reset per-run state; resolve compose path from project_root.
+        self._host_port_cache = {}
+        self._compose_path = project_root / "infra" / "development" / "docker-compose.yml"
 
         self._log(
             f"SmokePhase: starting for "
@@ -98,7 +140,8 @@ class SmokePhase:
             if (s.service_type or "").lower() == "backend"
         ]
         for backend in backends:
-            url = f"http://localhost:{backend.port}/health"
+            host_port = self._resolve_host_port(backend.name, backend.port)
+            url = f"http://localhost:{host_port}/health"
             check = self._probe_health(backend.name, url)
             checks.append(check)
             if not check.passed:
@@ -118,7 +161,8 @@ class SmokePhase:
                 f"app_id={'yes' if app_id else 'no'})"
             )
         else:
-            fa_url = f"http://localhost:{fa_service.port}"
+            fa_host_port = self._resolve_host_port(fa_service.name, fa_service.port)
+            fa_url = f"http://localhost:{fa_host_port}"
             for email, password in test_users:
                 check, token = self._probe_login(
                     fa_url, app_id, email, password,
@@ -136,7 +180,8 @@ class SmokePhase:
         # tell crash from "auth refused" without one).
         token = next(iter(tokens.values()), None)
         for backend in backends:
-            base = f"http://localhost:{backend.port}"
+            host_port = self._resolve_host_port(backend.name, backend.port)
+            base = f"http://localhost:{host_port}"
             try:
                 openapi = requests.get(
                     f"{base}/openapi.json", timeout=self._timeout_s,
@@ -189,7 +234,8 @@ class SmokePhase:
         # Use one of the test-user credentials for the proxy login probe.
         proxy_creds = test_users[0] if test_users else None
         for frontend in frontends:
-            base = f"http://localhost:{frontend.port}"
+            fe_host_port = self._resolve_host_port(frontend.name, frontend.port)
+            base = f"http://localhost:{fe_host_port}"
 
             index_check = self._probe_frontend_index(frontend.name, base)
             checks.append(index_check)
