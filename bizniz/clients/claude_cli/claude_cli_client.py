@@ -166,23 +166,76 @@ class ClaudeCliClient(BaseAIClient):
         # The prompt goes via stdin — robust for arbitrary length and
         # avoids arg-list size limits.
 
+        # Retry-with-backoff for transient server-side rate limits
+        # (HTTP 429 from Anthropic's CLI backend — distinct from Max
+        # plan usage caps). Schedule: 10s, 30s, 60s, then give up.
+        # Total ceiling: ~100s + 3 cli round-trips. Errs on the side
+        # of finishing the work over failing fast — being throttled
+        # is the most common transient and the retry budget caller
+        # uses (3 attempts in call_with_retry) burns through it in
+        # 5 seconds without this.
+        backoff_schedule = [10.0, 30.0, 60.0]
         t0 = time.time()
-        try:
-            proc = subprocess.run(
-                cmd,
-                input=prompt_text,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout_s,
+        proc = None
+        last_429_body = ""
+        for attempt_idx in range(len(backoff_schedule) + 1):
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    input=prompt_text,
+                    capture_output=True,
+                    text=True,
+                    timeout=self._timeout_s,
+                )
+            except subprocess.TimeoutExpired as e:
+                raise ClaudeCliClientError(
+                    f"claude --print timed out after {self._timeout_s:.0f}s"
+                ) from e
+            except FileNotFoundError as e:
+                raise ClaudeCliClientError(
+                    f"claude binary not found at runtime: {e}"
+                ) from e
+
+            # Detect 429 inside the JSON payload — the CLI exits 1
+            # for 429s but ``proc.stdout`` is still well-formed JSON
+            # with ``api_error_status: 429``. Parse pre-emptively so
+            # we can backoff on this path.
+            is_429 = False
+            try:
+                early = json.loads(proc.stdout) if proc.stdout else {}
+                if (
+                    early.get("api_error_status") == 429
+                    or "Rate limited" in (early.get("result") or "")
+                ):
+                    is_429 = True
+                    last_429_body = (early.get("result") or "")[:200]
+            except Exception:
+                pass
+
+            if not is_429:
+                break  # Either success or a non-retryable error.
+            if attempt_idx >= len(backoff_schedule):
+                # Exhausted retries.
+                raise ClaudeCliClientError(
+                    f"claude --print rate-limited (429) after "
+                    f"{len(backoff_schedule) + 1} attempts: "
+                    f"{last_429_body}"
+                )
+            wait_s = backoff_schedule[attempt_idx]
+            # Best-effort status log so the user sees what's happening.
+            try:
+                from bizniz.cost import get_tracker as _gt
+                _ = _gt()
+            except Exception:
+                pass
+            import sys as _sys
+            print(
+                f"  [ClaudeCliClient] 429 rate-limit hit, "
+                f"backing off {wait_s:.0f}s before retry "
+                f"({attempt_idx + 1}/{len(backoff_schedule)})...",
+                file=_sys.stderr, flush=True,
             )
-        except subprocess.TimeoutExpired as e:
-            raise ClaudeCliClientError(
-                f"claude --print timed out after {self._timeout_s:.0f}s"
-            ) from e
-        except FileNotFoundError as e:
-            raise ClaudeCliClientError(
-                f"claude binary not found at runtime: {e}"
-            ) from e
+            time.sleep(wait_s)
 
         if proc.returncode != 0:
             raise ClaudeCliClientError(

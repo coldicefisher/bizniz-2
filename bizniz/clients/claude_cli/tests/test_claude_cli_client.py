@@ -177,6 +177,85 @@ class TestGetText:
         assert "timed out" in str(exc.value)
 
 
+def _fake_429_proc():
+    """Stub a 429 response. The CLI exits 1 but stdout has structured
+    JSON with ``api_error_status: 429`` and ``result`` containing a
+    'Rate limited' message — same shape we saw on recipe_box."""
+    payload = json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "is_error": True,
+        "api_error_status": 429,
+        "result": "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited",
+        "session_id": "sid-429",
+        "total_cost_usd": 0,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+    })
+    p = MagicMock()
+    p.stdout = payload
+    p.stderr = ""
+    p.returncode = 1
+    return p
+
+
+class TestRateLimitRetry:
+    def _client(self):
+        with patch(
+            "bizniz.clients.claude_cli.claude_cli_client.shutil.which",
+            return_value="/usr/bin/claude",
+        ):
+            return ClaudeCliClient()
+
+    def test_retries_429_until_success(self):
+        """Two 429s, then success — should return successfully."""
+        c = self._client()
+        responses = [_fake_429_proc(), _fake_429_proc(), _fake_proc("ok")]
+        with patch(
+            "bizniz.clients.claude_cli.claude_cli_client.subprocess.run",
+            side_effect=responses,
+        ), patch(
+            "bizniz.clients.claude_cli.claude_cli_client.time.sleep"
+        ) as mock_sleep:
+            text, sid, _ = c.get_text(messages="x", use_message_history=False)
+        assert text == "ok"
+        # Should have slept twice (after first 429, after second 429).
+        assert mock_sleep.call_count == 2
+
+    def test_gives_up_after_max_429_retries(self):
+        c = self._client()
+        # 4 attempts total (initial + 3 retries) — all 429.
+        responses = [_fake_429_proc()] * 4
+        with patch(
+            "bizniz.clients.claude_cli.claude_cli_client.subprocess.run",
+            side_effect=responses,
+        ), patch(
+            "bizniz.clients.claude_cli.claude_cli_client.time.sleep"
+        ):
+            with pytest.raises(ClaudeCliClientError) as exc:
+                c.get_text(messages="x", use_message_history=False)
+        assert "rate-limited" in str(exc.value).lower()
+        assert "Rate limited" in str(exc.value)
+
+    def test_non_429_error_is_not_retried(self):
+        """Non-429 errors (e.g. parse failures) bubble immediately
+        — don't waste time backing off for a fundamentally broken
+        request."""
+        c = self._client()
+        bad = _fake_proc("x", returncode=2)
+        bad.stderr = "boom"
+        with patch(
+            "bizniz.clients.claude_cli.claude_cli_client.subprocess.run",
+            return_value=bad,
+        ) as m, patch(
+            "bizniz.clients.claude_cli.claude_cli_client.time.sleep"
+        ) as mock_sleep:
+            with pytest.raises(ClaudeCliClientError):
+                c.get_text(messages="x", use_message_history=False)
+        # Only one subprocess call — no retry.
+        assert m.call_count == 1
+        assert mock_sleep.call_count == 0
+
+
 class TestHistory:
     def _client(self):
         with patch(
