@@ -246,3 +246,97 @@ class TestExtractJsonObject:
             "ignored {trash}\nfinal {\"a\": {\"b\": 1}}"
         )
         assert out == '{"a": {"b": 1}}'
+
+
+class TestDependencyManifestReinstall:
+    """Task #72: when Coder edits requirements.txt or package.json,
+    install the new packages in the running container so the next
+    issue's run_tests doesn't fail with ModuleNotFoundError."""
+
+    def _coder(self, tmp_path):
+        ws = MagicMock()
+        ws.root = tmp_path
+        with patch(
+            "bizniz.coder.claude_cli_coder.shutil.which",
+            return_value="/usr/bin/claude",
+        ):
+            return ClaudeCliCoder(
+                workspace=ws,
+                compose_path="/p/c.yml",
+                target_service="backend",
+            )
+
+    def test_snapshot_returns_hashes_for_present_files(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("fastapi==0.111\n")
+        c = self._coder(tmp_path)
+        snap = c._snapshot_dependency_manifests(tmp_path)
+        assert "requirements.txt" in snap
+        assert len(snap["requirements.txt"]) == 64  # sha256 hex
+
+    def test_snapshot_skips_missing_files(self, tmp_path):
+        c = self._coder(tmp_path)
+        snap = c._snapshot_dependency_manifests(tmp_path)
+        assert snap == {}
+
+    def test_reinstall_fires_when_requirements_changed(self, tmp_path):
+        c = self._coder(tmp_path)
+        with patch(
+            "bizniz.coder.claude_cli_coder.subprocess.run",
+        ) as m:
+            m.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            c._reinstall_deps_if_changed(
+                before={"requirements.txt": "abc"},
+                after={"requirements.txt": "xyz"},
+                issue_id="BE-001",
+            )
+        assert m.call_count == 1
+        argv = m.call_args.args[0]
+        assert argv[:5] == [
+            "docker", "compose", "-f", "/p/c.yml", "exec",
+        ]
+        assert "backend" in argv
+        # Install command lands as the last shell arg.
+        assert "pip install -r requirements.txt" in argv[-1]
+
+    def test_reinstall_skipped_when_unchanged(self, tmp_path):
+        c = self._coder(tmp_path)
+        with patch(
+            "bizniz.coder.claude_cli_coder.subprocess.run",
+        ) as m:
+            c._reinstall_deps_if_changed(
+                before={"requirements.txt": "abc"},
+                after={"requirements.txt": "abc"},
+                issue_id="BE-001",
+            )
+        assert m.call_count == 0
+
+    def test_reinstall_failure_does_not_raise(self, tmp_path):
+        c = self._coder(tmp_path)
+        with patch(
+            "bizniz.coder.claude_cli_coder.subprocess.run",
+        ) as m:
+            m.return_value = MagicMock(
+                returncode=1, stdout="", stderr="conflict",
+            )
+            # Should not raise — install failures log a warning but
+            # the coder's existing fallback (in-test pip install)
+            # still works.
+            c._reinstall_deps_if_changed(
+                before={"requirements.txt": "abc"},
+                after={"requirements.txt": "xyz"},
+                issue_id="BE-001",
+            )
+
+    def test_package_json_change_triggers_npm_install(self, tmp_path):
+        c = self._coder(tmp_path)
+        with patch(
+            "bizniz.coder.claude_cli_coder.subprocess.run",
+        ) as m:
+            m.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            c._reinstall_deps_if_changed(
+                before={"package.json": "old"},
+                after={"package.json": "new"},
+                issue_id="FE-001",
+            )
+        assert m.call_count == 1
+        assert "npm install" in m.call_args.args[0][-1]

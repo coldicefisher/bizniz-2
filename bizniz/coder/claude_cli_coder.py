@@ -23,6 +23,7 @@ becomes a high-level brief here.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -33,7 +34,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from bizniz.architect.types import SystemArchitecture
 from bizniz.coder.prompts.initial_context import build_coder_initial_context
@@ -165,6 +166,14 @@ class ClaudeCliCoder:
 
         ws_root = self._resolve_workspace_root()
 
+        # Snapshot dependency-manifest contents BEFORE Claude runs so
+        # we can detect edits and reinstall in-container after the
+        # subprocess returns (task #72). Without this, Claude edits
+        # requirements.txt to add a new package, the next run_tests
+        # imports the package, and pytest fails with ModuleNotFoundError
+        # because the running container still has the old site-packages.
+        deps_before = self._snapshot_dependency_manifests(ws_root)
+
         # MCP config exposes bizniz tools (get_prior_issues,
         # validate_python_imports, read_audit_findings, etc.) to
         # Claude on demand. Written to a tempfile because Claude
@@ -248,6 +257,14 @@ class ClaudeCliCoder:
         # or fences if the model didn't follow the instruction
         # cleanly.
         coder_result = self._parse_coder_result(result_text, issue.id)
+
+        # Detect dependency-manifest edits and reinstall in-container
+        # so the next issue's run_tests doesn't fail with
+        # ModuleNotFoundError. Container rebuild is heavier than needed
+        # for the common case (just `pip install -r requirements.txt`).
+        deps_after = self._snapshot_dependency_manifests(ws_root)
+        self._reinstall_deps_if_changed(deps_before, deps_after, issue.id)
+
         return coder_result
 
     # ── Internals ──────────────────────────────────────────────────────
@@ -256,6 +273,80 @@ class ClaudeCliCoder:
         if self._workspace is not None and hasattr(self._workspace, "root"):
             return Path(self._workspace.root)
         return Path(".")
+
+    # Manifests we watch for dependency-changing edits. Each value is
+    # the in-container install command. Format string: ``{path}`` is
+    # the workspace-relative path of the manifest.
+    _DEP_MANIFESTS: Dict[str, str] = {
+        "requirements.txt": "pip install -r {path}",
+        "package.json": "npm install",
+    }
+
+    def _snapshot_dependency_manifests(self, ws_root: Path) -> Dict[str, str]:
+        """Hash every recognised dependency manifest at the workspace
+        root. Returns ``{relpath: sha256_hex}``; missing files are
+        omitted. Cheap (only reads files at the workspace root, not
+        recursive)."""
+        out: Dict[str, str] = {}
+        for rel in self._DEP_MANIFESTS:
+            p = ws_root / rel
+            if not p.exists() or not p.is_file():
+                continue
+            try:
+                h = hashlib.sha256(p.read_bytes()).hexdigest()
+            except Exception:
+                continue
+            out[rel] = h
+        return out
+
+    def _reinstall_deps_if_changed(
+        self,
+        before: Dict[str, str],
+        after: Dict[str, str],
+        issue_id: str,
+    ) -> None:
+        """When a dependency manifest's hash changed, run the install
+        command in the running service container so the next
+        ``run_tests`` sees the new packages. Best-effort: failures log
+        a warning but don't raise — Claude's existing fallback (calling
+        ``pip install`` inside the test pass) still works if this
+        fails."""
+        if not self._compose_path or not self._target_service:
+            return
+        for rel, install_cmd_tmpl in self._DEP_MANIFESTS.items():
+            if before.get(rel) == after.get(rel):
+                continue
+            if rel not in after:
+                # Manifest was deleted (unusual); skip.
+                continue
+            install_cmd = install_cmd_tmpl.format(path=rel)
+            self._log(
+                f"ClaudeCliCoder: {issue_id} edited {rel} — "
+                f"installing in container ({install_cmd})"
+            )
+            try:
+                proc = subprocess.run(
+                    ["docker", "compose", "-f", self._compose_path,
+                     "exec", "-T", self._target_service,
+                     "sh", "-c", install_cmd],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if proc.returncode != 0:
+                    self._log(
+                        f"ClaudeCliCoder: {issue_id} in-container install "
+                        f"failed (exit {proc.returncode}); "
+                        f"stderr tail: {(proc.stderr or '')[-200:]}"
+                    )
+                else:
+                    self._log(
+                        f"ClaudeCliCoder: {issue_id} {rel} installed "
+                        f"in container"
+                    )
+            except Exception as e:
+                self._log(
+                    f"ClaudeCliCoder: {issue_id} in-container install "
+                    f"raised {type(e).__name__}: {e}"
+                )
 
     def _project_root_for_mcp(self) -> Path:
         """Project root = workspace's parent (each service workspace
