@@ -445,11 +445,39 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
 
     smoke_phase = SmokePhase(on_status=on_status)
 
-    # Stage 1 wiring: UXPhase + RefactorPhase are constructed without
-    # factories (no UXDesigner instance, no Refactorer agent). They
-    # self-skip with structured artifacts so resume sees the phases
-    # marked complete. Stage 2 will wire real factories.
-    ux_phase = UXPhase(ux_factory=None, on_status=on_status)
+    # UXPhase factory: per-frontend, builds a UXDesigner with a
+    # Gemini vision client + a ClaudeCliCoder-backed coder_factory
+    # closed over the frontend's workspace + compose path.
+    def ux_designer_factory(frontend_service):
+        from bizniz.clients.gemini.gemini_client import GeminiClient
+        from bizniz.ux_designer.ux_designer import UXDesigner
+        vision_client = GeminiClient(model_name="gemini-flash")
+
+        def ux_coder_factory(workspace):
+            # Use the same ClaudeCliCoder pipeline as milestone code
+            # work, scoped to this frontend service.
+            from bizniz.coder.claude_cli_coder import ClaudeCliCoder
+            return ClaudeCliCoder(
+                workspace=workspace,
+                compose_path=compose_path,
+                target_service=frontend_service.name,
+                workspace_name=frontend_service.workspace_name,
+                on_status=on_status,
+                runner=_runner_for_service(frontend_service),
+                model_name="claude-cli",
+            )
+
+        return UXDesigner(
+            vision_client=vision_client,
+            coder_factory=ux_coder_factory,
+            on_status=on_status,
+        )
+
+    ux_phase = UXPhase(
+        ux_factory=ux_designer_factory, on_status=on_status,
+    )
+    # Stage 1 wiring still: RefactorPhase has no real agent. Stage 2b
+    # will provide a refactorer_factory.
     refactor_phase = RefactorPhase(
         refactorer_factory=None, on_status=on_status,
     )

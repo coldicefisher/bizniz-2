@@ -76,7 +76,7 @@ class TestUXPhase:
             "initial_score": 6, "final_score": 8,
             "iterations": 2, "fixes_applied": 3, "screenshots_taken": 5,
         }
-        phase = UXPhase(ux_factory=lambda: designer)
+        phase = UXPhase(ux_factory=lambda _svc: designer)
         ws = MagicMock(root=tmp_path)
         result = phase.run(
             milestone=_milestone(),
@@ -95,7 +95,7 @@ class TestUXPhase:
     def test_review_raises_marks_skipped_not_failed(self, tmp_path):
         designer = MagicMock()
         designer.review_frontend.side_effect = RuntimeError("vision down")
-        phase = UXPhase(ux_factory=lambda: designer)
+        phase = UXPhase(ux_factory=lambda _svc: designer)
         result = phase.run(
             milestone=_milestone(),
             architecture=_arch(_frontend()),

@@ -50,8 +50,10 @@ class UXPhase:
         ux_factory: Optional[Callable] = None,
         on_status: Optional[Callable[[str], None]] = None,
     ):
-        # ``ux_factory()`` returns a fully-constructed UXDesigner
-        # (already bound to vision_client + coder_factory).
+        # ``ux_factory(service)`` returns a UXDesigner bound to that
+        # frontend service (its coder_factory closes over the service's
+        # workspace + compose path). Called per-frontend so multi-FE
+        # architectures get correctly-scoped Coders.
         self._ux_factory = ux_factory
         self._on_status = on_status
 
@@ -86,9 +88,9 @@ class UXPhase:
                 note="ux_factory not wired",
             )
 
-        designer = self._ux_factory()
         results: List[UXServiceResult] = []
         for frontend in frontends:
+            designer = self._ux_factory(frontend)
             ws = service_workspaces.get(frontend.name)
             if ws is None:
                 self._log(
