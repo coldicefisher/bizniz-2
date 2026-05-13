@@ -40,6 +40,7 @@ from bizniz.integration.runner import (
     _log_tail,
     _run_pytest_in_sidecar,
     _run_playwright_in_sidecar,
+    _wait_http_ok,
 )
 from bizniz.planner.types import Milestone
 from bizniz.workspace.base_workspace import BaseWorkspace
@@ -396,6 +397,13 @@ class IntegrationPhase:
             CRITICAL: rebuild + force-recreate the backend container
             first so code edits take effect. Skipping this caused 3
             wasted iterations and $0.77 in v11 (per CLAUDE.md).
+
+            Then WAIT for ``/health`` before firing pytest — recipe_box
+            M2 burned all 3 debugger attempts when every test failed
+            with ``httpx.ConnectError: Connection refused`` because
+            tests ran ~2s after the container came up, before uvicorn
+            accepted connections. The debugger has no fix for
+            "connection refused" — it just churns until budget exhausts.
             """
             try:
                 subprocess.run(
@@ -407,6 +415,16 @@ class IntegrationPhase:
                 self._log(
                     f"IntegrationPhase API: container rebuild raised "
                     f"{type(e).__name__}: {e}"
+                )
+            ready = _wait_http_ok(
+                f"http://localhost:{backend.port}/health",
+                deadline_s=60,
+            )
+            if not ready:
+                self._log(
+                    f"IntegrationPhase API: backend /health not responding "
+                    f"60s after rebuild — tests will likely fail with "
+                    f"connection refused"
                 )
             return _run_pytest_in_sidecar(
                 service=backend,
@@ -492,6 +510,15 @@ class IntegrationPhase:
                 self._log(
                     f"IntegrationPhase Web: container rebuild raised "
                     f"{type(e).__name__}: {e}"
+                )
+            ready = _wait_http_ok(
+                f"http://localhost:{frontend.port}/",
+                deadline_s=60,
+            )
+            if not ready:
+                self._log(
+                    f"IntegrationPhase Web: frontend / not responding 60s "
+                    f"after rebuild — Playwright will likely fail"
                 )
             return _run_playwright_in_sidecar(
                 service=frontend,
