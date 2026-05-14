@@ -362,7 +362,20 @@ class ProUXDesigner(ClaudeUXDesigner):
                 "stopped_reason": None,
                 "cached": False,
             }
-            for iteration in range(1, self._max_home_iterations + 1):
+            # Adaptive budget: if this route hit the iter cap last
+            # time without converging, grant +2 extra iterations
+            # this run. Easy routes (cached score >= threshold but
+            # dirty for some other reason, or no history) stay at
+            # default. Hard routes get more rope before we mark them
+            # stuck for good.
+            budget = self._budget_for_route(cached)
+            if budget > self._max_home_iterations:
+                _log(
+                    self._on_status,
+                    f"ProUXDesigner: route={route} bumping iter budget "
+                    f"to {budget} (prior run hit cap)"
+                )
+            for iteration in range(1, budget + 1):
                 iter_result = self._view_iteration(
                     route=route,
                     view_meta=view_meta,
@@ -426,6 +439,28 @@ class ProUXDesigner(ClaudeUXDesigner):
 
         result["stopped_reason"] = "all views iterated"
         return result
+
+    def _budget_for_route(self, cached_record) -> int:
+        """Decide how many screenshot→eval→fix iterations to grant
+        this route. Defaults to ``max_home_iterations``. Routes that
+        hit the cap on a prior run AND scored below threshold get
+        +2 extra iterations on the current run.
+
+        ``cached_record`` is the optional ``ReviewRecord`` from the
+        store (``None`` when there's no history yet).
+        """
+        default = self._max_home_iterations
+        if cached_record is None:
+            return default
+        prior_iters = cached_record.iterations_to_acceptable or 0
+        prior_score = cached_record.last_score
+        if (
+            prior_iters >= default
+            and prior_score is not None
+            and prior_score < self._acceptable_score
+        ):
+            return default + 2
+        return default
 
     @staticmethod
     def _safe_view_label(route: str) -> str:

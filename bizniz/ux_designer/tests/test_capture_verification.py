@@ -25,6 +25,57 @@ def _shot_with_meta(tmp_path, name, meta_dict):
     return {"name": name, "path": png, "bytes": b""}
 
 
+class TestAdaptiveBudget:
+    def test_no_history_returns_default(self):
+        d = _designer()
+        d._max_home_iterations = 2
+        assert d._budget_for_route(None) == 2
+
+    def test_prior_hit_cap_below_threshold_bumps(self):
+        from bizniz.ux_designer.review_store import ReviewRecord
+        from datetime import datetime
+        d = _designer()
+        d._max_home_iterations = 2
+        d._acceptable_score = 7
+        rec = ReviewRecord(
+            project_slug="x", route="/recipes/:id",
+            last_score=3,
+            iterations_to_acceptable=2,  # hit cap
+            last_reviewed_at=datetime.utcnow(),
+        )
+        assert d._budget_for_route(rec) == 4
+
+    def test_prior_passed_keeps_default(self):
+        from bizniz.ux_designer.review_store import ReviewRecord
+        from datetime import datetime
+        d = _designer()
+        d._max_home_iterations = 2
+        d._acceptable_score = 7
+        rec = ReviewRecord(
+            project_slug="x", route="/dashboard",
+            last_score=8,  # above threshold
+            iterations_to_acceptable=2,
+            last_reviewed_at=datetime.utcnow(),
+        )
+        assert d._budget_for_route(rec) == 2
+
+    def test_prior_low_score_but_short_iters_keeps_default(self):
+        # Score below threshold but didn't hit cap → vision recommended
+        # stop early. No reason to bump budget.
+        from bizniz.ux_designer.review_store import ReviewRecord
+        from datetime import datetime
+        d = _designer()
+        d._max_home_iterations = 2
+        d._acceptable_score = 7
+        rec = ReviewRecord(
+            project_slug="x", route="/x",
+            last_score=4,
+            iterations_to_acceptable=1,  # stopped early
+            last_reviewed_at=datetime.utcnow(),
+        )
+        assert d._budget_for_route(rec) == 2
+
+
 class TestRouteToRegex:
     def test_static_route_matches_exactly(self):
         r = ProUXDesigner._route_to_regex("/login")
