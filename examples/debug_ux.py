@@ -178,40 +178,63 @@ def main():
         if not ok:
             log(f"WARNING: {url} did not respond — review may fail to capture screenshots")
 
-    # UX designer factory kwargs (mirrors auto_architect.py / milestone_build.py)
-    from bizniz.clients.gemini.gemini_client import GeminiClient
-    vision_client = GeminiClient(model_name="gemini-flash")
+    # Vision/script client — ClaudeCliClient since ProUXDesigner
+    # uses claude --print + Read for both code review and vision eval.
+    from bizniz.clients.claude_cli.claude_cli_client import ClaudeCliClient
+    vision_client = ClaudeCliClient(model_name="claude-cli")
 
     if args.no_fixes:
-        coder_factory = None
+        coder_factory_for_designer = None
         log("Mode: eval-only (--no-fixes)")
     else:
-        def coder_factory(workspace):
-            from bizniz.agents.coder.coder import Coder
-            return Coder(
-                client=config.make_client(model=config.engineer_model),
-                environment=DockerExecutionEnvironment(),
-                workspace=workspace,
-            )
+        # ClaudeCliCoder bound per-frontend. ProUXDesigner calls this
+        # only during the home-page fix step; the global-design step
+        # uses its own claude --print invocation with Edit/Write
+        # directly.
+        def make_coder_factory(frontend_service):
+            def factory(workspace):
+                from bizniz.coder.claude_cli_coder import ClaudeCliCoder
+                return ClaudeCliCoder(
+                    workspace=workspace,
+                    compose_path=compose_path,
+                    target_service=frontend_service.name,
+                    workspace_name=frontend_service.workspace_name,
+                    on_status=log,
+                    runner="vitest",
+                    model_name="claude-cli",
+                )
+            return factory
 
-    log("Starting UX review...")
+    log("Starting UX review (ProUXDesigner)...")
     print(f"\n{'─'*60}", flush=True)
 
-    from bizniz.ux_designer.ux_designer import run_ux_review
+    from bizniz.ux_designer.pro_ux_designer import ProUXDesigner
 
     try:
-        results = run_ux_review(
-            architecture=architecture,
-            service_workspaces=service_workspaces,
-            compose_path=compose_path,
-            problem_statement=problem_statement,
-            vision_client=vision_client,
-            coder_factory=coder_factory,
-            on_status=log,
-            milestone_scope=args.milestone_scope,
-            max_fix_iterations=args.max_fix_iterations,
-            acceptable_score=args.acceptable_score,
-        )
+        results = []
+        for frontend in frontends:
+            ws = service_workspaces.get(frontend.name)
+            if ws is None:
+                log(f"Skipping '{frontend.name}': no workspace")
+                continue
+            coder_factory_bound = (
+                None if args.no_fixes else make_coder_factory(frontend)
+            )
+            designer = ProUXDesigner(
+                vision_client=vision_client,
+                coder_factory=coder_factory_bound,
+                on_status=log,
+                max_home_iterations=args.max_fix_iterations,
+                acceptable_score=args.acceptable_score,
+            )
+            r = designer.review_frontend(
+                service=frontend,
+                workspace=ws,
+                compose_path=compose_path,
+                problem_statement=problem_statement,
+                milestone_scope=args.milestone_scope,
+            )
+            results.append(r)
     except KeyboardInterrupt:
         log("Interrupted by user")
         if not args.keep_up:
@@ -229,25 +252,45 @@ def main():
 
     # Results
     print(f"\n{'='*60}", flush=True)
-    print(f"  UX Review Results", flush=True)
+    print(f"  UX Review Results (ProUXDesigner)", flush=True)
     print(f"{'='*60}", flush=True)
     for r in results:
-        score = r.get("final_score")
+        service = r.get("service", "?")
+        plan = r.get("design_plan") or {}
+        gf = r.get("global_fix_result") or {}
+        iters = r.get("home_iterations") or []
         initial = r.get("initial_score")
-        screenshots = r.get("screenshots_taken", 0)
-        fixes = r.get("fixes_applied", 0)
-        iterations = r.get("iterations", 0)
+        final = r.get("final_score")
+        stopped = r.get("stopped_reason") or ""
         print(
-            f"  {r['service']}: score {initial}→{score}/10  "
-            f"screenshots={screenshots}  fixes={fixes}  iterations={iterations}",
+            f"  {service}: app_type={plan.get('app_type', '?')}  "
+            f"home score {initial}→{final}/10  "
+            f"home_iters={len(iters)}  stopped={stopped}",
             flush=True,
         )
-        ev = r.get("evaluation") or {}
-        for issue in (ev.get("issues") or [])[:5]:
-            sev = issue.get("severity", "?")
-            cat = issue.get("category", "?")
-            desc = issue.get("description", "")[:140]
-            print(f"    [{sev}/{cat}] {desc}", flush=True)
+        print(
+            f"    global: status={gf.get('status', '?')}  "
+            f"tailwind_wired={gf.get('tailwind_wired', '?')}  "
+            f"files_written={len(gf.get('files_written', []))}",
+            flush=True,
+        )
+        if plan.get("summary"):
+            print(f"    plan: {plan.get('summary')[:180]}", flush=True)
+        for iter_r in iters:
+            ev = iter_r.get("evaluation") or {}
+            n = iter_r.get("iteration")
+            score = ev.get("overall_score")
+            issues = (ev.get("issues") or [])
+            print(
+                f"    iter{n}: score={score}/10 issues={len(issues)} "
+                f"stop_reason={iter_r.get('stop_reason') or '-'}",
+                flush=True,
+            )
+            for issue in issues[:3]:
+                sev = issue.get("severity", "?")
+                cat = issue.get("category", "?")
+                desc = issue.get("description", "")[:120]
+                print(f"      [{sev}/{cat}] {desc}", flush=True)
 
     elapsed = time.time() - _start_time
     print(f"\n  Elapsed: {elapsed:.0f}s", flush=True)

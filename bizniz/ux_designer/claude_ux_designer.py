@@ -211,29 +211,122 @@ class ClaudeUXDesigner(UXDesigner):
                 return json.loads(candidate)
             except json.JSONDecodeError:
                 pass
-        # Trailing balanced JSON.
-        depth = 0
-        end = None
-        for i in range(len(text) - 1, -1, -1):
-            c = text[i]
-            if c == "}":
-                if end is None:
-                    end = i
-                depth += 1
-            elif c == "{":
-                depth -= 1
-                if depth == 0 and end is not None:
-                    try:
-                        return json.loads(text[i:end + 1])
-                    except json.JSONDecodeError:
-                        return None
         # Fenced JSON.
-        m = re.search(r"```(?:json)?\s*\n(\{.*?\})\s*\n```", text, re.DOTALL)
-        if m:
+        for m in re.finditer(
+            r"```(?:json)?\s*\n(\{.*?\})\s*\n```", text, re.DOTALL,
+        ):
             try:
                 return json.loads(m.group(1))
             except json.JSONDecodeError:
-                return None
+                continue
+        # ── Forward scan from the FIRST opening brace ──────────────────
+        # Picks up the top-level object even when there's prose before
+        # it. This is the typical Claude shape: "Here's the spec:\n\n
+        # {...}\n". Critically, this is preferred over the
+        # trailing-balanced scan: that one can mis-anchor on an inner
+        # object when the top-level object is truncated/malformed at
+        # the end (Claude run that motivated this fix: trailing ``;``
+        # after the summary string + missing closing ``}``).
+        first_open = text.find("{")
+        if first_open != -1:
+            candidate_block = ClaudeUXDesigner._scan_forward_balanced(
+                text, first_open,
+            )
+            if candidate_block is None:
+                # Truncated — use everything from first_open to end and
+                # let repair try to close it.
+                candidate_block = text[first_open:]
+            try:
+                return json.loads(candidate_block)
+            except json.JSONDecodeError:
+                repaired = ClaudeUXDesigner._best_effort_repair(
+                    candidate_block,
+                )
+                if repaired is not None:
+                    return repaired
+        # ── Trailing balanced fallback ────────────────────────────────
+        attempts = 0
+        scan_end = len(text)
+        while attempts < 5:
+            attempts += 1
+            depth = 0
+            end = None
+            start_idx = None
+            for i in range(scan_end - 1, -1, -1):
+                c = text[i]
+                if c == "}":
+                    if end is None:
+                        end = i
+                    depth += 1
+                elif c == "{":
+                    depth -= 1
+                    if depth == 0 and end is not None:
+                        start_idx = i
+                        break
+            if start_idx is None or end is None:
+                break
+            try:
+                return json.loads(text[start_idx:end + 1])
+            except json.JSONDecodeError:
+                scan_end = start_idx
+                continue
+        return None
+
+    @staticmethod
+    def _scan_forward_balanced(text: str, start: int) -> Optional[str]:
+        """Return ``text[start:end+1]`` for the balanced ``{...}`` that
+        opens at ``start``. Handles quoted strings + escapes so braces
+        inside string literals don't confuse the depth counter. Returns
+        None if no balanced match found (truncation)."""
+        depth = 0
+        i = start
+        in_string = False
+        escape = False
+        while i < len(text):
+            c = text[i]
+            if escape:
+                escape = False
+            elif c == "\\" and in_string:
+                escape = True
+            elif c == '"':
+                in_string = not in_string
+            elif not in_string:
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i + 1]
+            i += 1
+        return None  # truncated — no balanced close
+
+    @staticmethod
+    def _best_effort_repair(block: str) -> Optional[Dict]:
+        """Try a few small repairs on a near-miss JSON block.
+        Currently:
+          - strip trailing ``;`` (Claude sometimes appends one)
+          - append a single ``}`` if the block is one-bracket short
+          - both together
+        Returns the parsed dict if any repair works, else None."""
+        cleaned = block.rstrip()
+        candidates = [cleaned]
+        if cleaned.endswith(";"):
+            stripped = cleaned[:-1].rstrip()
+            candidates.append(stripped)
+            candidates.append(stripped + "}")
+        # Heuristic: if the block has one more ``{`` than ``}``,
+        # appending a single ``}`` likely closes it.
+        opens = cleaned.count("{")
+        closes = cleaned.count("}")
+        if opens == closes + 1:
+            candidates.append(cleaned + "}")
+            if cleaned.endswith(";"):
+                candidates.append(cleaned[:-1].rstrip() + "}")
+        for c in candidates:
+            try:
+                return json.loads(c)
+            except json.JSONDecodeError:
+                continue
         return None
 
     @staticmethod
