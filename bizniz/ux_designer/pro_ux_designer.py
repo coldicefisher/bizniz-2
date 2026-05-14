@@ -1108,7 +1108,7 @@ class ProUXDesigner(ClaudeUXDesigner):
                 f"{view_label} iter1: using {len(shots)} pre-captured shot(s)"
             )
         else:
-            shots = self._take_screenshots(
+            all_shots = self._take_screenshots(
                 service=service,
                 workspace=workspace,
                 compose_path=compose_path,
@@ -1118,6 +1118,35 @@ class ProUXDesigner(ClaudeUXDesigner):
                 auth_contract=auth_contract,
                 backend_url=backend_url,
             )
+            # The screenshot prompt asks for one test per route, but
+            # Claude routinely auto-discovers OTHER routes in the
+            # workspace and emits tests for them too. When we fall
+            # through to per-route capture, ``all_shots`` is the
+            # full grab-bag (10+ PNGs from a 1-route request). Bucket
+            # by ``requested_route`` from each shot's meta and keep
+            # only the ones for the route we actually asked about.
+            # Without this filter, _verify_capture trips on the first
+            # off-route shot (recipes_id captured admin-users in v2.7).
+            buckets = self._bucket_shots_by_route(all_shots)
+            shots = buckets.get(route, [])
+            self._log_debug(
+                f"{view_label} iter{iteration}: per-route capture "
+                f"returned {len(all_shots)} shots; "
+                f"{len(shots)} match route={route}"
+            )
+            if not shots and all_shots:
+                # Fallback: model didn't emit a test with the right
+                # requested_route metadata. Take the shots with no
+                # meta (older capture path) or accept all — better
+                # than nothing.
+                shots = [
+                    s for s in all_shots
+                    if not Path(s["path"]).with_suffix(".meta.json").exists()
+                ] or all_shots
+                self._log_debug(
+                    f"{view_label} iter{iteration}: no route-matched "
+                    f"shots; using {len(shots)} unmatched as fallback"
+                )
         if not shots:
             return shots
 
