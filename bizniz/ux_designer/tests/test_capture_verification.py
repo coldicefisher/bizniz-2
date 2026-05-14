@@ -25,6 +25,36 @@ def _shot_with_meta(tmp_path, name, meta_dict):
     return {"name": name, "path": png, "bytes": b""}
 
 
+class TestBucketShotsByRoute:
+    def test_groups_by_requested_route(self, tmp_path):
+        d = _designer()
+        shots = [
+            _shot_with_meta(tmp_path, "home", {"requested_route": "/"}),
+            _shot_with_meta(tmp_path, "dashboard",
+                            {"requested_route": "/dashboard"}),
+            _shot_with_meta(tmp_path, "home-after",
+                            {"requested_route": "/"}),
+        ]
+        out = d._bucket_shots_by_route(shots)
+        assert set(out.keys()) == {"/", "/dashboard"}
+        assert len(out["/"]) == 2
+        assert len(out["/dashboard"]) == 1
+
+    def test_skips_shots_without_meta(self, tmp_path):
+        d = _designer()
+        png = tmp_path / "no-meta.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n")
+        shots_no_meta = [{"name": "no-meta", "path": png, "bytes": b""}]
+        with_meta = _shot_with_meta(tmp_path, "home", {"requested_route": "/"})
+        out = d._bucket_shots_by_route(shots_no_meta + [with_meta])
+        # Only the shot with a parseable meta is kept.
+        assert out == {"/": [with_meta]}
+
+    def test_empty_returns_empty(self, tmp_path):
+        d = _designer()
+        assert d._bucket_shots_by_route([]) == {}
+
+
 class TestAdaptiveBudget:
     def test_no_history_returns_default(self):
         d = _designer()

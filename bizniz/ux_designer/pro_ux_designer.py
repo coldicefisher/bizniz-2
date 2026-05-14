@@ -319,6 +319,61 @@ class ProUXDesigner(ClaudeUXDesigner):
         from datetime import datetime as _dt
         current_globals_mtime = max_global_mtime(_Path(workspace.root))
 
+        # ── Pre-capture optimization ─────────────────────────────────
+        # Generate ONE multi-route Playwright script + run the sidecar
+        # ONCE. Per-view iter 1 reads from these cached PNGs; iter 2+
+        # falls back to per-route capture (after a fix has been
+        # applied). On the recipe_box validation, capture was 54% of
+        # runtime (1262s/2318s) because we re-ran Playwright per route
+        # per iteration. With this, capture drops to ~1 invocation
+        # (~100-150s).
+        self._precaptured_by_route: Dict[str, List[Dict]] = {}
+        all_routes = [
+            v.get("route", "") for v in views_to_iterate
+            if v.get("route")
+        ]
+        if all_routes:
+            _log(
+                self._on_status,
+                f"ProUXDesigner: pre-capturing all "
+                f"{len(all_routes)} routes in one sidecar..."
+            )
+            _t0 = time.time()
+            try:
+                bulk_shots = self._take_screenshots(
+                    service=service,
+                    workspace=workspace,
+                    compose_path=compose_path,
+                    problem_statement=problem_statement,
+                    milestone_scope=milestone_scope,
+                    routes=all_routes,
+                    auth_contract=auth_contract,
+                    backend_url=backend_url,
+                )
+                self._precaptured_by_route = self._bucket_shots_by_route(
+                    bulk_shots,
+                )
+                covered = sum(
+                    1 for r in all_routes
+                    if self._precaptured_by_route.get(r)
+                )
+                _log(
+                    self._on_status,
+                    f"ProUXDesigner: pre-capture done in "
+                    f"{time.time() - _t0:.1f}s — "
+                    f"{covered}/{len(all_routes)} routes covered "
+                    f"({len(bulk_shots)} total shots)"
+                )
+                self._record_timing("pre_capture", time.time() - _t0)
+            except Exception as e:
+                _log(
+                    self._on_status,
+                    f"ProUXDesigner: pre-capture raised "
+                    f"{type(e).__name__}: {e} — falling back to "
+                    f"per-route capture"
+                )
+                self._precaptured_by_route = {}
+
         for view_idx, view_meta in enumerate(views_to_iterate):
             route = view_meta.get("route", "/")
             view_type = view_meta.get("view_type", "")
@@ -824,6 +879,29 @@ class ProUXDesigner(ClaudeUXDesigner):
         with_params = escaped.replace(re.escape(SENTINEL), r"[^/]+")
         return re.compile(f"^{with_params}/?$")
 
+    def _bucket_shots_by_route(
+        self, shots: List[Dict],
+    ) -> Dict[str, List[Dict]]:
+        """Group a flat shot list by ``requested_route`` from each
+        shot's sibling ``.meta.json``. Shots without a meta file
+        (older Playwright generations) are skipped — we can't bucket
+        them without the source-of-truth route field."""
+        out: Dict[str, List[Dict]] = {}
+        for s in shots:
+            sp = Path(s["path"])
+            meta_path = sp.with_suffix(".meta.json")
+            if not meta_path.exists():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text())
+            except Exception:
+                continue
+            route = meta.get("requested_route")
+            if not route:
+                continue
+            out.setdefault(route, []).append(s)
+        return out
+
     def _take_view_screenshots(
         self,
         route: str,
@@ -839,17 +917,31 @@ class ProUXDesigner(ClaudeUXDesigner):
     ) -> List[Dict]:
         """Capture screenshots for a single route and copy them into a
         per-view per-iteration dir so before/after pairs survive across
-        the multi-route loop."""
-        shots = self._take_screenshots(
-            service=service,
-            workspace=workspace,
-            compose_path=compose_path,
-            problem_statement=problem_statement,
-            milestone_scope=milestone_scope,
-            routes=[route],
-            auth_contract=auth_contract,
-            backend_url=backend_url,
-        )
+        the multi-route loop.
+
+        Optimization: on ``iteration == 1`` we prefer pre-captured
+        shots from the full-multi-route Playwright run (populated in
+        ``review_frontend`` before the loop starts). On ``iteration
+        >= 2`` we always re-capture because the workspace has been
+        edited since iter 1 — the cached shot would be stale.
+        """
+        precaptured = getattr(self, "_precaptured_by_route", {}) or {}
+        if iteration == 1 and precaptured.get(route):
+            shots = list(precaptured[route])
+            self._log_debug(
+                f"{view_label} iter1: using {len(shots)} pre-captured shot(s)"
+            )
+        else:
+            shots = self._take_screenshots(
+                service=service,
+                workspace=workspace,
+                compose_path=compose_path,
+                problem_statement=problem_statement,
+                milestone_scope=milestone_scope,
+                routes=[route],
+                auth_contract=auth_contract,
+                backend_url=backend_url,
+            )
         if not shots:
             return shots
 
