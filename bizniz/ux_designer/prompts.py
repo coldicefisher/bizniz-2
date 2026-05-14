@@ -153,13 +153,61 @@ ROUTE PARAMETERS (``:id``, ``:slug``, ``:userId``, etc.):
 A route like ``/recipes/:id`` is a TEMPLATE, not a real URL. Visiting
 it literally (e.g. ``page.goto('/recipes/:id')``) yields a 404 or a
 broken route-not-found page. Resolve the placeholder to a real value
-BEFORE navigating. Two strategies, in order of preference:
+BEFORE navigating.
 
-  **Strategy A — Parent-list navigation (preferred)**:
-  Most apps have a list view that links to each detail page. Visit
-  the list, find the first link that matches the detail pattern, and
-  click it. The resulting URL is the captured route. This also tests
-  the real user flow.
+**REQUIRED for any route containing a ``:placeholder``: seed via API
+in beforeAll** and stash the returned id at module scope. Use the
+seeded id for every dynamic-route test. This is the only approach
+that's reliable across empty-state vs populated stacks. Pattern:
+
+    let SEEDED_RECIPE_ID = null;
+
+    test.beforeAll(async ({{ browser }}) => {{
+      // ... (existing storageState auth block) ...
+      // Seed AFTER login state is saved so we get an authed POST.
+      try {{
+        const apiBase = process.env.BACKEND_URL || BASE;
+        // Pull the auth token from storageState — the request needs
+        // the bearer header that the SPA's apiClient would send.
+        const stateJson = JSON.parse(
+          require('fs').readFileSync(STATE_PATH, 'utf-8')
+        );
+        const origins = stateJson.origins || [];
+        let token = null;
+        for (const origin of origins) {{
+          for (const item of origin.localStorage || []) {{
+            if (/(token|jwt)/i.test(item.name)) {{ token = item.value; break; }}
+          }}
+        }}
+        const resp = await page.request.post(`${{apiBase}}/api/recipes`, {{
+          headers: token ? {{ Authorization: `Bearer ${{token}}` }} : {{}},
+          data: {{ /* minimal valid payload for this domain */ }},
+        }});
+        if (resp.ok()) SEEDED_RECIPE_ID = (await resp.json()).id;
+      }} catch (e) {{
+        console.error('Seed failed:', e.message);
+      }}
+    }});
+
+    test('screenshot recipe detail', async ({{ page }}) => {{
+      if (!SEEDED_RECIPE_ID) {{
+        console.error('No seeded id; skipping detail capture');
+        return;
+      }}
+      await captureRoute(page, `/recipes/${{SEEDED_RECIPE_ID}}`, 'recipe-detail');
+    }});
+
+    test('screenshot recipe edit', async ({{ page }}) => {{
+      if (!SEEDED_RECIPE_ID) return;
+      await captureRoute(page, `/recipes/${{SEEDED_RECIPE_ID}}/edit`, 'recipe-edit');
+    }});
+
+DO NOT rely on Strategy A (clicking a list link) for dynamic routes
+— on empty stacks the only matching link is often a CTA like
+``/recipes/new``, which captures the wrong page. Strategy A is
+acceptable only as a FALLBACK after the API seed has failed.
+
+Strategy A — fallback only:
 
       test('screenshot recipe detail', async ({{ page }}) => {{
         await page.setViewportSize({{ width: 1280, height: 720 }});
