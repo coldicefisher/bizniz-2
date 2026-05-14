@@ -112,6 +112,23 @@ class ProUXDesigner(ClaudeUXDesigner):
         # Reset per-run timing for this invocation.
         self._timings = {}
         _t_run_start = time.time()
+
+        # Surface the trend across recent runs at start so the
+        # operator can tell at a glance whether things are getting
+        # faster + scores climbing.
+        from bizniz.ux_designer import run_log
+        from pathlib import Path as _PathRL
+        ws_root_rl = _PathRL(workspace.root)
+        try:
+            recent = run_log.recent_summaries(ws_root_rl, n=5)
+            if recent:
+                _log(
+                    self._on_status,
+                    f"ProUXDesigner: prior runs — "
+                    f"{run_log.format_trend(recent)}"
+                )
+        except Exception:
+            pass
         result: Dict = {
             "service": service.name,
             "step": None,
@@ -576,6 +593,11 @@ class ProUXDesigner(ClaudeUXDesigner):
         views = result.get("views") or []
         cached_count = sum(1 for v in views if v.get("cached"))
         iterated = [v for v in views if not v.get("cached")]
+        all_scores = [
+            v.get("final_score") for v in views
+            if v.get("final_score") is not None
+        ]
+        avg_score = (sum(all_scores) / len(all_scores)) if all_scores else None
         _log(
             self._on_status,
             f"ProUXDesigner: {len(views)} views — {cached_count} cached, "
@@ -583,6 +605,44 @@ class ProUXDesigner(ClaudeUXDesigner):
             f"avg score among iterated="
             f"{(sum((v.get('final_score') or 0) for v in iterated) / max(1, len(iterated))):.1f}/10"
         )
+
+        # Append the run summary to the per-project log so the next
+        # invocation can show the trend.
+        try:
+            capture_mismatch_count = sum(
+                1 for v in views
+                for it in (v.get("iterations") or [])
+                if not it.get("captured_correctly", True)
+            )
+            plan_cache_hit = bool(
+                self._timings.get("code_review_cached") is not None
+                and self._timings.get("code_review") is None
+            )
+            summary_row = run_log.RunSummary(
+                service=service.name,
+                total_s=total,
+                phase_timings=dict(self._timings),
+                plan_cache_hit=plan_cache_hit,
+                route_count=len(views),
+                cached_count=cached_count,
+                iterated_count=len(iterated),
+                capture_mismatch_count=capture_mismatch_count,
+                avg_score=avg_score,
+                final_score_by_route={
+                    v.get("route", "?"): v.get("final_score")
+                    for v in views
+                },
+                stopped_reasons=[
+                    v.get("stopped_reason") or "" for v in views
+                ],
+            )
+            run_log.append_summary(ws_root_rl, summary_row)
+        except Exception as e:
+            _log(
+                self._on_status,
+                f"ProUXDesigner: run_log append failed "
+                f"({type(e).__name__}: {e}) — non-fatal"
+            )
         return result
 
     # ── Logging helpers ───────────────────────────────────────────────
