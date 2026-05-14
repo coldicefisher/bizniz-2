@@ -21,7 +21,92 @@ Playwright tests → both run against the live stack →
 a `~/bizniz_projects/<slug>/` directory with running code, tests,
 SKELETON.md contracts, captured OpenAPI, and a per-run report.
 
-## What's in flight (as of 2026-05-12)
+## What's in flight (as of 2026-05-13)
+
+### Post-milestone phases ✅ shipped end-to-end
+
+UX_REVIEW + REFACTOR fire after INTEGRATION_WEB on every milestone,
+before DONE. Recipe_box ran all four milestones front-to-back
+including both phases on the final milestone.
+
+- **`bizniz/driver/ux_phase.py`** — runs UXDesigner per frontend
+  service. Self-skips when there's no frontend or no factory. UX
+  failures are recorded but don't gate the milestone (informational).
+- **`bizniz/ux_designer/claude_ux_designer.py`** — vision eval via
+  `claude --print --add-dir <screenshots_dir>` with Read tool, not
+  inline Gemini images. $0 marginal on Max plan. Same parent class
+  handles screenshot capture (Playwright sidecar) and fix dispatch
+  (ClaudeCliCoder). v2_build selects ClaudeUXDesigner when the
+  `claude` binary is on PATH; falls back to legacy Gemini path
+  otherwise.
+- **`bizniz/driver/refactor_phase.py` + `bizniz/refactorer/`** —
+  fires when the Planner flagged `milestone.refactor_after=True` OR
+  the milestone is the final one (always treated as a refactor
+  boundary). Single Claude Code CLI session rooted at the project
+  so it sees every service workspace; scans for cross-service
+  duplication, extracts to `shared/<lang>/`, updates consumer
+  imports + dependency manifests, runs tests, reverts on failure.
+  Output: structured `RefactorerResult` (status, extractions list,
+  skipped candidates with reasons, notes).
+- **`Milestone.refactor_after: bool`** — Planner-emitted hint;
+  prompt teaches when to set True (CRUD domain closing, admin
+  mirrors user surface, second API consumer).
+
+### Recipe_box 4-milestone end-to-end ✅ first complete run
+
+Generated 2026-05-12, completed 2026-05-13. M1 auth+dashboard,
+M2 create/list recipes, M3 view/edit/delete, M4 admin views — all
+DONE with real working CRUD verified by curl (login → POST → GET →
+PUT → DELETE all green). Final REFACTOR pass extracted the recipe
+validation error formatter (duplicated across POST/PUT routes),
+tests passed.
+
+UX_REVIEW on M4 with ClaudeUXDesigner: captured 12 screenshots,
+117s vision eval, found Tailwind not actually wired into build
+(real diagnostic Gemini's 4s eval missed). 27 fix attempts across
+2 iterations — followup needed at the skeleton level since
+Tailwind config is missing.
+
+### Resilience fixes that landed this run
+
+- **ClaudeCliClient 429 backoff** — Anthropic transient rate limits
+  retry with 10s/30s/60s schedule before failing. Distinct from Max
+  usage cap.
+- **ClaudeCliClient `--disallowedTools`** — basic single-call client
+  was returning narrative summaries instead of code on WebUITester
+  prompts because Claude treated "write the test file" as a Write-
+  tool task. Explicit disallow forces pure text output.
+- **Claude CLI subprocess timeouts → 1800s** across the board.
+  600s was tripping on tool-heavy debugging.
+- **Web debugger wired into `run_web`** — symmetric with run_api.
+  Was claimed in the docstring but never actually plumbed.
+- **SmokePhase + integration runners use `docker compose port`** for
+  host-side URLs — project-collision-proof. Architecture.port stays
+  as the container port (correct for docker-internal sidecar URLs).
+- **`/health` readiness gate after debugger rebuilds** — pytest no
+  longer fires before uvicorn is accepting connections.
+- **Coder in-container dep install** (#72) — when ClaudeCliCoder
+  edits requirements.txt or package.json, it hashes the manifest
+  before/after and runs `docker compose exec <svc> pip install -r
+  ...` / `npm install` inside the running container before
+  returning. Cleaner than image rebuild; matches what Coder was
+  doing manually.
+
+### Open backlog
+
+- **Skeleton Tailwind wiring** — ClaudeUXDesigner found Tailwind
+  classes are written but the CSS isn't being processed. React
+  skeleton needs Tailwind installed + config wired so UX fixes
+  actually render.
+- **Stage 2b iteration** — Refactorer is minimum-viable (single
+  LLM session does everything). If quality varies on bigger
+  projects, add a deterministic candidate detector + per-candidate
+  dispatch with escalation.
+- **`bizniz.yaml`** — accidentally reverted to Gemini defaults
+  mid-session; user may want to restore their claude-cli config
+  for non-coder roles.
+
+## Previous: 2026-05-12 — Claude pivot complete
 
 ### Pluggable LLM backend — Architecture C ✅ complete
 
@@ -119,14 +204,7 @@ REVIEW_FINAL → INTEGRATION_API → INTEGRATION_WORKER → INTEGRATION_WEB
   Claude is dramatic. See
   `docs/changes/2026-05-12_full_pipeline_and_claude_pivot.md`.
 
-### Pending
-
-- **Container rebuild on requirements.txt edit** (#72). Coder
-  workaround is hot-install via `pip install` inside the container.
-- **Harder greenfield on Claude+MCP** — bookshelf was small enough
-  Claude one-shotted without MCP. Need a property_manager-scale run
-  to stress-test MCP under load.
-- **M2 / evolve mode on Claude** — not yet exercised.
+### Pending (rolled into open backlog above)
 
 ## Where things live
 
