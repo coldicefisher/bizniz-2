@@ -68,6 +68,8 @@ class ProUXDesigner(ClaudeUXDesigner):
         command: str = "claude",
         timeout_seconds: int = int(_DEFAULT_TIMEOUT_S),
         additional_args: Optional[List[str]] = None,
+        review_store=None,
+        project_slug: Optional[str] = None,
     ):
         super().__init__(
             vision_client=vision_client,
@@ -80,6 +82,12 @@ class ProUXDesigner(ClaudeUXDesigner):
             additional_args=additional_args,
         )
         self._max_home_iterations = max_home_iterations
+        # Optional review cache. When wired, ProUXDesigner consults
+        # the store before iterating a route and skips it if the
+        # cached score is acceptable AND no dirty signal fires.
+        # ``project_slug`` keys the per-project rows.
+        self._review_store = review_store
+        self._project_slug = project_slug
 
     # ── Public entry ───────────────────────────────────────────────────
 
@@ -250,8 +258,13 @@ class ProUXDesigner(ClaudeUXDesigner):
                     ),
                     "current_problems_from_code": "(not in design plan)",
                 }
-                meta = {**meta, "_is_dynamic": r.is_dynamic,
-                        "_params": r.params}
+                meta = {
+                    **meta,
+                    "_is_dynamic": r.is_dynamic,
+                    "_params": r.params,
+                    "_requires_auth": r.requires_auth,
+                    "source_file": r.source_file,
+                }
                 views_to_iterate.append(meta)
         elif per_view_plan:
             _log(
@@ -279,9 +292,62 @@ class ProUXDesigner(ClaudeUXDesigner):
         self._sibling_routes = [
             v.get("route", "") for v in views_to_iterate
         ]
+        # Compute the "global styles changed since last review?" mtime
+        # once per project — same value for every route this run.
+        from bizniz.ux_designer.review_store import (
+            ReviewRecord, ReviewStore,
+            max_global_mtime, source_mtime,
+        )
+        from datetime import datetime as _dt
+        current_globals_mtime = max_global_mtime(_Path(workspace.root))
+
         for view_idx, view_meta in enumerate(views_to_iterate):
             route = view_meta.get("route", "/")
             view_type = view_meta.get("view_type", "")
+            source_file_rel = view_meta.get("source_file")
+            current_source_mt = source_mtime(
+                _Path(workspace.root), source_file_rel,
+            )
+
+            # Cache lookup. Skip the route entirely if the store has a
+            # passing score and no dirty signal fires.
+            cached = None
+            if self._review_store is not None and self._project_slug:
+                cached = self._review_store.get(self._project_slug, route)
+            if cached is not None:
+                dirty, reason = ReviewStore.is_dirty(
+                    cached,
+                    current_source_mtime=current_source_mt,
+                    current_globals_mtime=current_globals_mtime,
+                    acceptable_score=self._acceptable_score,
+                )
+                if not dirty:
+                    _log(
+                        self._on_status,
+                        f"ProUXDesigner: view {view_idx + 1}/{len(views_to_iterate)} — "
+                        f"route={route} CACHED (score={cached.last_score}, "
+                        f"reviewed {cached.last_reviewed_at.isoformat()})"
+                    )
+                    result["views"].append({
+                        "route": route,
+                        "view_type": view_type,
+                        "iterations": [],
+                        "initial_score": cached.last_score,
+                        "final_score": cached.last_score,
+                        "stopped_reason": "cached (clean)",
+                        "cached": True,
+                    })
+                    if route == "/" and result["initial_score"] is None:
+                        result["initial_score"] = cached.last_score
+                        result["final_score"] = cached.last_score
+                    continue
+                else:
+                    _log(
+                        self._on_status,
+                        f"ProUXDesigner: view {view_idx + 1}/{len(views_to_iterate)} — "
+                        f"route={route} DIRTY ({reason}); re-reviewing"
+                    )
+
             _log(
                 self._on_status,
                 f"ProUXDesigner: view {view_idx + 1}/{len(views_to_iterate)} — "
@@ -294,6 +360,7 @@ class ProUXDesigner(ClaudeUXDesigner):
                 "initial_score": None,
                 "final_score": None,
                 "stopped_reason": None,
+                "cached": False,
             }
             for iteration in range(1, self._max_home_iterations + 1):
                 iter_result = self._view_iteration(
@@ -330,6 +397,32 @@ class ProUXDesigner(ClaudeUXDesigner):
             if route == "/" and result["initial_score"] is None:
                 result["initial_score"] = view_result["initial_score"]
                 result["final_score"] = view_result["final_score"]
+
+            # Persist the review result so the next run can short-
+            # circuit clean routes. Iterations count = how many
+            # screenshot→fix cycles were needed to converge.
+            if self._review_store is not None and self._project_slug:
+                final_score = view_result["final_score"]
+                iters_run = len(view_result["iterations"])
+                try:
+                    self._review_store.upsert(ReviewRecord(
+                        project_slug=self._project_slug,
+                        route=route,
+                        view_type=view_type,
+                        requires_auth=view_meta.get("_requires_auth"),
+                        last_score=final_score,
+                        iterations_to_acceptable=iters_run,
+                        last_reviewed_at=_dt.utcnow(),
+                        source_file=source_file_rel,
+                        source_mtime=current_source_mt,
+                        global_styles_mtime=current_globals_mtime,
+                    ))
+                except Exception as e:
+                    _log(
+                        self._on_status,
+                        f"ProUXDesigner: review_store upsert failed "
+                        f"for {route}: {type(e).__name__}: {e}"
+                    )
 
         result["stopped_reason"] = "all views iterated"
         return result

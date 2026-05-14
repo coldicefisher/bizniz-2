@@ -220,12 +220,20 @@ def main():
             coder_factory_bound = (
                 None if args.no_fixes else make_coder_factory(frontend)
             )
+            # Persist review results so the next run can skip routes
+            # that haven't changed since last time.
+            from bizniz.ux_designer.review_store import ReviewStore
+            review_store = ReviewStore(
+                project_root / ".bizniz" / "ux_reviews.db",
+            )
             designer = ProUXDesigner(
                 vision_client=vision_client,
                 coder_factory=coder_factory_bound,
                 on_status=log,
                 max_home_iterations=args.max_fix_iterations,
                 acceptable_score=args.acceptable_score,
+                review_store=review_store,
+                project_slug=project_root.name,
             )
             # Pass AUTH_CONTRACT.md if present so the Playwright
             # screenshot generator knows to authenticate before
