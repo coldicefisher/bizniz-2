@@ -58,12 +58,22 @@ class ServiceResult(BaseModel):
 
 
 class ArchitectResult(BaseModel):
-    """Overall result of the architect pipeline."""
+    """Overall result of the architect pipeline.
+
+    ``success`` is the authoritative outcome for the milestone. It's
+    True only if engineering ran AND all dispatched services passed.
+    A milestone that aborted before engineering (e.g. FusionAuth
+    contract couldn't be repaired, layer gate failed) reports
+    success=False even when service_results is empty — empty
+    service_results is not a vacuous pass.
+    """
     project_name: str
     architecture: SystemArchitecture
     service_results: List[ServiceResult]
     docker_compose_path: Optional[str] = None
     project_root: Optional[str] = None
+    success: bool = False
+    abort_reason: Optional[str] = None
 
 
 class ArchitectError(Exception):

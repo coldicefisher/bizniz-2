@@ -152,8 +152,9 @@ e) Logout: after a successful login, click logout (button, link, or
 
 REQUIRED COVERAGE FOR DOMAIN FLOWS:
 
-For each visible user capability in the problem statement, write at
-least one test that drives the full flow through the UI:
+For each visible user capability the problem statement describes
+**AND** the OpenAPI contract supports, write at least one test
+that drives the full flow through the UI:
 
   - Form submission: visit the form's route, fill required fields
     with realistic values, submit, assert the resulting state (item
@@ -167,12 +168,60 @@ least one test that drives the full flow through the UI:
     a sensible empty state (helpful message, "Add" button), not a
     crash and not a blank page.
 
-If a user-flow noun in the problem statement has NO matching UI to
-drive (no route, no form), write a test that fails loudly with a
-message naming the gap. Don't quietly skip it.
+CRITICAL — STAY IN MILESTONE SCOPE:
+
+The OpenAPI contract you were given describes EXACTLY the routes the
+backend exposes for THIS MILESTONE — not the eventual full project.
+Many problem statements describe future-milestone capabilities (e.g.
+"landlord creates properties") that the current milestone does NOT
+implement yet. If a capability has NO matching POST/PUT/DELETE in
+the OpenAPI, **DO NOT WRITE A FORM-FILL TEST FOR IT**. Filling
+``input[name="address"]`` when there's no ``POST /properties`` in the
+OpenAPI produces a test that fails not because of a real bug but
+because the route doesn't exist. The contract guard will reject your
+output.
+
+Acceptable response when an entity is mentioned in the problem
+statement but has no OpenAPI write route: skip CRUD-shaped tests for
+that entity entirely. Focus on the routes that DO exist (login,
+logout, /me, /profile, /health — whatever's actually in the OpenAPI).
+
+Every ``name="X"`` you reference in a form-fill test MUST be a
+property of the corresponding POST/PUT request body schema in the
+OpenAPI. If the schema doesn't have ``X``, don't write ``input[name="X"]``.
+
+If a problem-statement capability has NO matching UI route or backend
+route, write a test that fails loudly with a clear message naming the
+gap — don't quietly skip it, but also don't pretend the route exists.
 
 4–10 tests total. Lean toward fewer, deeper tests. Each test should
 expose a real bug if one exists.
+
+SPA HYDRATION — REQUIRED PATTERN:
+
+Modern SPAs (React/Vue/Svelte on Vite/CRA/Next) take 1-5 seconds AFTER
+``DOMContentLoaded`` to actually hydrate and render their interactive
+markup. ``page.locator('input[type="email"]').fill(...)`` will time
+out if you race React's first render. This is the #1 cause of brittle
+Playwright tests.
+
+In every test, you MUST:
+
+1. Use ``gotoAndReady(page, '/some-route')`` instead of ``page.goto()``.
+   The helper (defined in your output) waits for: domcontentloaded,
+   then networkidle (best-effort), then a ``waitForFunction`` that
+   polls for actual interactive content in the root.
+
+2. Use multi-strategy form locators (``emailInput(page)``,
+   ``passwordInput(page)``, ``submitButton(page)`` — also defined
+   in your output) instead of hard-coded ``input[type="email"]``.
+   Real apps use Material-UI wrappers, custom design-system
+   components, or ``data-testid`` markers. Multi-strategy locators
+   try the common patterns in order so tests don't break on cosmetic
+   markup differences.
+
+These helpers are not optional. Tests that call ``page.goto`` directly
+or use single-selector form locators will be marked broken.
 
 FORBIDDEN:
 
@@ -211,49 +260,122 @@ OUTPUT SHAPE EXAMPLE (illustrative, not literal):
       expect(fatal, `console errors: ${fatal.join(' | ')}`).toEqual([]);
     });
 
+    // ── REQUIRED helper: gotoAndReady ─────────────────────────────
+    // Use this INSTEAD OF page.goto() in every test. It handles the
+    // SPA hydration race that kills tests on Vite/CRA/Next dev:
+    //   1. domcontentloaded — DOM is parsed
+    //   2. networkidle (best-effort) — initial fetches settled
+    //   3. waitForFunction — the root element actually has interactive
+    //      content (not just an empty <div id=root></div>)
+    // Without this, locator.fill() races against React hydration and
+    // times out looking for inputs that "exist" but aren't mounted yet.
+    async function gotoAndReady(page, url) {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+      await page.waitForFunction(() => {
+        const root = document.querySelector('#root, #app, main') || document.body;
+        if (!root) return false;
+        const hasText = (root.innerText || '').trim().length > 5;
+        const hasInteractive = root.querySelectorAll(
+          'button, a, input, textarea, select, [role]'
+        ).length > 0;
+        return hasText || hasInteractive;
+      }, { timeout: 30000, polling: 250 });
+    }
+
+    // ── REQUIRED helpers: resilient form-field locators ───────────
+    // The frontend's actual input markup varies (controlled vs raw,
+    // material-ui wrappers, custom design-system components). These
+    // multi-strategy locators try the common selectors in order so
+    // tests don't break on minor markup differences.
+    function emailInput(page) {
+      return page.locator('input[type="email"]')
+        .or(page.locator('input[name="email"]'))
+        .or(page.locator('input[name="username"]'))
+        .or(page.locator('input[name="login"]'))
+        .or(page.locator('input[id*="email" i]'))
+        .or(page.locator('[data-testid*="email" i] input'))
+        .or(page.locator('[data-testid*="email" i]'))
+        .or(page.getByLabel(/email|username|login/i))
+        .or(page.locator('input[type="text"]'))  // last resort
+        .first();
+    }
+    function passwordInput(page) {
+      return page.locator('input[type="password"]')
+        .or(page.locator('input[name="password"]'))
+        .or(page.locator('[data-testid*="password" i] input'))
+        .or(page.getByLabel(/password/i))
+        .first();
+    }
+    function submitButton(page) {
+      return page.locator('button[type="submit"]')
+        .or(page.locator('button:has-text("Log in")'))
+        .or(page.locator('button:has-text("Login")'))
+        .or(page.locator('button:has-text("Sign in")'))
+        .or(page.getByRole('button', { name: /log\\s*in|sign\\s*in/i }))
+        .first();
+    }
+
     async function loginAs(page, username, password) {
-      await page.goto('/login');
-      await page.locator('input[type="email"], input[type="text"]').first().fill(username);
-      await page.locator('input[type="password"]').first().fill(password);
+      await gotoAndReady(page, '/login');
+      await emailInput(page).fill(username);
+      await passwordInput(page).fill(password);
       await Promise.all([
-        page.waitForURL((url) => !url.pathname.endsWith('/login'), { timeout: 10000 }),
-        page.locator('button[type="submit"]').first().click(),
+        page.waitForURL((url) => !url.pathname.endsWith('/login'), { timeout: 15000 }),
+        submitButton(page).click(),
       ]);
     }
 
-    test('landlord can log in and reach the dashboard', async ({ page }) => {
-      await loginAs(page, 'landlord@test.local', 'TestPass123!');
+    // ─── Examples illustrate STRUCTURE only ──────────────────────────────
+    // The placeholder names below (USER_A, ROLE_NAME, ENTITY_NAME, etc.) are
+    // NOT real domain words — substitute the actual nouns from the problem
+    // statement and the OpenAPI contract. Do not test routes or forms that
+    // don't exist in the OpenAPI you were given.
+
+    test('valid credentials log the user in and land on a protected page', async ({ page }) => {
+      // Use AUTH_CONTRACT credentials, NOT names you invented.
+      await loginAs(page, '<test-user-from-AUTH_CONTRACT>', '<password-from-AUTH_CONTRACT>');
       await expect(page).not.toHaveURL(/\\/login$/);
-      // Role-specific UI must appear:
-      await expect(page.locator('body')).toContainText(/properties|tenants|landlord/i);
+      // Assert SOMETHING role/user-specific renders (use a noun from the
+      // problem statement). DO NOT assert text you invented.
+      await expect(page.locator('body')).toContainText(/<noun-from-problem-statement>/i);
     });
 
-    test('wrong password keeps user on login', async ({ page }) => {
-      await page.goto('/login');
-      await page.locator('input[type="email"], input[type="text"]').first().fill('landlord@test.local');
-      await page.locator('input[type="password"]').first().fill('wrong-password');
-      await page.locator('button[type="submit"]').first().click();
+    test('wrong password keeps the user on login', async ({ page }) => {
+      await gotoAndReady(page, '/login');
+      await emailInput(page).fill('<test-user-from-AUTH_CONTRACT>');
+      await passwordInput(page).fill('definitely-wrong-password');
+      await submitButton(page).click();
       await page.waitForTimeout(2000);
       await expect(page).toHaveURL(/\\/login$/);
     });
 
     test('protected route redirects unauthenticated user to login', async ({ page }) => {
-      await page.goto('/properties');
-      await page.waitForURL(/\\/login/, { timeout: 5000 });
+      // Use a route that EXISTS in the OpenAPI. If the only authed route
+      // is /me or /profile, use that. Don't invent /dashboard or /admin.
+      await gotoAndReady(page, '<authed-route-from-OpenAPI>');
+      await page.waitForURL(/\\/login/, { timeout: 10000 });
       await expect(page).toHaveURL(/\\/login/);
     });
 
-    test('landlord creates a property and sees it in the list', async ({ page }) => {
-      await loginAs(page, 'landlord@test.local', 'TestPass123!');
-      await page.goto('/properties/new');
-      await page.locator('input[name="address"], input').first().fill('123 Maple St');
-      await page.locator('input[name="units"], input[type="number"]').first().fill('5');
-      await page.locator('button[type="submit"]').first().click();
-      await page.goto('/properties');
-      await expect(page.locator('body')).toContainText(/123 Maple St/);
-    });
-
-    // ... more domain tests ...
+    // EXAMPLE: domain-CRUD test (only write this if the OpenAPI has the
+    // matching POST endpoint AND the frontend has a route that uses it):
+    //
+    //   test('an authenticated user can <verb> a <entity> and see it', async ({ page }) => {
+    //     await loginAs(page, '<user>', '<password>');
+    //     await gotoAndReady(page, '<frontend-route-for-create>');
+    //     // Each name="X" you fill MUST correspond to a property in the
+    //     // OpenAPI request body for the matching POST endpoint. If the
+    //     // OpenAPI's POST /<entities> has {name, qty}, only fill those.
+    //     await page.locator('input[name="<field-from-OpenAPI>"]').first().fill('<value>');
+    //     await submitButton(page).click();
+    //     await gotoAndReady(page, '<frontend-route-for-list>');
+    //     await expect(page.locator('body')).toContainText('<value-you-typed>');
+    //   });
+    //
+    // If the milestone's OpenAPI has NO write endpoints (e.g. a pure-auth
+    // milestone), DO NOT write a CRUD test. Limit yourself to login,
+    // logout, role-distinction, and protected-route tests.
 
 Return the complete .cjs file. No prose before or after.
 """

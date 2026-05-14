@@ -1,133 +1,80 @@
-from typing import Optional, List, Literal, Dict
-from pydantic import BaseModel, Field
+"""Engineer data model.
 
+  - ``Issue``         one discrete piece of work (target_files, test_files,
+                      spec_refs back to EnrichedSpec capability ids)
+  - ``EngineerPlan``  the full set of issues + a narrative approach
+  - ``EngineerResult`` final terminal payload — plan + summary + status
+"""
+from __future__ import annotations
 
-# ── Architecture Planning ──────────────────────────────────────────────────────
+from typing import List, Literal, Optional
 
-class DomainModelField(BaseModel):
-    name: str
-    type_hint: str
-    description: str = ""
+from pydantic import BaseModel, Field as PydField
 
-
-class MethodSignature(BaseModel):
-    name: str
-    signature: str  # e.g. "def total(self) -> float"
-    description: str = ""
-
-
-class DomainModelDefinition(BaseModel):
-    db_id: Optional[int] = None
-    class_name: str
-    filepath: str
-    namespace_path: str = ""
-    fields: List[DomainModelField] = []
-    methods: List[MethodSignature] = []
-    docstring: str = ""
-
-
-class ModuleDefinition(BaseModel):
-    db_id: Optional[int] = None
-    filepath: str
-    class_name: Optional[str] = None
-    namespace_path: str = ""
-    methods: List[MethodSignature] = []
-    docstring: str = ""
-
-
-class ArchitectureNamespace(BaseModel):
-    db_id: Optional[int] = None
-    namespace_path: str  # e.g. "expense_tracker/models"
-    purpose: str
-
-
-class DependencyEdge(BaseModel):
-    source_filepath: str
-    target_filepath: str
-    import_symbols: List[str] = []
-
-
-class ArchitecturePlan(BaseModel):
-    db_id: Optional[int] = None
-    problem_id: int
-    package_name: str
-    root_namespace: str
-    namespaces: List[ArchitectureNamespace] = []
-    domain_models: List[DomainModelDefinition] = []
-    modules: List[ModuleDefinition] = []
-    dependencies: List[DependencyEdge] = []
-    version: int = 1
-
-
-# ── Governance ─────────────────────────────────────────────────────────────────
-
-class DriftItem(BaseModel):
-    filepath: str
-    drift_type: str = "unplanned_file"  # "unplanned_file", "new_class", "new_import"
-    class_name: Optional[str] = None
-    reason: str
-
-
-class DriftReport(BaseModel):
-    items: List[DriftItem]
-
-
-class GovernanceDecision(BaseModel):
-    decision: Literal["approve", "reject", "modify"]
-    reason: str
-    plan_updates: Optional[Dict] = None
-
-
-# ── Engineering Analysis ───────────────────────────────────────────────────────
-
-class EngineeringRequirement(BaseModel):
-    db_id: Optional[int] = None
-    type: Literal["business", "functional", "nonfunctional"]
-    text: str
-
-
-class EngineeringUseCase(BaseModel):
-    db_id: Optional[int] = None
-    title: str
-    description: str
-
-
-class TargetFile(BaseModel):
-    filepath: str
-    action: Literal["create", "modify", "delete"]
-
-
-class EngineeringIssue(BaseModel):
-    db_id: Optional[int] = None
-    title: str
-    description: str
-    target_files: List[TargetFile] = []
-    test_files: List[str] = []
-    depends_on_issues: List[int] = []
-    depends_on_titles: List[str] = []
-    suggested_model: Optional[str] = None
-    test_setup_hint: Optional[str] = None
-
-
-class DependencyLayer(BaseModel):
-    """A group of issues with no inter-dependencies, safe to batch together."""
-    layer_index: int
-    issues: List[EngineeringIssue]
-
-
-class EngineeringAnalysis(BaseModel):
-    problem_id: int
-    requirements: List[EngineeringRequirement] = []
-    use_cases: List[EngineeringUseCase] = []
-    issues: List[EngineeringIssue] = []
-    architecture: Optional[ArchitecturePlan] = None
-
-
-# ── Errors ─────────────────────────────────────────────────────────────────────
 
 class EngineerError(Exception):
-    pass
+    """Top-level Engineer failure (bad LLM response, validation, etc.)."""
 
 
-class EngineerBadAIResponseError(EngineerError):
-    pass
+class PlanNotSubmittedError(EngineerError):
+    """Engineer attempted a non-plan action before submitting its plan."""
+
+
+IssueStatus = Literal["pending", "in_progress", "done", "blocked", "skipped"]
+
+
+class Issue(BaseModel):
+    """One unit of work in the Engineer's plan.
+
+    ``spec_refs`` lists capability ids from the EnrichedSpec this issue
+    delivers. The QualityEngineer's review uses this to map tests back
+    to spec capabilities.
+    """
+    id: str = PydField(..., description="Stable issue id, e.g. 'I1'.")
+    title: str
+    description: str
+    target_files: List[str] = PydField(
+        default_factory=list,
+        description="Paths the Engineer expects to write/modify (workspace-relative).",
+    )
+    test_files: List[str] = PydField(
+        default_factory=list,
+        description="Paths of tests this issue ships (workspace-relative).",
+    )
+    success_criteria: List[str] = PydField(default_factory=list)
+    spec_refs: List[str] = PydField(
+        default_factory=list,
+        description="EnrichedSpec capability ids this issue delivers.",
+    )
+    depends_on: List[str] = PydField(
+        default_factory=list,
+        description="Other issue ids that must complete first.",
+    )
+    status: IssueStatus = "pending"
+
+
+class EngineerPlan(BaseModel):
+    """The Engineer's submitted plan: ordered issues + narrative approach."""
+    approach: str = PydField(
+        ...,
+        description="2-5 sentence summary of how the milestone will be implemented.",
+    )
+    issues: List[Issue] = PydField(default_factory=list)
+
+    def get_issue(self, issue_id: str) -> Optional[Issue]:
+        for i in self.issues:
+            if i.id == issue_id:
+                return i
+        return None
+
+
+class EngineerResult(BaseModel):
+    """Terminal payload from ``submit_implementation``."""
+    plan: EngineerPlan
+    summary: str = ""
+    final_test_status: Literal[
+        "passed", "partial", "failed", "not_run"
+    ] = "not_run"
+    completed_issue_ids: List[str] = PydField(default_factory=list)
+    deferred_issue_ids: List[str] = PydField(default_factory=list)
+    notes: List[str] = PydField(default_factory=list)

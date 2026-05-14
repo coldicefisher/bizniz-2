@@ -1,11 +1,8 @@
 """
 JSON schema for the AgenticDebugger action responses.
 
-The LLM returns one of these actions per turn:
-- view_file: Read a file from the workspace
-- list_directory: List files in a directory
-- run_tests: Execute pytest on specific test files
-- submit_fix: Submit the final diagnosis and optional code fixes
+The LLM returns one of these actions per turn. See the system prompt
+for full descriptions of each action and which fields apply.
 """
 
 AgenticDebuggerActionSchema = {
@@ -20,12 +17,100 @@ AgenticDebuggerActionSchema = {
             },
             "action": {
                 "type": "string",
-                "enum": ["view_file", "list_directory", "search_files", "search_imports", "list_all_imports", "run_command", "run_tests", "inspect_container", "submit_fix"],
+                "enum": [
+                    # Static workspace inspection
+                    "view_file",
+                    "list_directory",
+                    "search_files",
+                    "search_imports",
+                    "list_all_imports",
+                    # Host-side commands
+                    "run_command",
+                    "run_tests",
+                    # Live container introspection
+                    "tail_logs",
+                    "run_in_container",
+                    "run_python_in_container",
+                    "hit_endpoint",
+                    "inspect_env",
+                    "query_database",
+                    # Utility
+                    "decode_jwt",
+                    # Legacy combined tool — prefer the discrete ones above
+                    "inspect_container",
+                    # Terminal
+                    "submit_fix",
+                ],
                 "description": "The action to take.",
             },
             "path": {
                 "type": "string",
-                "description": "For view_file: file path. For list_directory: directory path. For search_files: regex pattern. For search_imports: symbol name (e.g. 'get_current_user'). For list_all_imports: module path (e.g. 'app.core.auth'). For run_command: shell command. For run_tests: test file paths. For inspect_container: 'logs', 'logs N', or 'exec <command>'. For submit_fix: leave empty.",
+                "description": (
+                    "Primary string argument. Meaning depends on action: "
+                    "view_file → file path; list_directory → directory path; "
+                    "search_files → regex pattern; search_imports → symbol; "
+                    "list_all_imports → module path; run_command → shell command; "
+                    "run_tests → test paths; tail_logs → number of lines (e.g. '200'); "
+                    "inspect_env → env var prefix (e.g. 'FUSIONAUTH'); "
+                    "decode_jwt → leave empty (use 'token' field); "
+                    "hit_endpoint, run_in_container, run_python_in_container, "
+                    "query_database → leave empty (use the dedicated fields); "
+                    "submit_fix → leave empty."
+                ),
+            },
+            "service": {
+                "type": "string",
+                "description": (
+                    "Optional target container service name. "
+                    "Used by tail_logs, run_in_container, run_python_in_container, "
+                    "inspect_env, query_database, hit_endpoint. "
+                    "Empty string means: use the service this debugger is bound to "
+                    "(usually the failing backend). For query_database, leave empty "
+                    "to auto-target the project's postgres service. "
+                    "Use empty string for actions that don't target a container."
+                ),
+            },
+            "command": {
+                "type": "string",
+                "description": (
+                    "Command body for container-execution actions. "
+                    "For run_in_container: shell command (e.g. 'printenv | sort'). "
+                    "For run_python_in_container: Python code, will run via "
+                    "`python -c '<code>'` (e.g. 'from app.core.config import get_settings; "
+                    "print(get_settings().fusionauth_issuer)'). "
+                    "For query_database: a SQL statement (SELECT preferred). "
+                    "Use empty string for actions that don't run a command."
+                ),
+            },
+            "url": {
+                "type": "string",
+                "description": (
+                    "HTTP URL for hit_endpoint. Use the docker-network "
+                    "hostname (e.g. 'http://backend:8000/api/v1/auth/me' or "
+                    "'http://auth:9011/api/login'), NOT 'localhost', because "
+                    "the request runs from inside a container. "
+                    "Use empty string for non-HTTP actions."
+                ),
+            },
+            "request_data": {
+                "type": "string",
+                "description": (
+                    "JSON-encoded object for hit_endpoint with optional keys: "
+                    "{\"method\": \"POST\", \"headers\": {\"Authorization\": \"Bearer ...\"}, "
+                    "\"body\": {...}}. "
+                    "Method defaults to GET if omitted. Body may be an object (sent as JSON) "
+                    "or a string (sent as raw text). "
+                    "Use '{}' or empty string for GET requests with no headers/body, or for "
+                    "non-HTTP actions."
+                ),
+            },
+            "token": {
+                "type": "string",
+                "description": (
+                    "JWT string for decode_jwt. The tool will return the decoded "
+                    "header + payload (signature is NOT verified — debug-only). "
+                    "Use empty string for non-JWT actions."
+                ),
             },
             "fix_target": {
                 "type": "string",
@@ -87,6 +172,11 @@ AgenticDebuggerActionSchema = {
             "thinking",
             "action",
             "path",
+            "service",
+            "command",
+            "url",
+            "request_data",
+            "token",
             "fix_target",
             "diagnosis",
             "root_cause_category",

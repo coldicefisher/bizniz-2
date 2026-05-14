@@ -19,7 +19,7 @@ from bizniz.workspace.temp_workspace import TempWorkspace
 if __name__ == "__main__":
 
     config = BiznizConfig.find_and_load()
-    client = config.make_client()
+    client = config.make_client(model=config.engineer_model)
     environment = DockerExecutionEnvironment()
     workspace = TempWorkspace()
 

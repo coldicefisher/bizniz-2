@@ -1,19 +1,12 @@
-# bizniz.agents.debugger — unified debugger module
+# bizniz.agents.debugger
 #
-# Two implementations:
-#   QuickDebugger  — one-shot diagnosis (no tools, fast, cheap)
-#   AgenticDebugger — iterative tool-use diagnosis (powerful, expensive)
-
-from bizniz.agents.debugger.quick import QuickDebugger
+# v2 keeps only AgenticDebugger — iterative tool-use diagnosis. The
+# v1 QuickDebugger (one-shot, no tools) was retired with the rest of
+# the v1 LLM-orchestration code; see ``bizniz/_deprecated/``.
 from bizniz.agents.debugger.agentic import AgenticDebugger
 from bizniz.agents.debugger.base import BaseDebugger
 
-# Backward-compatible alias
-QuickDebugger = QuickDebugger
-
 __all__ = [
     "BaseDebugger",
-    "QuickDebugger",
     "AgenticDebugger",
-    "QuickDebugger",
 ]

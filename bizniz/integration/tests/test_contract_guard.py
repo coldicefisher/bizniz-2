@@ -149,3 +149,65 @@ await page.fill('input[name="username"]', 'a@b.com');
 """
     r2 = validate_form_field_contract(test_bad, {"backend": doc_with_ref})
     assert not r2.ok
+
+
+def test_or_chain_fallbacks_are_not_flagged():
+    """Multi-strategy locators using .or() chains should NOT be flagged.
+    The fallbacks are alternatives the framework picks among at runtime;
+    only the primary selector represents a real submission target."""
+    contracts = {
+        "backend": {
+            "paths": {
+                "/auth/login": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"properties": {"email": {}, "password": {}}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    test = """
+function emailInput(page) {
+  return page.locator('input[type="email"]')
+    .or(page.locator('input[name="username"]'))
+    .or(page.locator('input[name="login"]'))
+    .first();
+}
+await emailInput(page).fill('a@b.com');
+"""
+    r = validate_form_field_contract(test, contracts)
+    assert r.ok, f"expected pass, got drifted={r.drifted}"
+
+
+def test_primary_name_selector_outside_or_still_caught():
+    """Drift detection should still work when the primary selector
+    (not inside .or()) uses a wrong field name."""
+    contracts = {
+        "backend": {
+            "paths": {
+                "/auth/login": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"properties": {"email": {}}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    test = """
+await page.locator('input[name="username"]').fill('user');
+"""
+    r = validate_form_field_contract(test, contracts)
+    assert not r.ok
+    assert "username" in r.drifted

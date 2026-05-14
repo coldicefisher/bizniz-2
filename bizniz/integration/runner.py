@@ -30,6 +30,7 @@ from typing import Callable, Dict, List, Optional
 
 from bizniz.architect.types import ServiceDefinition, ServiceResult, SystemArchitecture
 from bizniz.integration.contracts import (
+    _resolve_host_port,
     _wait_for_openapi,
     capture_backend_contracts,
 )
@@ -177,46 +178,66 @@ def _run_pytest_in_sidecar(
     on_status: Optional[Callable[[str], None]] = None,
     timeout_s: float = 180.0,
 ) -> tuple[bool, str]:
-    """Run ``pytest tests/integration/`` inside the pre-built pytest
-    sidecar joined to the compose project's network. Returns
-    ``(passed, output)``.
+    """Run integration tests INSIDE the target service's running
+    container via ``docker compose exec``. Returns ``(passed, output)``.
 
-    Uses ``bizniz-test-pytest:latest`` which has pytest + httpx
-    pre-installed. No runtime pip install.
+    Why exec-into-service vs the bare ``bizniz-test-pytest`` sidecar:
+    the sidecar only has ``pytest + httpx``; HTTPApiTester-generated
+    tests routinely import ``app.main``, ``sqlalchemy``, ``fastapi``,
+    etc., and fail at import-time with ``ModuleNotFoundError``. The
+    service container has the full dependency set since uvicorn is
+    running there. Same fix pattern as the Coder's ``run_tests``
+    (commit e9cc7e9 v33-era).
+
+    Trade-off: requires the service container to be running. The
+    integration phase asserts this upstream; if it's not, the
+    ``docker compose exec`` fails fast with a clear message.
+
+    The ``bizniz-test-pytest:latest`` sidecar image stays defined
+    above for legacy callers (and the playwright sidecar, which is
+    still right for frontend integration tests because the
+    frontend container runs vite-dev, not playwright).
     """
-    project_name = _compose_project_name(compose_path)
-    network = f"{project_name}_app-network"
-
     base_url = f"http://{service.name}:{service.port}"
-    # --noconftest: HTTPApiTester writes self-contained tests with
-    # their own httpx.Client fixture. Loading the project's
-    # tests/conftest.py would require installing the service's full
-    # requirements (sqlalchemy, fastapi, etc.) in the sidecar.
-    # --rootdir tests/integration: keeps pytest from walking up
-    # looking for parent conftest/pyproject.
+
+    # Run ONLY the HTTPApiTester-written file (``test_api.py``) — not
+    # the whole ``tests/integration/`` dir. The Coder writes per-issue
+    # integration tests in that same dir with their own fixtures /
+    # conftest needs; pytest's collector would pick them all up and
+    # fail on missing fixtures the HTTPApiTester didn't supply.
+    # Previously the legacy sidecar masked this because the Coder's
+    # tests failed to import (no deps); now that we're in the real
+    # service container with full deps, they collect fine but expect
+    # their own setup. Targeting just the HTTPApiTester output keeps
+    # the integration phase's job focused on the contract test it
+    # wrote.
     run_cmd = (
-        f"cd /workspace && "
+        f"cd /app && "
         f"API_BASE_URL={shlex.quote(base_url)} "
-        f"pytest tests/integration/ --noconftest --rootdir tests/integration "
+        f"pytest tests/integration/test_api.py "
         f"-v --tb=short --no-header"
     )
 
     cmd = [
-        "docker", "run", "--rm",
-        "--network", network,
-        "-v", f"{workspace_path}:/workspace",
-        "-w", "/workspace",
-        PYTEST_SIDECAR_IMAGE,
+        "docker", "compose", "-f", compose_path,
+        "exec", "-T", service.name,
         "sh", "-c", run_cmd,
     ]
 
-    _log(on_status, f"Integration: running pytest sidecar for '{service.name}' against {base_url}...")
+    _log(
+        on_status,
+        f"Integration: running pytest inside service '{service.name}' "
+        f"against {base_url}...",
+    )
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout_s,
         )
     except subprocess.TimeoutExpired as e:
-        return False, f"pytest sidecar timed out after {timeout_s:.0f}s\n{e.stdout or ''}{e.stderr or ''}"
+        return False, (
+            f"pytest exec timed out after {timeout_s:.0f}s\n"
+            f"{e.stdout or ''}{e.stderr or ''}"
+        )
 
     output = (proc.stdout or "") + (proc.stderr or "")
     return proc.returncode == 0, output
@@ -303,8 +324,18 @@ def run_integration_phase(
     debugger_factory: Optional[Callable] = None,
     debug_max_iterations: int = 3,
     web_ui_tester_factory: Optional[Callable] = None,
+    keep_stack_up: bool = False,
+    debugger_escalation: Optional[List] = None,  # List[DebuggerTierSpec]
 ) -> List[ServiceResult]:
-    """Verify-phase orchestration. See module docstring."""
+    """Verify-phase orchestration. See module docstring.
+
+    ``keep_stack_up=True`` skips the final ``docker compose down``
+    so the caller can keep the stack running for subsequent work
+    (e.g. the architect calling this between engineering layers as
+    a pre-flight gate before dispatching the next layer's
+    engineers). The caller is then responsible for tearing the
+    stack down themselves.
+    """
     backends = _backends(architecture)
     if not backends:
         _log(on_status, "Integration: no HTTP backends to verify, skipping")
@@ -407,6 +438,7 @@ def run_integration_phase(
                             capture_logs=_capture_startup_logs,
                             compose_path=compose_path,
                             problem_statement=problem_statement,
+                            escalation=debugger_escalation,
                         )
 
                         if repaired:
@@ -442,7 +474,8 @@ def run_integration_phase(
 
             # Wait for the backend's /health (or /) to confirm it's up
             # post-stack-bringup (the contracts capture stopped them).
-            base = f"http://localhost:{backend.port}"
+            host_port = _resolve_host_port(compose_path, backend.name, backend.port)
+            base = f"http://localhost:{host_port}"
             if not _wait_http_ok(f"{base}/openapi.json", deadline_s=backend_wait_s):
                 _log(
                     on_status,
@@ -513,7 +546,8 @@ def run_integration_phase(
                                  "up", "-d", "--build", "--force-recreate", backend.name],
                                 capture_output=True, text=True, timeout=300,
                             )
-                            _wait_http_ok(f"http://localhost:{backend.port}/openapi.json", deadline_s=60)
+                            host_port = _resolve_host_port(compose_path, backend.name, backend.port)
+                            _wait_http_ok(f"http://localhost:{host_port}/openapi.json", deadline_s=60)
                         except Exception as e:
                             _log(on_status, f"Integration debug: rebuild failed ({e})")
                         return _run_pytest_in_sidecar(
@@ -544,6 +578,7 @@ def run_integration_phase(
                         capture_logs=_capture_backend_logs,
                         compose_path=compose_path,
                         problem_statement=problem_statement,
+                        escalation=debugger_escalation,
                     )
 
                     if repaired:
@@ -570,7 +605,8 @@ def run_integration_phase(
                     continue
 
                 # Wait for frontend to actually serve content
-                fe_base = f"http://localhost:{frontend.port}"
+                fe_host_port = _resolve_host_port(compose_path, frontend.name, frontend.port)
+                fe_base = f"http://localhost:{fe_host_port}"
                 if not _wait_http_ok(f"{fe_base}/", deadline_s=backend_wait_s):
                     _log(
                         on_status,
@@ -632,7 +668,8 @@ def run_integration_phase(
                                      "up", "-d", "--build", "--force-recreate", svc.name],
                                     capture_output=True, text=True, timeout=300,
                                 )
-                                _wait_http_ok(f"http://localhost:{svc.port}/", deadline_s=60)
+                                host_port = _resolve_host_port(compose_path, svc.name, svc.port)
+                                _wait_http_ok(f"http://localhost:{host_port}/", deadline_s=60)
                             except Exception as e:
                                 _log(on_status, f"Integration debug: rebuild failed ({e})")
                             return _run_playwright_in_sidecar(
@@ -659,6 +696,7 @@ def run_integration_phase(
                             capture_logs=_capture_frontend_logs,
                             compose_path=compose_path,
                             problem_statement=problem_statement,
+                            escalation=debugger_escalation,
                         )
 
                         if repaired_fe:
@@ -676,13 +714,16 @@ def run_integration_phase(
                             f"integration_failed: playwright non-zero exit. Tail:\n{fe_tail[:1500]}",
                         )
     finally:
-        _log(on_status, "Integration: tearing down stack...")
-        try:
-            subprocess.run(
-                ["docker", "compose", "-f", compose_path, "down"],
-                capture_output=True, text=True, timeout=120,
-            )
-        except Exception as e:
-            _log(on_status, f"Integration: teardown error ({e})")
+        if keep_stack_up:
+            _log(on_status, "Integration: leaving stack up (keep_stack_up=True)")
+        else:
+            _log(on_status, "Integration: tearing down stack...")
+            try:
+                subprocess.run(
+                    ["docker", "compose", "-f", compose_path, "down"],
+                    capture_output=True, text=True, timeout=120,
+                )
+            except Exception as e:
+                _log(on_status, f"Integration: teardown error ({e})")
 
     return out

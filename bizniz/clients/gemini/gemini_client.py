@@ -92,6 +92,8 @@ class GeminiClient(BaseAIClient):
         max_tokens: Optional[int] = None,
         job_description: Optional[str] = None,
         temperature: float = 0.0,
+        cached_content_name: Optional[str] = None,
+        cache_prefix_count: int = 0,
         **kwargs,
     ) -> Tuple[str, str, List]:
         """
@@ -128,15 +130,38 @@ class GeminiClient(BaseAIClient):
         else:
             api_messages = user_messages
 
+        # PROMPT CACHING (lever A from cost analysis): when the caller
+        # passes ``cached_content_name``, drop the first
+        # ``cache_prefix_count`` entries of api_messages — those are
+        # already in the cache. The system instruction is also already
+        # in the cache, so omit it from the per-call config.
+        omit_system_instruction = False
+        if cached_content_name and cache_prefix_count > 0:
+            api_messages = api_messages[cache_prefix_count:]
+            omit_system_instruction = True
+            # Gemini requires at least one entry in contents even when
+            # cached_content is set. On the first tool-loop iteration
+            # after cache creation, api_messages can legitimately be
+            # empty (the cache contains everything we've sent so far).
+            # Append a tiny nudge so the API has something to generate
+            # against.
+            if not api_messages:
+                api_messages = [{"role": "user", "content": "Continue."}]
+
         # Convert to Gemini contents format
         contents = self._build_contents(api_messages)
 
         # Build config
         config = types.GenerateContentConfig(
-            system_instruction=system_content.strip() if system_content.strip() else None,
+            system_instruction=(
+                None if omit_system_instruction
+                else (system_content.strip() if system_content.strip() else None)
+            ),
             max_output_tokens=max_tokens or self.max_tokens,
             temperature=temperature,
         )
+        if cached_content_name:
+            config.cached_content = cached_content_name
 
         # If JSON mode, set response MIME type
         if response_format in (ResponseFormat.JSON, ResponseFormat.JSON_SCHEMA):
@@ -162,13 +187,19 @@ class GeminiClient(BaseAIClient):
                     usage = getattr(response, "usage_metadata", None)
                     in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
                     out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
-                    if in_tok or out_tok:
+                    cached_tok = int(
+                        getattr(usage, "cached_content_token_count", 0) or 0
+                    )
+                    img_count = self._count_image_parts(response)
+                    if in_tok or out_tok or img_count:
                         get_tracker().record(
                             agent=getattr(self, "_caller_agent", "unknown"),
                             model=self._model_name,
                             input_tokens=in_tok,
                             output_tokens=out_tok,
                             duration_ms=_duration_ms,
+                            image_count=img_count,
+                            cached_input_tokens=cached_tok,
                         )
                 except Exception:
                     # Cost tracking is best-effort; never break a real call.
@@ -311,13 +342,15 @@ class GeminiClient(BaseAIClient):
                     usage = getattr(response, "usage_metadata", None)
                     in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
                     out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
-                    if in_tok or out_tok:
+                    img_count = self._count_image_parts(response)
+                    if in_tok or out_tok or img_count:
                         get_tracker().record(
                             agent=getattr(self, "_caller_agent", "unknown"),
                             model=self._model_name,
                             input_tokens=in_tok,
                             output_tokens=out_tok,
                             duration_ms=_duration_ms,
+                            image_count=img_count,
                         )
                 except Exception:
                     pass
@@ -428,6 +461,81 @@ class GeminiClient(BaseAIClient):
                 merged.append(content)
 
         return merged
+
+    def try_create_cache(self, messages) -> Optional[str]:
+        """Create a Gemini cached_content prefix for ``messages`` (typically
+        the system + initial user message of a tool-loop run).
+
+        Returns the cache resource name (``"cachedContents/abc123"``) or
+        None on any failure. Subsequent ``get_text`` calls reuse the
+        cache via ``cached_content_name=...`` and pass
+        ``cache_prefix_count=len(messages)`` so the cached prefix is
+        stripped from the per-call payload.
+
+        TTL is fixed at 1 hour — the Engineer's tool-loop typically
+        finishes in 5-10 minutes, so the cache stays warm for the
+        whole run.
+        """
+        try:
+            normalized = self._normalize_messages(messages)
+            system_content = ""
+            user_msgs = []
+            for m in normalized:
+                if m["role"] == "system":
+                    system_content += m["content"] + "\n"
+                else:
+                    user_msgs.append(m)
+            contents = self._build_contents(user_msgs)
+            cache = self._client.caches.create(
+                model=f"models/{self._model_name}",
+                config=types.CreateCachedContentConfig(
+                    system_instruction=(
+                        system_content.strip() if system_content.strip() else None
+                    ),
+                    contents=contents,
+                    ttl="3600s",
+                ),
+            )
+            return cache.name
+        except Exception as e:
+            # Caching failures should never break the tool loop.
+            # Common reasons: content too small, model doesn't support
+            # caching, transient API error.
+            try:
+                from bizniz.cost import get_tracker
+                # No-op record; tracker doesn't have a "cache_failed"
+                # category yet but useful breadcrumb in logs.
+            except Exception:
+                pass
+            return None
+
+    @staticmethod
+    def _count_image_parts(response) -> int:
+        """Count image parts in a Gemini response.
+
+        Walks ``response.candidates[*].content.parts[*]`` and counts any
+        part with ``inline_data.mime_type`` starting with ``image/``.
+        Returns 0 on any error (cost tracking is best-effort and the
+        SDK shape varies across versions).
+        """
+        try:
+            count = 0
+            candidates = getattr(response, "candidates", None) or []
+            for cand in candidates:
+                content = getattr(cand, "content", None)
+                if content is None:
+                    continue
+                parts = getattr(content, "parts", None) or []
+                for part in parts:
+                    inline = getattr(part, "inline_data", None)
+                    if inline is None:
+                        continue
+                    mime = getattr(inline, "mime_type", "") or ""
+                    if str(mime).lower().startswith("image/"):
+                        count += 1
+            return count
+        except Exception:
+            return 0
 
     @staticmethod
     def _sanitize_json(text: str) -> str:

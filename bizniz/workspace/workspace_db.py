@@ -295,6 +295,18 @@ class WorkspaceDB:
         )
         self._conn.commit()
 
+    def update_issue_description(self, issue_id: int, description: str):
+        """Replace an issue's description. Used by the IssueEnrichmentAgent
+        to append production-grade specifications after the Engineer's
+        initial analyze pass — the orchestrator reads description from
+        the DB when dispatching the Coder, so this is how enrichment
+        reaches the Coder's prompt."""
+        self._conn.execute(
+            "UPDATE issues SET description = ? WHERE id = ?",
+            (description, issue_id),
+        )
+        self._conn.commit()
+
     def close_issue(self, issue_id: int):
         self._conn.execute(
             "UPDATE issues SET status = 'closed', closed_at = ? WHERE id = ?",

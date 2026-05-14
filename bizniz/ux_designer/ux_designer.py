@@ -473,24 +473,58 @@ class UXDesigner:
 
         try:
             coder = self._coder_factory(workspace)
-            # Build target files from issues
-            target_files = []
+            # Build target files from issues (paths only). v1 Coder
+            # took {"filepath", "action"} dicts; the v2 Coder/
+            # ClaudeCliCoder ``code_issue`` interface takes a list of
+            # path strings on the Issue.
+            target_files: List[str] = []
             seen = set()
             for issue in issues:
                 tf = issue.get("target_file")
                 if tf and tf not in seen:
-                    target_files.append({"filepath": tf, "action": "modify"})
+                    target_files.append(tf)
                     seen.add(tf)
             if not target_files:
                 # Fallback: common CSS/component entry points
-                target_files = [{"filepath": "src/App.tsx", "action": "modify"}]
+                target_files = ["src/App.tsx"]
 
-            result = coder.generate_multi(
-                issue_description=fix_prompt,
+            from bizniz.coder.types import Issue as CoderIssue
+            from bizniz.quality_engineer.types import EnrichedSpec
+
+            synthetic_issue = CoderIssue(
+                id=f"UX-{service.name}-fix",
+                title=f"UX fixes for {service.name}",
+                description=fix_prompt,
+                service=service.name,
+                language=service.language or "typescript",
                 target_files=target_files,
+                # No test files — UX fixes are visual; verification
+                # happens in the next UX iteration's screenshot eval.
+                test_files=[],
             )
-            n_changes = len(getattr(result, "changes", []) or [])
-            return n_changes if n_changes > 0 else 0
+            # code_issue() requires architecture + enriched_spec. We
+            # only have what's local to UXDesigner — pass minimal
+            # stubs. The ClaudeCliCoder doesn't lean on them heavily
+            # (system prompt + user prompt is what drives the model).
+            minimal_arch = SystemArchitecture(
+                project_name=service.name,
+                project_slug=service.name,
+                description="",
+                services=[service],
+            )
+            minimal_spec = EnrichedSpec(
+                problem_statement=fix_prompt[:500],
+                milestone_name="ux_review",
+                milestone_description="UX review fixes",
+                capabilities=[],
+            )
+            result = coder.code_issue(
+                issue=synthetic_issue,
+                architecture=minimal_arch,
+                enriched_spec=minimal_spec,
+            )
+            # CoderResult: count target files actually written.
+            return len(getattr(result, "target_files_written", []) or [])
         except Exception as e:
             _log(self._on_status, f"UX Designer: coder fix failed: {e}")
             return 0

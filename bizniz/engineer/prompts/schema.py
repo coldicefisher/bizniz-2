@@ -1,245 +1,195 @@
-# Schema for the initial analysis step (requirements, use cases, issues)
-EngineerSchema = {
-    "name": "engineering_analysis",
-    "strict": True,
+"""Action schema for the Engineer's tool loop.
+
+One large schema with an ``action`` enum covering every action the
+Engineer can emit. Each turn the LLM picks one action and fills the
+relevant fields. Unused fields must be present with empty values
+(empty string or empty list); the schema marks them required so the
+LLM can't omit them.
+"""
+from __future__ import annotations
+
+
+_ALLOWED_ACTIONS = [
+    # plan / status
+    "submit_plan",
+    "revise_plan",
+    "get_my_plan",
+    # discovery
+    "view_file",
+    "list_directory",
+    "search_files",
+    "get_file_outline",
+    "get_workspace_tree",
+    "list_routes",
+    "list_dependencies",
+    "list_pydantic_models",
+    "search_imports",
+    "list_all_imports",
+    # mutation
+    "write_file",
+    # tests + smoke
+    "run_tests",
+    "smoke_import",
+    # container introspection
+    "run_in_container",
+    "run_python_in_container",
+    "hit_endpoint",
+    "inspect_env",
+    "tail_logs",
+    "query_database",
+    "decode_jwt",
+    # terminal
+    "submit_implementation",
+]
+
+
+_ISSUE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "id",
+        "title",
+        "description",
+        "target_files",
+        "test_files",
+        "success_criteria",
+        "spec_refs",
+        "depends_on",
+    ],
+    "properties": {
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "target_files": {"type": "array", "items": {"type": "string"}},
+        "test_files": {"type": "array", "items": {"type": "string"}},
+        "success_criteria": {"type": "array", "items": {"type": "string"}},
+        "spec_refs": {"type": "array", "items": {"type": "string"}},
+        "depends_on": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+
+ENGINEER_ACTION_SCHEMA = {
+    "name": "EngineerAction",
     "schema": {
         "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "thinking",
+            "action",
+            # plan/revise fields
+            "approach",
+            "issues",
+            # mutation
+            "path",
+            "new_content",
+            # query
+            "query",
+            "service",
+            "url",
+            "request_data",
+            "command",
+            "sql",
+            "token",
+            # terminal payload
+            "summary",
+            "final_test_status",
+            "completed_issue_ids",
+            "deferred_issue_ids",
+            "notes",
+        ],
         "properties": {
-            "business_requirements": {
-                "type": "array",
-                "items": {"type": "string"}
+            "thinking": {
+                "type": "string",
+                "description": "Scratchpad for reasoning. Keep under ~200 words.",
             },
-            "use_cases": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "description": {"type": "string"}
-                    },
-                    "required": ["title", "description"],
-                    "additionalProperties": False
-                }
+            "action": {
+                "type": "string",
+                "enum": _ALLOWED_ACTIONS,
             },
-            "functional_requirements": {
-                "type": "array",
-                "items": {"type": "string"}
-            },
-            "nonfunctional_requirements": {
-                "type": "array",
-                "items": {"type": "string"}
+            "approach": {
+                "type": "string",
+                "description": "Used by submit_plan / revise_plan only.",
             },
             "issues": {
                 "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "description": {"type": "string"},
-                        "target_files": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "filepath": {"type": "string"},
-                                    "action": {
-                                        "type": "string",
-                                        "enum": ["create", "modify", "delete"]
-                                    }
-                                },
-                                "required": ["filepath", "action"],
-                                "additionalProperties": False
-                            }
-                        },
-                        "test_files": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        },
-                        "depends_on": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Titles of issues this depends on"
-                        },
-                        "suggested_model": {
-                            "type": "string",
-                            "description": "Suggested starting AI model for this issue based on complexity. Use cheaper models (gpt-4o-mini) for simple tasks like data classes, enums, simple CRUD. Use stronger models (gpt-4o) for complex logic, multi-dependency modules, CLI parsing. Use the strongest (gpt-5) only for highly complex architectural work."
-                        },
-                        "test_setup_hint": {
-                            "type": "string",
-                            "description": "How to set up tests for this issue. For endpoints/routes: explain how the app is constructed, how to import it, and how to create a test client. For modules that integrate with other components: explain the import path and any required mocks/fixtures. Empty string for standalone units that need no special test setup."
-                        }
-                    },
-                    "required": ["title", "description", "target_files", "test_files", "depends_on", "suggested_model", "test_setup_hint"],
-                    "additionalProperties": False
-                }
-            }
+                "items": _ISSUE_SCHEMA,
+                "description": "Used by submit_plan / revise_plan only.",
+            },
+            "path": {
+                "type": "string",
+                "description": (
+                    "view_file / list_directory / write_file / "
+                    "smoke_import / get_file_outline / inspect_env / "
+                    "tail_logs path-or-prefix-or-tail-count."
+                ),
+            },
+            "new_content": {
+                "type": "string",
+                "description": "write_file content.",
+            },
+            "query": {
+                "type": "string",
+                "description": "search_files / search_imports query.",
+            },
+            "service": {
+                "type": "string",
+                "description": (
+                    "Container service name override for run_*, "
+                    "hit_endpoint, inspect_env, tail_logs, query_database."
+                ),
+            },
+            "url": {
+                "type": "string",
+                "description": "hit_endpoint URL.",
+            },
+            "request_data": {
+                "type": "string",
+                "description": (
+                    "hit_endpoint extras as JSON-as-string: "
+                    "{method, headers, body}."
+                ),
+            },
+            "command": {
+                "type": "string",
+                "description": (
+                    "Shell command for run_in_container, "
+                    "Python source for run_python_in_container."
+                ),
+            },
+            "sql": {
+                "type": "string",
+                "description": "query_database SQL.",
+            },
+            "token": {
+                "type": "string",
+                "description": "decode_jwt token (with or without 'Bearer ').",
+            },
+            "summary": {
+                "type": "string",
+                "description": "submit_implementation: 2-5 sentence summary.",
+            },
+            "final_test_status": {
+                "type": "string",
+                "enum": ["passed", "partial", "failed", "not_run"],
+                "description": "submit_implementation: overall test status.",
+            },
+            "completed_issue_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "deferred_issue_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "notes": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "submit_implementation: free-text observations the "
+                    "reviewer should know about."
+                ),
+            },
         },
-        "required": [
-            "business_requirements",
-            "use_cases",
-            "functional_requirements",
-            "nonfunctional_requirements",
-            "issues"
-        ],
-        "additionalProperties": False
-    }
-}
-
-
-# Schema for architecture planning step
-ArchitecturePlanSchema = {
-    "name": "architecture_plan",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "properties": {
-            "package_name": {
-                "type": "string",
-                "description": "Python package name (snake_case, no hyphens)"
-            },
-            "root_namespace": {
-                "type": "string",
-                "description": "Root namespace matching the package name"
-            },
-            "namespaces": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "namespace_path": {
-                            "type": "string",
-                            "description": "Directory path relative to workspace root, e.g. 'expense_tracker/models'"
-                        },
-                        "purpose": {"type": "string"}
-                    },
-                    "required": ["namespace_path", "purpose"],
-                    "additionalProperties": False
-                }
-            },
-            "domain_models": {
-                "type": "array",
-                "description": "Shared types and data classes used across modules",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "class_name": {"type": "string"},
-                        "filepath": {
-                            "type": "string",
-                            "description": "File path relative to workspace root"
-                        },
-                        "namespace_path": {"type": "string"},
-                        "fields": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "type_hint": {"type": "string"},
-                                    "description": {"type": "string"}
-                                },
-                                "required": ["name", "type_hint", "description"],
-                                "additionalProperties": False
-                            }
-                        },
-                        "methods": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "signature": {
-                                        "type": "string",
-                                        "description": "Full method signature, e.g. 'def total(self) -> float'"
-                                    },
-                                    "description": {"type": "string"}
-                                },
-                                "required": ["name", "signature", "description"],
-                                "additionalProperties": False
-                            }
-                        },
-                        "docstring": {"type": "string"}
-                    },
-                    "required": ["class_name", "filepath", "namespace_path", "fields", "methods", "docstring"],
-                    "additionalProperties": False
-                }
-            },
-            "modules": {
-                "type": "array",
-                "description": "Implementation modules with class/function signatures",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "filepath": {"type": "string"},
-                        "class_name": {
-                            "type": "string",
-                            "description": "Class name if this module defines a class, empty string for module-level functions"
-                        },
-                        "namespace_path": {"type": "string"},
-                        "methods": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "signature": {"type": "string"},
-                                    "description": {"type": "string"}
-                                },
-                                "required": ["name", "signature", "description"],
-                                "additionalProperties": False
-                            }
-                        },
-                        "docstring": {"type": "string"}
-                    },
-                    "required": ["filepath", "class_name", "namespace_path", "methods", "docstring"],
-                    "additionalProperties": False
-                }
-            },
-            "dependencies": {
-                "type": "array",
-                "description": "Import edges between modules",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "source_filepath": {"type": "string"},
-                        "target_filepath": {"type": "string"},
-                        "import_symbols": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        }
-                    },
-                    "required": ["source_filepath", "target_filepath", "import_symbols"],
-                    "additionalProperties": False
-                }
-            }
-        },
-        "required": ["package_name", "root_namespace", "namespaces", "domain_models", "modules", "dependencies"],
-        "additionalProperties": False
-    }
-}
-
-
-# Schema for architecture governance (drift review)
-ArchitectureGovernanceSchema = {
-    "name": "governance_decision",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "properties": {
-            "decision": {
-                "type": "string",
-                "enum": ["approve", "reject", "modify"],
-                "description": "Whether to approve, reject, or modify the unplanned changes"
-            },
-            "reason": {
-                "type": "string",
-                "description": "Explanation of the decision"
-            },
-            "plan_updates": {
-                "type": "string",
-                "description": "JSON string of partial architecture plan updates if decision is 'modify'. Empty string otherwise."
-            }
-        },
-        "required": ["decision", "reason", "plan_updates"],
-        "additionalProperties": False
-    }
+    },
 }

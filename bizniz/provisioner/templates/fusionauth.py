@@ -35,6 +35,12 @@ class FusionAuthTemplate(InfraTemplate):
     # Customize per-project by deriving from project_slug if you want.
     APPLICATION_ID = "85a03867-dccf-4882-adde-1a79aeec50df"
     ADMIN_USER_ID = "00000000-0000-0000-0000-000000000001"
+    # Stable RSA signing key ID. Kickstart generates an RS256 keypair
+    # at this ID and binds it as the tenant's accessTokenSigningKey
+    # (see comment on the PATCH /api/tenant request below). Without
+    # this, FusionAuth defaults to HS256 → JWKS exposes no public
+    # keys → backend's RS256 + JWKS validation fails on every JWT.
+    ACCESS_TOKEN_KEY_ID = "12345678-1234-1234-1234-123456789012"
     # FusionAuth ships with this default tenant ID built-in. We do NOT
     # set this as a kickstart variable — kickstart treats `defaultTenantId`
     # specially (a "rename the default tenant" trigger), and renaming it
@@ -66,6 +72,7 @@ class FusionAuthTemplate(InfraTemplate):
                 "adminPassword": admin_password,
                 "apiKey": api_key,
                 "appName": slug,
+                "accessTokenKeyId": self.ACCESS_TOKEN_KEY_ID,
             },
             "apiKeys": [
                 {
@@ -74,19 +81,45 @@ class FusionAuthTemplate(InfraTemplate):
                 }
             ],
             "requests": [
-                # Patch the default tenant — issuer must match how the
-                # application services will see FusionAuth from inside the
-                # docker network. UUID is hardcoded (see DEFAULT_TENANT_ID
-                # comment above) instead of being a kickstart variable.
+                # Generate an RSA-2048 keypair for the tenant's access
+                # tokens. Without this, FA defaults to an HMAC SHA-256
+                # key, JWKS endpoint exposes no public keys, and the
+                # skeleton's RS256 + JWKS validation fails on every JWT
+                # ("Signature verification failed"). RS256 is the
+                # standard for JWKS-based service-to-service token
+                # validation; HS256 would require shared-secret
+                # distribution.
                 {
-                    "method": "PATCH",
-                    "url": f"/api/tenant/{self.DEFAULT_TENANT_ID}",
+                    "method": "POST",
+                    "url": "/api/key/generate/#{accessTokenKeyId}",
                     "body": {
-                        "tenant": {
-                            "issuer": issuer,
+                        "key": {
+                            "algorithm": "RS256",
+                            "name": "Access Token Signing Key",
+                            "length": 2048,
                         }
                     },
                 },
+                # NOTE: we deliberately do NOT PATCH the default
+                # tenant here. FusionAuth's PATCH validator on a
+                # freshly-bootstrapped default tenant is broken in
+                # both directions:
+                #   - body without name → 400 [blank]tenant.name
+                #   - body with name="Default" → 400 [duplicate]tenant.name
+                # The application-level jwtConfiguration below
+                # overrides the tenant's defaults and IS accepted on
+                # PATCH/POST. JWT signing config goes there.
+                #
+                # Tenant.issuer would be nice to set (so the JWT's
+                # ``iss`` claim matches the placeholder value we
+                # write to ``FUSIONAUTH_ISSUER`` in .env), but the
+                # same validator quirk blocks it on a fresh tenant.
+                # Instead, the FA agent reconciles this after a
+                # successful smoke test: decodes the JWT body, reads
+                # the actual ``iss``, and rewrites ``FUSIONAUTH_ISSUER``
+                # in .env to match (see fusionauth_agent.py
+                # _reconcile_issuer_in_env). The skeleton's auth.py
+                # then validates against the correct issuer.
                 # Roles for the application
                 {
                     "method": "POST",
@@ -115,6 +148,14 @@ class FusionAuthTemplate(InfraTemplate):
                                 "enabled": True,
                                 "timeToLiveInSeconds": 3600,
                                 "refreshTokenTimeToLiveInMinutes": 43200,
+                                # Bind the RSA key here at the
+                                # APPLICATION level (not tenant) —
+                                # FA's tenant PATCH validator is
+                                # broken on fresh tenants. Application
+                                # JWT config overrides tenant defaults
+                                # and the validator is happy here.
+                                "accessTokenKeyId": "#{accessTokenKeyId}",
+                                "idTokenKeyId": "#{accessTokenKeyId}",
                             },
                         }
                     },

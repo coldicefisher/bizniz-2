@@ -1,38 +1,50 @@
-from typing import Optional, List
-from pydantic import BaseModel
+"""Orchestrator result types."""
+from __future__ import annotations
 
-from bizniz.agents.coder.types import FileChange
-from bizniz.tester.types import GeneratedTestFile
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, Field
+
+from bizniz.coder.types import CoderResult
 
 
-class TestRunResult(BaseModel):
-    """Result of running ALL project tests."""
-    all_passed: bool
-    total_tests: int = 0
-    passed: int = 0
-    failed: int = 0
-    failing_test_files: List[str] = []
-    regression_files: List[str] = []  # tests that were passing before but now fail
-    stdout: str = ""
+IssueDisposition = Literal[
+    "passed",       # Coder returned status=passed
+    "partial",      # All tiers returned partial (code written, tests red)
+    "failed",       # All tiers returned failed (Coder gave up explicitly)
+    "deferred",     # Coder punted — issue blocked outside its scope
+    "stalled",      # All tiers exhausted on stall (3-of-5 repetition)
+    "escalated",    # Passed only after escalating to a higher tier
+    "errored",      # Unexpected exception
+    "skipped",      # Dependency previously failed
+]
+
+
+class IssueOutcome(BaseModel):
+    """One issue's lifecycle through the orchestrator."""
+    issue_id: str
+    disposition: IssueDisposition
+    tiers_used: List[str] = Field(
+        default_factory=list,
+        description="Model names tried for this issue, in order.",
+    )
+    final_result: Optional[CoderResult] = None
+    error: str = ""
+
+    @property
+    def passed(self) -> bool:
+        return self.disposition in ("passed", "escalated")
 
 
 class OrchestratorResult(BaseModel):
-    success: bool
-    changes: List[FileChange] = []
-    test_files: List[GeneratedTestFile] = []
-    iterations: int = 0
-    error: Optional[str] = None
-    failure_context: Optional[str] = None  # last failure output for retry strategies
-    strategy_used: Optional[str] = None  # "tdd" or "code_first"
-    architecture_drift_detected: bool = False
-    drift_files: List[str] = []  # unplanned filepaths changed by the coder
+    """Aggregate result for one orchestrator.run_service() call."""
+    service: str
+    issues: List[IssueOutcome] = Field(default_factory=list)
 
+    @property
+    def all_passed(self) -> bool:
+        return all(o.passed for o in self.issues)
 
-class OrchestratorStalledError(Exception):
-    """Raised when the orchestrator detects the same code being produced twice in a row."""
-    pass
-
-
-class OrchestratorMaxIterationsError(Exception):
-    """Raised when max_iterations is exhausted without a passing test run."""
-    pass
+    @property
+    def passed_count(self) -> int:
+        return sum(1 for o in self.issues if o.passed)

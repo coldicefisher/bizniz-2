@@ -118,7 +118,7 @@ def _make_orchestrator(config, workspace, on_status_message=None, suggested_mode
         )
 
     def debugger_factory():
-        fresh_client = config.make_client()
+        fresh_client = config.make_client(model=config.debugger_model)
         return AgenticDebugger(
             client=fresh_client, workspace=workspace, environment=test_env,
             on_status_message=on_status_message,
@@ -127,7 +127,7 @@ def _make_orchestrator(config, workspace, on_status_message=None, suggested_mode
     def client_factory(model_name):
         return config.make_client(model=model_name)
 
-    issue_client = config.make_client(model=suggested_model) if suggested_model else config.make_client()
+    issue_client = config.make_client(model=suggested_model or config.engineer_model)
 
     return CodingOrchestrator(
         coder=Coder(client=issue_client, environment=sandbox, workspace=workspace),
@@ -171,7 +171,7 @@ def _make_engineer(config, workspace, on_status_message=None, image_name=None, l
         orchestrator_factory=orchestrator_factory,
         on_status_message=on_status_message,
         language=language,
-        available_models=config.coder_models or config.models,
+        available_models=config.coder_models,
         debugger_model=config.debugger_model,
         debugger_max_iterations=config.debugger_max_iterations,
     )
@@ -301,9 +301,13 @@ def main():
             on_status_message=log,
         )
 
-    def _make_integration_debugger(workspace):
+    def _make_integration_debugger(workspace, model_override: str = None):
+        # model_override is set per-tier when the architect is using
+        # the debugger escalation chain (see Architect's
+        # _build_debugger_escalation_specs). Falls back to the
+        # config default for legacy single-tier callers.
         return AgenticDebugger(
-            client=config.make_client(model=config.debugger_model),
+            client=config.make_client(model=model_override or config.debugger_model),
             workspace=workspace,
             environment=PythonSandboxExecutionEnvironment(),
             on_status_message=log,
@@ -324,7 +328,7 @@ def main():
         def _coder_for_ux(workspace):
             from bizniz.agents.coder.coder import Coder
             return Coder(
-                client=config.make_client(),
+                client=config.make_client(model=config.engineer_model),
                 environment=DockerExecutionEnvironment(),
                 workspace=workspace,
             )
@@ -341,7 +345,8 @@ def main():
             config, ws, on_status_message=on_status_message, image_name=image_name, language=language,
         ),
         http_api_tester_factory=lambda workspace: _make_http_api_tester(workspace),
-        integration_debugger_factory=lambda workspace: _make_integration_debugger(workspace),
+        integration_debugger_factory=_make_integration_debugger,
+        integration_debugger_escalation_tiers=config.debugger_escalation,
         web_ui_tester_factory=lambda workspace: _make_web_ui_tester(workspace),
         ux_designer_factory=_make_ux_designer_kwargs,
         project_parent=str(project_parent),
@@ -395,21 +400,25 @@ def main():
     except Exception as e:
         print(f"  Cost summary unavailable: {e}", flush=True)
 
-    # Update plan statuses and save
+    # Update plan statuses and save. Use ArchitectResult.success as
+    # the authoritative outcome — empty service_results from an aborted
+    # milestone (e.g. FA validation couldn't be repaired) is NOT a
+    # vacuous pass.
     for m in milestones_to_run:
         m_idx = m.sequence_index
         if m_idx < len(results):
             r = results[m_idx - m_start]
-            all_pass = all(sr.success for sr in r.service_results) if r.service_results else False
-            m.status = "completed" if all_pass else "failed"
+            m.status = "completed" if getattr(r, "success", False) else "failed"
     _save_plan(plan, plan_path)
 
-    all_passed = all(
-        sr.success
-        for r in results
-        for sr in r.service_results
+    all_passed = bool(results) and all(
+        getattr(r, "success", False) for r in results
     )
     print(f"\n  Overall: {'PASS' if all_passed else 'FAIL'}", flush=True)
+    for r in results:
+        if not getattr(r, "success", False):
+            reason = getattr(r, "abort_reason", None) or "see logs"
+            print(f"    ✗ milestone failed — reason: {reason}", flush=True)
     print(f"\n  Next steps:", flush=True)
     print(f"  1. Verify: docker compose -f {project_root}/infra/development/docker-compose.yml up -d", flush=True)
     print(f"  2. Integration tests: PYTHONPATH=. .venv/bin/python -u examples/debug_integration.py {project_root}", flush=True)

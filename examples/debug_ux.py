@@ -189,7 +189,7 @@ def main():
         def coder_factory(workspace):
             from bizniz.agents.coder.coder import Coder
             return Coder(
-                client=config.make_client(),
+                client=config.make_client(model=config.engineer_model),
                 environment=DockerExecutionEnvironment(),
                 workspace=workspace,
             )

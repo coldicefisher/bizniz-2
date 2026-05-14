@@ -37,15 +37,31 @@ IMPORTANT framework rules:
 
 Authentication (REQUIRED whenever the project has user accounts, login,
 or any concept of "user"):
-- Add an auth service with framework="fusionauth", service_type="auth",
-  language="yaml", workspace_name="fusionauth", port=9011, skeleton="none".
+- The pipeline always delegates identity to a managed provider — never a
+  custom in-application auth implementation. No application-side password
+  hashing, no DIY session cookies, no hand-rolled JWT signing.
+- DEFAULT: add a FusionAuth service. Switch to a different managed
+  provider only when the problem statement names an EXPLICIT CONSTRAINT
+  (existing customer Okta tenant, regulatory requirement to use AWS
+  Cognito, vendor contract mandating Auth0, etc.). Without an explicit
+  constraint, default to FusionAuth.
+- When the problem doesn't imply any user identity, skip the auth service
+  entirely.
+- When auth is needed (FusionAuth default): add an auth service with
+  framework="fusionauth", service_type="auth", language="yaml",
+  workspace_name="fusionauth", port=9011, skeleton="none".
 - FusionAuth REQUIRES postgres. If you add a fusionauth service, you MUST
   also add a postgres service: framework="postgres", service_type="database",
   language="sql", workspace_name="postgres", port=5432, skeleton="none".
-- The Provisioner ships a complete kickstart.json (realm, application,
-  roles admin+user, OAuth redirect URLs for the frontend, an initial
-  admin user) so you don't need to plan any FusionAuth config yourself.
+- A separate AuthAgent runs after this Architect call. It reads the
+  milestone's problem_slice and materializes the identity state (roles,
+  applications, test users) via the configured auth provider's API. You
+  do NOT specify roles, applications, or test users in your output —
+  only that the auth service exists in the architecture.
 - Backend services that need auth should list "auth" in their depends_on.
+- Backend code validates JWTs issued by the auth provider via JWKS and
+  reads roles from the JWT's ``roles`` claim. There is no local
+  Role/UserRole table in the skeleton — engineers MUST NOT introduce one.
 
 Available skeletons (pre-built starter repos that come with auth, Docker, tests, README):
 {skeletons}
@@ -53,9 +69,14 @@ Available skeletons (pre-built starter repos that come with auth, Docker, tests,
 Skeleton selection rules:
 - Pick the matching skeleton for any application service (backend, frontend, worker) so it
   starts with a real working baseline instead of from scratch.
+- **EXPLICIT USER CONSTRAINTS WIN.** If the problem statement names a specific framework
+  (e.g., "Frontend: React", "Backend: FastAPI", "use Vue"), you MUST honor it — do NOT
+  override with a heuristic. Heuristics below apply ONLY when the problem statement is
+  silent on the choice.
 - "fastapi" for Python/FastAPI backends.
-- "react" is the DEFAULT frontend.
-- "angular" only when the UI is dashboard-heavy / data-dense (admin consoles, BI dashboards).
+- "react" is the DEFAULT frontend WHEN the problem statement doesn't name one.
+- "angular" only when the problem is silent on framework AND the UI is dashboard-heavy /
+  data-dense (admin consoles, BI dashboards).
 - The "teams-*" skeletons go together as a 3-service system pattern when the problem requires
   realtime fan-out feeds (Microsoft Teams-like channels, activity streams, group chat, etc.).
   When you pick the teams pattern, generate exactly three services: one with skeleton=teams-backend,

@@ -1,4 +1,10 @@
-"""Planner result types."""
+"""Planner result types.
+
+v2 simplification: ``Milestone`` no longer carries ``auth_delta``.
+The Planner is product-shaped — it decomposes user value into
+milestones and stops. Auth state per-milestone is handled by the
+dedicated AuthAgent later in the pipeline.
+"""
 from __future__ import annotations
 
 from typing import List, Optional
@@ -22,6 +28,14 @@ class Milestone(BaseModel):
     depends_on_names: List[str] = []  # other milestone names that must ship first
     estimated_effort: Optional[str] = None  # rough sizing (human review hint)
     status: str = "planned"   # planned | in_progress | completed | skipped
+    # Planner-emitted hint: should a refactor pass run after this
+    # milestone? The Planner sets True at natural feature-group
+    # boundaries (e.g. when a CRUD domain completes) so the
+    # Refactorer can extract shared helpers before duplication
+    # compounds across milestones. The final milestone is ALWAYS
+    # treated as a refactor boundary by milestone_loop regardless
+    # of this flag.
+    refactor_after: bool = False
 
 
 class ProjectPlan(BaseModel):

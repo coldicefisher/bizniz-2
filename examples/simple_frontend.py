@@ -97,7 +97,7 @@ def _make_orchestrator(config, workspace, on_status_message=None, suggested_mode
         )
 
     def debugger_factory():
-        fresh_client = config.make_client()
+        fresh_client = config.make_client(model=config.debugger_model)
         return AgenticDebugger(
             client=fresh_client, workspace=workspace, environment=test_env,
             on_status_message=on_status_message,
@@ -106,7 +106,7 @@ def _make_orchestrator(config, workspace, on_status_message=None, suggested_mode
     def client_factory(model_name):
         return config.make_client(model=model_name)
 
-    issue_client = config.make_client(model=suggested_model) if suggested_model else config.make_client()
+    issue_client = config.make_client(model=suggested_model or config.engineer_model)
 
     return CodingOrchestrator(
         coder=Coder(client=issue_client, environment=sandbox, workspace=workspace),
@@ -156,7 +156,7 @@ if __name__ == "__main__":
 
     log("Loading config...")
     config = BiznizConfig.find_and_load()
-    log(f"Config: default_model={config.default_model}, max_iterations={config.max_iterations}")
+    log(f"Config: engineer_model={config.engineer_model}, max_iterations={config.max_iterations}")
 
     log("Creating architect client...")
     architect_client = config.make_client(model="gpt-4o")

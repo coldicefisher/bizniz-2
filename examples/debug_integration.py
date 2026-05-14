@@ -191,13 +191,37 @@ def main():
             on_status_message=log,
         )
 
-    def _make_integration_debugger(workspace):
+    def _make_integration_debugger(workspace, model_override: str = None):
         return AgenticDebugger(
-            client=config.make_client(model=debugger_model),
+            client=config.make_client(model=model_override or debugger_model),
             workspace=workspace,
             environment=PythonSandboxExecutionEnvironment(),
             on_status_message=log,
         )
+
+    # Build escalation chain from config (or skip if --debugger-model
+    # override was passed — that signals single-tier intent).
+    if args.debugger_model:
+        debugger_escalation_specs = None
+    else:
+        from bizniz.integration.debug_loop import DebuggerTierSpec
+        debugger_escalation_specs = [
+            DebuggerTierSpec(
+                factory=lambda ws, m=t.model: _make_integration_debugger(ws, model_override=m),
+                model_label=t.model,
+                tool_iterations=t.tool_iterations,
+                repair_attempts=t.repair_attempts,
+            )
+            for t in config.debugger_escalation
+        ]
+        if debugger_escalation_specs:
+            log(
+                "Debugger escalation: "
+                + " → ".join(
+                    f"{s.model_label}({s.repair_attempts}×{s.tool_iterations})"
+                    for s in debugger_escalation_specs
+                )
+            )
 
     def _make_web_ui_tester(workspace):
         return WebUITester(
@@ -233,6 +257,7 @@ def main():
             debugger_factory=lambda workspace: _make_integration_debugger(workspace),
             debug_max_iterations=args.max_iterations,
             web_ui_tester_factory=web_ui_factory,
+            debugger_escalation=debugger_escalation_specs,
         )
     except KeyboardInterrupt:
         log("Interrupted by user")

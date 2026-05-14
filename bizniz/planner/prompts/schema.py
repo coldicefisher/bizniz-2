@@ -1,3 +1,10 @@
+"""JSON schema for the Planner's structured output.
+
+Mirrors ``bizniz/planner/types.py`` (Milestone). Keep these in sync
+when fields change. v2 simplification: no ``auth_delta`` — the Planner
+no longer emits identity state; the AuthAgent handles that downstream.
+"""
+
 PlannerSchema = {
     "name": "project_plan",
     "strict": True,

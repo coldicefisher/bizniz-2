@@ -5,7 +5,6 @@ Problem statement:
 Project name: {project_name}
 Project slug: {project_slug}
 
-{existing_state_block}\
 Decompose this project into an ordered sequence of milestones.
 
 For each milestone, produce:
@@ -31,31 +30,14 @@ Also produce:
   - milestones: the ordered list, sequence_index ascending from 0.
 """
 
-EXISTING_STATE_TEMPLATE = """\
-The project already exists. Current architecture (already shipped):
-
-{architecture_summary}
-
-Already-completed milestones:
-{completed_milestones}
-
-You are RE-PLANNING the remaining work — produce milestones that BUILD
-ON the existing project, do not propose to rebuild what already exists.
-The first milestone you emit should reference what's there and what
-the next chunk of user value adds.
-
-"""
-
 
 def build_plan_prompt(
     problem_statement: str,
     project_name: str,
     project_slug: str,
-    existing_state_block: str = "",
 ) -> str:
     return PLAN_PROMPT_TEMPLATE.format(
         problem_statement=problem_statement,
         project_name=project_name,
         project_slug=project_slug,
-        existing_state_block=existing_state_block,
     )

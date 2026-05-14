@@ -1,6 +1,7 @@
 """Unit tests for GeminiClient — text, JSON schema, and vision."""
 
 import json
+from types import SimpleNamespace
 import pytest
 from unittest.mock import MagicMock, patch, call
 
@@ -258,3 +259,100 @@ def test_build_contents_prepends_user_if_starts_with_model():
     contents = GeminiClient._build_contents(msgs)
     assert contents[0].role == "user"
     assert contents[1].role == "model"
+
+
+# ── Image-aware cost tracking ────────────────────────────────────────
+
+
+def _resp_with_image_parts(n_images: int, n_text: int = 1):
+    """Build a Gemini-shaped mock response with ``n_images`` image
+    parts and ``n_text`` text parts in candidates[0].content.parts."""
+    parts = []
+    for _ in range(n_text):
+        parts.append(SimpleNamespace(text="hello", inline_data=None))
+    for _ in range(n_images):
+        parts.append(SimpleNamespace(
+            text=None,
+            inline_data=SimpleNamespace(
+                mime_type="image/png", data=b"\x89PNG",
+            ),
+        ))
+    cand = SimpleNamespace(content=SimpleNamespace(parts=parts))
+    resp = MagicMock()
+    resp.text = "hello"
+    resp.candidates = [cand]
+    resp.usage_metadata = SimpleNamespace(
+        prompt_token_count=10, candidates_token_count=5,
+    )
+    return resp
+
+
+class TestCountImageParts:
+    def test_zero_when_no_candidates(self):
+        resp = MagicMock()
+        resp.candidates = None
+        assert GeminiClient._count_image_parts(resp) == 0
+
+    def test_zero_when_only_text_parts(self):
+        resp = _resp_with_image_parts(n_images=0, n_text=2)
+        assert GeminiClient._count_image_parts(resp) == 0
+
+    def test_counts_image_parts(self):
+        resp = _resp_with_image_parts(n_images=3, n_text=1)
+        assert GeminiClient._count_image_parts(resp) == 3
+
+    def test_ignores_non_image_inline_data(self):
+        # Some other inline_data type, e.g. application/pdf — should not count.
+        cand = SimpleNamespace(content=SimpleNamespace(parts=[
+            SimpleNamespace(text=None, inline_data=SimpleNamespace(
+                mime_type="application/pdf", data=b"...",
+            )),
+            SimpleNamespace(text="ok", inline_data=None),
+        ]))
+        resp = MagicMock()
+        resp.candidates = [cand]
+        assert GeminiClient._count_image_parts(resp) == 0
+
+    def test_counts_across_multiple_candidates(self):
+        cand1 = SimpleNamespace(content=SimpleNamespace(parts=[
+            SimpleNamespace(text=None, inline_data=SimpleNamespace(
+                mime_type="image/jpeg", data=b"."
+            )),
+        ]))
+        cand2 = SimpleNamespace(content=SimpleNamespace(parts=[
+            SimpleNamespace(text=None, inline_data=SimpleNamespace(
+                mime_type="image/png", data=b"."
+            )),
+        ]))
+        resp = MagicMock()
+        resp.candidates = [cand1, cand2]
+        assert GeminiClient._count_image_parts(resp) == 2
+
+    def test_swallows_exceptions(self):
+        # Bogus shape — must return 0, never raise.
+        resp = MagicMock()
+        resp.candidates = "not iterable in the way we expect"
+        # Iterating a string yields chars; getattr(char, "content")
+        # raises AttributeError. Helper catches.
+        assert GeminiClient._count_image_parts(resp) == 0
+
+
+def test_get_text_records_image_count_in_tracker(gemini_client, mock_genai_client):
+    """Image-output responses populate ``image_count`` on the cost
+    record. Verifies the helper feeds into get_text's tracker call."""
+    from bizniz.cost import get_tracker
+    tracker = get_tracker()
+    tracker.reset()
+
+    mock_genai_client.models.generate_content.return_value = (
+        _resp_with_image_parts(n_images=2)
+    )
+    gemini_client.get_text(
+        messages=[{"role": "user", "content": "make 2 images"}],
+    )
+
+    # Verify the recorded call carries image_count=2.
+    records = tracker.records()
+    assert len(records) >= 1
+    rec = records[-1]
+    assert rec.image_count == 2

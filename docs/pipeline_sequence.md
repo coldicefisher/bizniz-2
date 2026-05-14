@@ -432,15 +432,16 @@ the live Docker stack.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `default_model` | `gemini-flash-lite` | Phase 1 framing tier |
-| `engineer_model` | `gemini-flash` | Engineer's analyze + plan calls |
-| `architect_model` | `gemini-pro` | Architect.decompose / evolve |
-| `planner_model` | `gemini-pro` | Planner (one call per project) |
-| `coder_models` | `[flash-lite, flash, pro]` | Escalation chain |
-| `tester_models` | same | Test generation escalation |
-| `repair_models` | `[flash, pro]` | Stall-escalation chain |
-| `debugger_model` | `gemini-pro` | Phase 3 + integration debugger |
-| `debugger_max_iterations` | 12 | Per-ticket cap in Phase 3 |
+| `engineer_model` | `gemini-flash-top` | Engineer's analyze + plan + governance + enrichment |
+| `architect_model` | `gemini-flash-top` | Architect.decompose / evolve |
+| `planner_model` | `gemini-flash-top` | Planner (one call per project) |
+| `integration_tester_model` | `gemini-pro` | HTTPApiTester + WebUITester generation |
+| `coder_models` (req) | `[flash-lite, flash, flash-top]` | Coder stall-escalation chain |
+| `tester_models` (req) | same | Test generation escalation |
+| `repair_models` (req) | `[flash, flash-top]` | QuickDebugger stall-escalation chain |
+| `debugger_model` | `gemini-flash-lite` | Single-tier fallback (legacy) |
+| `debugger_escalation` | (3 tiers) | Active integration-debugger chain |
+| `debugger_max_iterations` | 12 | Per-ticket cap in legacy single-tier mode |
 | `stall_threshold` | 3 | Consecutive failures before stall |
 | `agentic_debug_threshold` | 2 | Legacy; Phase 3 forces on |
 | `enable_agentic_debug` | false | Phase 3 forces on regardless |

@@ -51,7 +51,7 @@ class TestToolLoopTerminalAction:
             initial_user_message="Do something.",
             action_schema=_make_schema(),
             terminal_action="submit",
-            max_turns=5,
+            tool_iterations=5,
         )
 
         assert result["action"] == "submit"
@@ -178,10 +178,10 @@ class TestToolLoopErrors:
                 initial_user_message="Go",
                 action_schema=_make_schema(),
                 terminal_action="submit",
-                max_turns=5,
+                tool_iterations=5,
             )
 
-    def test_raises_on_max_turns_exhausted(self):
+    def test_raises_on_tool_iterations_exhausted(self):
         client = MagicMock(spec=BaseAIClient)
         workspace = MagicMock(spec=BaseWorkspace)
         workspace.tree.return_value = ["a.py"]
@@ -203,7 +203,7 @@ class TestToolLoopErrors:
                 initial_user_message="Go",
                 action_schema=_make_schema(),
                 terminal_action="submit",
-                max_turns=2,
+                tool_iterations=2,
             )
 
 

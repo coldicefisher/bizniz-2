@@ -28,7 +28,7 @@ from bizniz.workspace.temp_workspace import TempWorkspace
 if __name__ == "__main__":
 
     config = BiznizConfig.find_and_load()
-    client = config.make_client()
+    client = config.make_client(model=config.engineer_model)
     sandbox = DockerExecutionEnvironment()
     workspace = TempWorkspace()
 
@@ -39,7 +39,7 @@ if __name__ == "__main__":
     )
 
     def debugger_factory():
-        fresh_client = config.make_client()
+        fresh_client = config.make_client(model=config.debugger_model)
         return AgenticDebugger(
             client=fresh_client,
             workspace=workspace,

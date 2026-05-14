@@ -1,4 +1,14 @@
-from bizniz.orchestrator.coding_orchestrator import CodingOrchestrator
-from bizniz.orchestrator.types import OrchestratorResult, OrchestratorStalledError
+"""v2.5 Orchestrator — per-issue Coder dispatch with model escalation.
 
-__all__ = ["CodingOrchestrator", "OrchestratorResult", "OrchestratorStalledError"]
+The Orchestrator owns the loop:
+    for issue in topo_sorted_issues:
+        coder = build_coder(progression.current_model)
+        try: result = coder.code_issue(issue, ...)
+        except ToolLoopAgentStalledError:
+            if progression.escalate(): retry
+            else: mark issue stalled, continue
+"""
+from bizniz.orchestrator.orchestrator import Orchestrator
+from bizniz.orchestrator.types import IssueOutcome, OrchestratorResult
+
+__all__ = ["Orchestrator", "OrchestratorResult", "IssueOutcome"]
