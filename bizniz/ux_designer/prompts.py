@@ -58,8 +58,25 @@ STRUCTURE — emit one `test('screenshot <name>', ...)` block per route:
 
 AUTHENTICATION (when an AUTH CONTRACT is provided above):
 Many routes are protected and redirect to `/login` when unauthenticated.
-Sign in ONCE in `test.beforeAll`, save `storageState`, then
-`test.use({{ storageState }})`. CRITICAL RULES:
+
+**MANDATORY** when an AUTH CONTRACT exists above (not optional):
+  - Generate the ``test.beforeAll`` storageState block shown below.
+  - Generate ``test.use({{ storageState: STATE_PATH }})`` at module
+    scope so EVERY single ``test()`` in the file inherits the
+    authenticated session.
+  - DO NOT generate per-test login helpers. The storageState
+    approach is the only correct shape — per-test logins waste
+    minutes and frequently silently fail, leaving the test to
+    capture the login page instead of the real route.
+  - Public routes (``/``, ``/login``, ``/register``) ALSO get the
+    shared storageState — that's fine, public routes ignore it.
+
+Use the seeded admin credentials from the AUTH CONTRACT's "Test
+users" section (typically email+password, role=admin). The admin
+role is the right choice because admin sees every route's content
+(non-admin gets 403 on /admin/* and would still capture errors).
+
+CRITICAL RULES:
 
 1. ALWAYS write the storageState file at the end of beforeAll, even if
    login failed. Use a `finally` block. Otherwise tests cascade with

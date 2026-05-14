@@ -227,12 +227,23 @@ def main():
                 max_home_iterations=args.max_fix_iterations,
                 acceptable_score=args.acceptable_score,
             )
+            # Pass AUTH_CONTRACT.md if present so the Playwright
+            # screenshot generator knows to authenticate before
+            # visiting protected routes. Without this the script
+            # captures /login over and over for every protected
+            # route (dashboard, admin, recipes/*).
+            auth_contract_path = project_root / "AUTH_CONTRACT.md"
+            auth_contract = (
+                auth_contract_path.read_text()
+                if auth_contract_path.exists() else None
+            )
             r = designer.review_frontend(
                 service=frontend,
                 workspace=ws,
                 compose_path=compose_path,
                 problem_statement=problem_statement,
                 milestone_scope=args.milestone_scope,
+                auth_contract=auth_contract,
             )
             results.append(r)
     except KeyboardInterrupt:

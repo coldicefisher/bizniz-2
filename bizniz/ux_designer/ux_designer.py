@@ -231,6 +231,38 @@ class UXDesigner:
         # Strip markdown fences if present
         script_text = _strip_code_fences(script_text)
 
+        # When an auth contract is provided, the generated script
+        # MUST use the storageState pattern (test.use({storageState:
+        # ...}) at module scope). Without it, protected routes
+        # silently redirect to /login and we capture login pages for
+        # every protected view — the symptom Stage 2 of recipe_box's
+        # multi-route run surfaced.
+        if auth_contract and "test.use" not in script_text and "storageState" not in script_text:
+            _log(
+                self._on_status,
+                "UX Designer: generated script missing storageState — "
+                "protected routes WILL capture as login. Re-asking with "
+                "explicit reminder..."
+            )
+            retry_prompt = (
+                script_prompt
+                + "\n\nNOTE: your previous response did NOT include the "
+                "``test.use({ storageState: STATE_PATH })`` line at module "
+                "scope. Regenerate, this time wiring the storageState "
+                "pattern so EVERY test inherits the authenticated session. "
+                "Do not output per-test loginAsAdmin helpers."
+            )
+            script_text2, _, _ = self._vision.get_text(
+                messages=[
+                    {"role": "system", "content": "You generate Playwright screenshot scripts. Output ONLY code."},
+                    {"role": "user", "content": retry_prompt},
+                ],
+                use_message_history=False,
+            )
+            script_text2 = _strip_code_fences(script_text2)
+            if "test.use" in script_text2 or "storageState" in script_text2:
+                script_text = script_text2
+
         # Write script to workspace
         workspace_root = Path(workspace.root)
         script_path = workspace_root / "tests" / "ux_screenshots.spec.cjs"
