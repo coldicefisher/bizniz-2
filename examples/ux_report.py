@@ -33,11 +33,34 @@ def main() -> None:
     if not project_root.is_dir():
         sys.exit(f"ERROR: {project_root} is not a directory")
 
-    rows = recent_summaries(project_root, n=args.last)
+    # ProUXDesigner persists per-service (workspace.root is the
+    # frontend service dir, not the project root). Walk frontends
+    # first; fall back to the project root for legacy projects that
+    # log there.
+    candidate_roots = [
+        project_root / "frontend",
+        project_root / "ui",
+        project_root / "web",
+        project_root,
+    ]
+    rows = []
+    used_root = None
+    for r in candidate_roots:
+        if not r.is_dir():
+            continue
+        rows = recent_summaries(r, n=args.last)
+        if rows:
+            used_root = r
+            break
+
     if not rows:
         print(f"\nNo UX runs logged for {project_root.name}.\n")
-        print(f"Expected: {project_root}/.bizniz/ux_runs.jsonl")
+        print(f"Expected (checked in order):")
+        for r in candidate_roots:
+            print(f"  - {r}/.bizniz/ux_runs.jsonl")
         return
+    if used_root != project_root:
+        print(f"  (reading from {used_root.relative_to(project_root)}/.bizniz/)")
 
     print(f"\n{'='*70}")
     print(f"  UX Review Trend — {project_root.name}")
