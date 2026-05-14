@@ -15,6 +15,16 @@ claude --dangerously-skip-permissions --continue
 
 ### UX Designer polishing
 
+"I want to start polishing the UX Designer Agent. I would like to create a simple test app that uses React. Create a new branch for this. Guide me through the process that the UX designer uses to polish the app"
+
+DELETE THIS AFTER BECAUSE IT WILL MORPH
+
+1. It looks at the source code and adds Tailwind
+2. Checks that Tailwind is actually loaded
+3. Styles the application just using source code
+4. Screenshots home and all routes, iterating 1-by-1 and styles them. Takes before/after photos to aide in styling.
+
+
 Tailwind always?
 
 Need to force to build and test Angular application with Material design (use your discretion)
