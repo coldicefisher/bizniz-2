@@ -302,26 +302,51 @@ class ClaudeUXDesigner(UXDesigner):
 
     @staticmethod
     def _best_effort_repair(block: str) -> Optional[Dict]:
-        """Try a few small repairs on a near-miss JSON block.
-        Currently:
-          - strip trailing ``;`` (Claude sometimes appends one)
-          - append a single ``}`` if the block is one-bracket short
-          - both together
-        Returns the parsed dict if any repair works, else None."""
+        """Try small repairs on a near-miss JSON block. Common cases:
+
+          - Trailing ``;`` after the final ``}`` (Claude artifact)
+          - One closing ``}`` short (truncated at the very end)
+          - Truncated mid-string (output token limit hit while writing
+            a long ``summary`` value — odd quote count, multiple
+            missing braces)
+
+        Each repair candidate is tried in increasing aggressiveness;
+        the first that parses wins. Returns None if nothing works.
+        """
         cleaned = block.rstrip()
         candidates = [cleaned]
+
+        # Strip trailing ``;`` (Claude artifact)
         if cleaned.endswith(";"):
             stripped = cleaned[:-1].rstrip()
             candidates.append(stripped)
-            candidates.append(stripped + "}")
-        # Heuristic: if the block has one more ``{`` than ``}``,
-        # appending a single ``}`` likely closes it.
+            cleaned = stripped
+
         opens = cleaned.count("{")
         closes = cleaned.count("}")
-        if opens == closes + 1:
-            candidates.append(cleaned + "}")
-            if cleaned.endswith(";"):
-                candidates.append(cleaned[:-1].rstrip() + "}")
+        open_brackets = cleaned.count("[")
+        close_brackets = cleaned.count("]")
+        quote_count = cleaned.count('"') - cleaned.count('\\"')
+        in_string = (quote_count % 2 != 0)
+        missing_braces = max(0, opens - closes)
+        missing_brackets = max(0, open_brackets - close_brackets)
+
+        # Truncated mid-string OR missing close brackets — close
+        # the string then re-balance brackets/braces.
+        if in_string or missing_braces > 0 or missing_brackets > 0:
+            base = cleaned
+            # If we ended on a dangling separator, strip it before
+            # closing — otherwise we'll have ``"foo",}`` which
+            # parses as a syntax error.
+            while base and base[-1] in (",", ":"):
+                base = base[:-1].rstrip()
+            repair = base
+            if in_string:
+                repair += '"'
+            repair += "]" * missing_brackets
+            repair += "}" * missing_braces
+            candidates.append(repair)
+
         for c in candidates:
             try:
                 return json.loads(c)
