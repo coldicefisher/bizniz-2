@@ -149,6 +149,62 @@ Pattern (use this verbatim, only changing the credentials and route names):
 If NO auth contract is provided, omit the auth setup entirely and just
 screenshot whatever public routes are visible.
 
+ROUTE PARAMETERS (``:id``, ``:slug``, ``:userId``, etc.):
+A route like ``/recipes/:id`` is a TEMPLATE, not a real URL. Visiting
+it literally (e.g. ``page.goto('/recipes/:id')``) yields a 404 or a
+broken route-not-found page. Resolve the placeholder to a real value
+BEFORE navigating. Two strategies, in order of preference:
+
+  **Strategy A — Parent-list navigation (preferred)**:
+  Most apps have a list view that links to each detail page. Visit
+  the list, find the first link that matches the detail pattern, and
+  click it. The resulting URL is the captured route. This also tests
+  the real user flow.
+
+      test('screenshot recipe detail', async ({{ page }}) => {{
+        await page.setViewportSize({{ width: 1280, height: 720 }});
+        await page.goto(`${{BASE}}/dashboard`, {{ waitUntil: 'domcontentloaded', timeout: 30000 }});
+        await waitForRendered(page);
+        // Click the first link whose href matches /recipes/<something>.
+        // Adjust the selector for your app's actual link shape.
+        const detailLink = page.locator('a[href^="/recipes/"]').first();
+        if (await detailLink.count() === 0) {{
+          console.error('No recipe detail links found; skipping detail screenshot');
+          return;
+        }}
+        await Promise.all([
+          page.waitForURL(/\\/recipes\\/[^/]+$/, {{ timeout: 15000 }}),
+          detailLink.click(),
+        ]);
+        await waitForRendered(page);
+        await page.screenshot({{ path: `/workspace/screenshots/recipe-detail.png`, fullPage: true }});
+      }});
+
+  **Strategy B — API seed + substitute (fallback)**:
+  When no list view exists yet, or the list is empty, POST to the
+  backend to create a record and use the returned id. Read the API
+  shape from the backend code or the OpenAPI doc if you have it.
+
+      test('screenshot recipe detail (seeded)', async ({{ page }}) => {{
+        const apiBase = process.env.BACKEND_URL || `${{BASE}}`;
+        const seedResp = await page.request.post(`${{apiBase}}/api/recipes`, {{
+          headers: {{ /* auth header from storageState or token */ }},
+          data: {{ /* minimal valid recipe payload */ }},
+        }});
+        if (!seedResp.ok()) {{
+          console.error('Seed failed:', seedResp.status());
+          return;
+        }}
+        const recipeId = (await seedResp.json()).id;
+        await captureRoute(page, `/recipes/${{recipeId}}`, 'recipe-detail');
+      }});
+
+CRITICAL: NEVER write ``page.goto('.../:id')`` or any path that has a
+literal ``:placeholder`` segment. The Playwright sidecar will navigate
+to a 404 and we'll capture the error page, which scores 1-2/10 and
+churns the design iteration on the wrong problem. Detect every
+``:param`` in the route list above and resolve it before navigation.
+
 REQUIREMENTS:
 - One `test()` block per route — NEVER combine multiple routes into one test.
   Playwright runs each test in a fresh page/context, so a hang on one

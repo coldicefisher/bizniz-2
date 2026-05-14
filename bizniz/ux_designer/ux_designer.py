@@ -263,6 +263,43 @@ class UXDesigner:
             if "test.use" in script_text2 or "storageState" in script_text2:
                 script_text = script_text2
 
+        # Reject scripts that visit literal ``:placeholder`` URLs.
+        # Matches ``page.goto(`${BASE}/recipes/:id`)`` or
+        # ``page.goto('/users/:userId')`` and friends. Substituted
+        # template strings like ``${recipeId}`` are fine because
+        # they're not literal — only ``:foo`` style placeholders
+        # leak through when the model forgets to resolve them.
+        import re as _re
+        param_leak = _re.compile(
+            r"""page\.goto\([^)]*['"`][^'"`]*/:[a-zA-Z_]\w*""",
+        )
+        if param_leak.search(script_text):
+            leaks = param_leak.findall(script_text)
+            _log(
+                self._on_status,
+                f"UX Designer: generated script visits literal :placeholder "
+                f"URL(s) — will hit 404. Found: {leaks[:2]}. Re-asking..."
+            )
+            retry_prompt = (
+                script_prompt
+                + "\n\nNOTE: your previous response included "
+                "``page.goto(...:id)`` (or similar) with a LITERAL "
+                "``:placeholder`` segment. That hits a 404. For each "
+                "such route, either click into it from a parent list "
+                "(Strategy A) or seed data via API + substitute the "
+                "returned id (Strategy B). Regenerate."
+            )
+            script_text3, _, _ = self._vision.get_text(
+                messages=[
+                    {"role": "system", "content": "You generate Playwright screenshot scripts. Output ONLY code."},
+                    {"role": "user", "content": retry_prompt},
+                ],
+                use_message_history=False,
+            )
+            script_text3 = _strip_code_fences(script_text3)
+            if not param_leak.search(script_text3):
+                script_text = script_text3
+
         # Write script to workspace
         workspace_root = Path(workspace.root)
         script_path = workspace_root / "tests" / "ux_screenshots.spec.cjs"
