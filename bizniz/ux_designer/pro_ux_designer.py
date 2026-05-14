@@ -866,6 +866,17 @@ class ProUXDesigner(ClaudeUXDesigner):
                 shutil.copy2(src, dest)
             except Exception:
                 continue
+            # Also copy the sibling meta.json so Stage B's
+            # _verify_capture can read it from the iter dir. Without
+            # this, the verifier silently passes through (treating
+            # missing meta as "older capture") and dynamic-route
+            # collisions / unintended redirects slip past.
+            meta_src = src.with_suffix(".meta.json")
+            if meta_src.exists():
+                try:
+                    shutil.copy2(meta_src, dest.with_suffix(".meta.json"))
+                except Exception:
+                    pass
             copied.append({
                 "name": s.get("name", src.stem),
                 "path": dest,
