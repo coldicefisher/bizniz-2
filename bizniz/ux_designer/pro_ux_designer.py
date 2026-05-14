@@ -127,15 +127,51 @@ class ProUXDesigner(ClaudeUXDesigner):
             "timing": {},  # populated at exit
         }
 
+        # ── Plan cache check (item #4) ──────────────────────────────
+        # Skip code_review + global_design when nothing has changed
+        # since the prior run. Recipe_box v2.7 burned 440s on these
+        # two phases despite emitting essentially the same plan as
+        # the prior run.
+        from bizniz.ux_designer import plan_cache
+        from pathlib import Path as _Path
+        ws_root_path = _Path(workspace.root)
+        cur_input_mtime = plan_cache.compute_input_mtime(ws_root_path)
+        cached_payload = plan_cache.load_cache(ws_root_path)
+        plan = None
+        global_fix = None
+        if cached_payload is not None:
+            valid, reason = plan_cache.is_cache_valid(
+                cached_payload,
+                current_input_mtime=cur_input_mtime,
+                workspace_root=ws_root_path,
+            )
+            if valid:
+                plan = cached_payload.get("plan")
+                global_fix = cached_payload.get("global_fix_result")
+                _log(
+                    self._on_status,
+                    f"ProUXDesigner: plan cache HIT — reusing prior "
+                    f"plan + global-design (saved "
+                    f"{cached_payload.get('saved_at', '?')[:19]})"
+                )
+                self._record_timing("code_review_cached", 0.0)
+                self._record_timing("global_design_cached", 0.0)
+            else:
+                _log(
+                    self._on_status,
+                    f"ProUXDesigner: plan cache MISS — {reason}"
+                )
+
         # ── Step 1: Code review → design plan ─────────────────────────
-        _log(self._on_status, f"ProUXDesigner: code review for '{service.name}'...")
-        result["step"] = "code_review"
-        _t0 = time.time()
-        plan = self._code_review(
-            service=service, workspace=workspace,
-            problem_statement=problem_statement,
-        )
-        self._record_timing("code_review", time.time() - _t0)
+        if plan is None:
+            _log(self._on_status, f"ProUXDesigner: code review for '{service.name}'...")
+            result["step"] = "code_review"
+            _t0 = time.time()
+            plan = self._code_review(
+                service=service, workspace=workspace,
+                problem_statement=problem_statement,
+            )
+            self._record_timing("code_review", time.time() - _t0)
         result["design_plan"] = plan
         if not plan or "design_system" not in plan:
             result["stopped_reason"] = "code review returned no usable plan"
@@ -147,13 +183,29 @@ class ProUXDesigner(ClaudeUXDesigner):
         )
 
         # ── Step 2: Apply global design (code only) ───────────────────
-        _log(self._on_status, f"ProUXDesigner: applying global design system...")
-        result["step"] = "global_design"
-        _t0 = time.time()
-        global_fix = self._apply_global_design(
-            plan=plan, service=service, workspace=workspace,
-        )
-        self._record_timing("global_design", time.time() - _t0)
+        if global_fix is None:
+            _log(self._on_status, f"ProUXDesigner: applying global design system...")
+            result["step"] = "global_design"
+            _t0 = time.time()
+            global_fix = self._apply_global_design(
+                plan=plan, service=service, workspace=workspace,
+            )
+            self._record_timing("global_design", time.time() - _t0)
+            # Save the cache only when BOTH phases ran fresh. If we
+            # came in with a hit, the cache is already current.
+            try:
+                plan_cache.save_cache(
+                    ws_root_path,
+                    plan=plan,
+                    global_fix_result=global_fix,
+                    input_mtime=plan_cache.compute_input_mtime(ws_root_path),
+                )
+            except Exception as e:
+                _log(
+                    self._on_status,
+                    f"ProUXDesigner: plan_cache save failed "
+                    f"({type(e).__name__}: {e}) — non-fatal"
+                )
         result["global_fix_result"] = global_fix
         _log(
             self._on_status,
