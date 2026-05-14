@@ -195,26 +195,77 @@ class ProUXDesigner(ClaudeUXDesigner):
             result["stopped_reason"] = "no coder_factory for per-view loop"
             return result
 
-        # The design plan's per_view_plan is the canonical route list.
-        # Home (route="/") is the first entry; iterating in order keeps
-        # the flow "establish the marketing entry, then walk inward".
+        # Build the canonical route list. Prefer deterministic
+        # discovery (Tier 1 parser → Tier 2 agent fallback) over the
+        # LLM's per_view_plan because it doesn't hallucinate or miss
+        # routes. Then merge each discovered route with the matching
+        # per_view_plan entry to keep the design direction notes.
+        from bizniz.ux_designer.route_discovery import (
+            discover_routes_with_fallback,
+        )
+        from pathlib import Path as _Path
         per_view_plan = plan.get("per_view_plan") or []
-        if not per_view_plan:
-            result["stopped_reason"] = "design plan had no per_view_plan"
+        meta_by_route = {
+            (v.get("route") or ""): v for v in per_view_plan
+        }
+        discovered = discover_routes_with_fallback(
+            _Path(workspace.root),
+            framework=service.framework or "react",
+            on_status=self._on_status,
+        )
+        if discovered:
+            _log(
+                self._on_status,
+                f"ProUXDesigner: route discovery — {len(discovered)} "
+                f"route(s) from source: "
+                f"{', '.join(r.path for r in discovered[:6])}"
+                + ("..." if len(discovered) > 6 else "")
+            )
+            # Map each discovered route into a view_meta dict, pulling
+            # the design direction from the plan when available. One
+            # capture per dynamic route pattern — Strategy B (API seed)
+            # is the script generator's job, not ours here.
+            views_to_iterate = []
+            for r in discovered:
+                meta = meta_by_route.get(r.path) or {
+                    "route": r.path,
+                    "view_type": "list" if not r.is_dynamic else "detail",
+                    "design_direction": (
+                        f"(no design plan entry for {r.path}; "
+                        f"apply the global system and use sensible "
+                        f"defaults for a {('detail' if r.is_dynamic else 'list')} view)"
+                    ),
+                    "current_problems_from_code": "(not in design plan)",
+                }
+                meta = {**meta, "_is_dynamic": r.is_dynamic,
+                        "_params": r.params}
+                views_to_iterate.append(meta)
+        elif per_view_plan:
+            _log(
+                self._on_status,
+                "ProUXDesigner: deterministic route discovery returned "
+                "nothing — falling back to design plan's per_view_plan"
+            )
+            views_to_iterate = list(per_view_plan)
+        else:
+            result["stopped_reason"] = (
+                "no routes found via discovery and no per_view_plan"
+            )
             return result
 
         _log(
             self._on_status,
             f"ProUXDesigner: per-view loop starting "
-            f"({len(per_view_plan)} routes)..."
+            f"({len(views_to_iterate)} routes)..."
         )
         result["step"] = "per_view_loop"
-        for view_idx, view_meta in enumerate(per_view_plan):
+        result["route_count"] = len(views_to_iterate)
+        for view_idx, view_meta in enumerate(views_to_iterate):
             route = view_meta.get("route", "/")
             view_type = view_meta.get("view_type", "")
             _log(
                 self._on_status,
-                f"ProUXDesigner: view {view_idx + 1}/{len(per_view_plan)} — "
+                f"ProUXDesigner: view {view_idx + 1}/{len(views_to_iterate)} — "
                 f"route={route} type={view_type}"
             )
             view_result: Dict = {
