@@ -70,6 +70,7 @@ class ProUXDesigner(ClaudeUXDesigner):
         additional_args: Optional[List[str]] = None,
         review_store=None,
         project_slug: Optional[str] = None,
+        debug: bool = False,
     ):
         super().__init__(
             vision_client=vision_client,
@@ -88,6 +89,11 @@ class ProUXDesigner(ClaudeUXDesigner):
         # ``project_slug`` keys the per-project rows.
         self._review_store = review_store
         self._project_slug = project_slug
+        self._debug = debug
+        # Per-run timing. Populated by ``_timed`` calls and surfaced
+        # on the ``result["timing"]`` dict at the end of
+        # review_frontend.
+        self._timings: Dict[str, float] = {}
 
     # ── Public entry ───────────────────────────────────────────────────
 
@@ -103,6 +109,9 @@ class ProUXDesigner(ClaudeUXDesigner):
         auth_contract: Optional[str] = None,
         backend_url: Optional[str] = None,
     ) -> Dict:
+        # Reset per-run timing for this invocation.
+        self._timings = {}
+        _t_run_start = time.time()
         result: Dict = {
             "service": service.name,
             "step": None,
@@ -115,15 +124,18 @@ class ProUXDesigner(ClaudeUXDesigner):
             "initial_score": None,
             "final_score": None,
             "stopped_reason": None,
+            "timing": {},  # populated at exit
         }
 
         # ── Step 1: Code review → design plan ─────────────────────────
         _log(self._on_status, f"ProUXDesigner: code review for '{service.name}'...")
         result["step"] = "code_review"
+        _t0 = time.time()
         plan = self._code_review(
             service=service, workspace=workspace,
             problem_statement=problem_statement,
         )
+        self._record_timing("code_review", time.time() - _t0)
         result["design_plan"] = plan
         if not plan or "design_system" not in plan:
             result["stopped_reason"] = "code review returned no usable plan"
@@ -137,9 +149,11 @@ class ProUXDesigner(ClaudeUXDesigner):
         # ── Step 2: Apply global design (code only) ───────────────────
         _log(self._on_status, f"ProUXDesigner: applying global design system...")
         result["step"] = "global_design"
+        _t0 = time.time()
         global_fix = self._apply_global_design(
             plan=plan, service=service, workspace=workspace,
         )
+        self._record_timing("global_design", time.time() - _t0)
         result["global_fix_result"] = global_fix
         _log(
             self._on_status,
@@ -157,9 +171,11 @@ class ProUXDesigner(ClaudeUXDesigner):
         # rendered home was a 1/10 unstyled wall of SVGs).
         _log(self._on_status, f"ProUXDesigner: verifying CSS is served...")
         result["step"] = "verify_css"
+        _t0 = time.time()
         css_check = self._verify_tailwind_serving(
             service=service, compose_path=compose_path,
         )
+        self._record_timing("verify_css", time.time() - _t0)
         result["css_check"] = css_check
         _log(
             self._on_status,
@@ -172,10 +188,12 @@ class ProUXDesigner(ClaudeUXDesigner):
                 f"ProUXDesigner: CSS not serving — running build-chain fix..."
             )
             result["step"] = "build_chain_fix"
+            _t0 = time.time()
             build_fix = self._fix_build_chain(
                 plan=plan, service=service, workspace=workspace,
                 problem_detail=css_check.get("detail", ""),
             )
+            self._record_timing("build_chain_fix", time.time() - _t0)
             result["build_chain_fix"] = build_fix
             _log(
                 self._on_status,
@@ -438,7 +456,45 @@ class ProUXDesigner(ClaudeUXDesigner):
                     )
 
         result["stopped_reason"] = "all views iterated"
+
+        # Record timings on the result + emit a summary line.
+        total = time.time() - _t_run_start
+        self._record_timing("total", total)
+        result["timing"] = dict(self._timings)
+        _log(
+            self._on_status,
+            f"ProUXDesigner: timing — {self._format_timings()}",
+        )
+        # Compact per-view breakdown for quick scanning.
+        views = result.get("views") or []
+        cached_count = sum(1 for v in views if v.get("cached"))
+        iterated = [v for v in views if not v.get("cached")]
+        _log(
+            self._on_status,
+            f"ProUXDesigner: {len(views)} views — {cached_count} cached, "
+            f"{len(iterated)} iterated; "
+            f"avg score among iterated="
+            f"{(sum((v.get('final_score') or 0) for v in iterated) / max(1, len(iterated))):.1f}/10"
+        )
         return result
+
+    # ── Logging helpers ───────────────────────────────────────────────
+
+    def _log_debug(self, msg: str) -> None:
+        if self._debug:
+            _log(self._on_status, f"[DEBUG] {msg}")
+
+    def _record_timing(self, key: str, elapsed: float) -> None:
+        """Accumulate elapsed seconds under ``key``. Multiple calls
+        with the same key sum (e.g. per-iteration phases)."""
+        self._timings[key] = self._timings.get(key, 0.0) + elapsed
+
+    def _format_timings(self) -> str:
+        """Human-readable per-phase summary, longest first."""
+        if not self._timings:
+            return "(no timings recorded)"
+        items = sorted(self._timings.items(), key=lambda x: -x[1])
+        return ", ".join(f"{k}={v:.1f}s" for k, v in items)
 
     def _budget_for_route(self, cached_record) -> int:
         """Decide how many screenshot→eval→fix iterations to grant
@@ -563,6 +619,7 @@ class ProUXDesigner(ClaudeUXDesigner):
             self._on_status,
             f"ProUXDesigner: {view_label} iter {iteration} — capturing..."
         )
+        _t0 = time.time()
         screenshots = self._take_view_screenshots(
             route=route,
             view_label=view_label,
@@ -573,6 +630,11 @@ class ProUXDesigner(ClaudeUXDesigner):
             milestone_scope=milestone_scope,
             auth_contract=auth_contract,
             backend_url=backend_url,
+        )
+        self._record_timing("capture", time.time() - _t0)
+        self._log_debug(
+            f"{view_label} iter{iteration} capture: "
+            f"{time.time() - _t0:.1f}s, {len(screenshots)} screenshots"
         )
 
         if not screenshots:
@@ -612,6 +674,7 @@ class ProUXDesigner(ClaudeUXDesigner):
             self._on_status,
             f"ProUXDesigner: {view_label} iter {iteration} — evaluating..."
         )
+        _t0 = time.time()
         evaluation = self._evaluate_view(
             screenshots=screenshots,
             route=route,
@@ -621,6 +684,7 @@ class ProUXDesigner(ClaudeUXDesigner):
             design_plan=design_plan,
             service=service,
         )
+        self._record_timing("eval", time.time() - _t0)
         score = evaluation.get("overall_score", 0)
         issues = evaluation.get("issues", []) or []
         stop_rec = (evaluation.get("stop_recommendation") or "").lower()
@@ -667,6 +731,7 @@ class ProUXDesigner(ClaudeUXDesigner):
             return out
 
         # Apply fixes through Coder (factory path same as base class).
+        _t0 = time.time()
         fix_result = self._apply_view_fixes(
             issues=issues,
             view_meta=view_meta,
@@ -674,6 +739,7 @@ class ProUXDesigner(ClaudeUXDesigner):
             design_plan=design_plan,
             service=service, workspace=workspace,
         )
+        self._record_timing("fix", time.time() - _t0)
         out["fix_result"] = fix_result
         _log(
             self._on_status,

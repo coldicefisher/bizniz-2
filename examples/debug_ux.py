@@ -123,6 +123,9 @@ def main():
                         help="Leave the stack running after the review")
     parser.add_argument("--milestone-scope", type=str, default="",
                         help="Milestone problem slice (defaults to full statement)")
+    parser.add_argument("--debug", action="store_true",
+                        help="Emit verbose decision logging (cache hits, "
+                             "per-iter capture/eval/fix timings)")
     args = parser.parse_args()
 
     project_root = args.project_root.expanduser().resolve()
@@ -234,6 +237,7 @@ def main():
                 acceptable_score=args.acceptable_score,
                 review_store=review_store,
                 project_slug=project_root.name,
+                debug=args.debug,
             )
             # Pass AUTH_CONTRACT.md if present so the Playwright
             # screenshot generator knows to authenticate before
