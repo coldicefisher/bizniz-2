@@ -606,6 +606,22 @@ class ProUXDesigner(ClaudeUXDesigner):
             f"{(sum((v.get('final_score') or 0) for v in iterated) / max(1, len(iterated))):.1f}/10"
         )
 
+        # Headline app score.
+        app_score = self.compute_app_score(views, self._acceptable_score)
+        result["app_score"] = app_score
+        if app_score.get("mean") is not None:
+            failing_summary = (
+                f" — laggards: {', '.join(app_score['failing'][:3])}"
+                if app_score["failing"] else ""
+            )
+            _log(
+                self._on_status,
+                f"ProUXDesigner: APP SCORE {app_score['mean']:.1f}/10 — "
+                f"{app_score['passing']}/{app_score['covered']} passing "
+                f"(min={app_score['min']} at "
+                f"{app_score['min_route']}){failing_summary}"
+            )
+
         # Append the run summary to the per-project log so the next
         # invocation can show the trend.
         try:
@@ -644,6 +660,54 @@ class ProUXDesigner(ClaudeUXDesigner):
                 f"({type(e).__name__}: {e}) — non-fatal"
             )
         return result
+
+    # ── Aggregate score across views ──────────────────────────────────
+
+    @staticmethod
+    def compute_app_score(views: List[Dict], acceptable_score: int = 7) -> Dict:
+        """Roll the per-view scores up to an app-level metric.
+
+        Returns a dict with:
+          mean: float | None — average of all final_score values
+          min:  int   | None — lowest final_score across views
+          min_route: str | None — route owning the min (the bottleneck
+                                  to fix next)
+          passing: int — count of views with final_score >= acceptable
+          failing: List[str] — routes that didn't meet the bar (sorted
+                               by score ascending — laggards first)
+          covered: int — number of views with a non-None final_score
+          total:   int — total number of views
+        """
+        scores = []
+        scored_views = []
+        for v in views:
+            s = v.get("final_score")
+            if s is None:
+                continue
+            scores.append(s)
+            scored_views.append((v.get("route", "?"), s))
+        if not scores:
+            return {
+                "mean": None, "min": None, "min_route": None,
+                "passing": 0, "failing": [], "covered": 0,
+                "total": len(views),
+            }
+        mean = sum(scores) / len(scores)
+        min_route, min_score = min(scored_views, key=lambda x: x[1])
+        passing = sum(1 for _, s in scored_views if s >= acceptable_score)
+        failing = sorted(
+            (r for r, s in scored_views if s < acceptable_score),
+            key=lambda r: dict(scored_views)[r],
+        )
+        return {
+            "mean": round(mean, 2),
+            "min": min_score,
+            "min_route": min_route,
+            "passing": passing,
+            "failing": failing,
+            "covered": len(scores),
+            "total": len(views),
+        }
 
     # ── Logging helpers ───────────────────────────────────────────────
 

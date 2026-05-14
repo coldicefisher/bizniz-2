@@ -25,6 +25,60 @@ def _shot_with_meta(tmp_path, name, meta_dict):
     return {"name": name, "path": png, "bytes": b""}
 
 
+class TestComputeAppScore:
+    def test_empty_views_returns_nones(self):
+        from bizniz.ux_designer.pro_ux_designer import ProUXDesigner
+        s = ProUXDesigner.compute_app_score([])
+        assert s["mean"] is None
+        assert s["min"] is None
+        assert s["passing"] == 0
+        assert s["total"] == 0
+
+    def test_aggregates_scores(self):
+        from bizniz.ux_designer.pro_ux_designer import ProUXDesigner
+        views = [
+            {"route": "/", "final_score": 8},
+            {"route": "/login", "final_score": 7},
+            {"route": "/dashboard", "final_score": 9},
+        ]
+        s = ProUXDesigner.compute_app_score(views, acceptable_score=7)
+        assert s["mean"] == 8.0
+        assert s["min"] == 7
+        assert s["min_route"] == "/login"
+        assert s["passing"] == 3
+        assert s["failing"] == []
+        assert s["covered"] == 3
+        assert s["total"] == 3
+
+    def test_failing_routes_sorted_by_score(self):
+        from bizniz.ux_designer.pro_ux_designer import ProUXDesigner
+        views = [
+            {"route": "/", "final_score": 8},
+            {"route": "/recipes/:id", "final_score": 3},
+            {"route": "/dashboard", "final_score": 5},
+            {"route": "/admin", "final_score": 9},
+        ]
+        s = ProUXDesigner.compute_app_score(views, acceptable_score=7)
+        # Laggards listed worst-first
+        assert s["failing"][0] == "/recipes/:id"
+        assert "/dashboard" in s["failing"]
+        assert s["min_route"] == "/recipes/:id"
+        assert s["passing"] == 2
+        assert round(s["mean"], 2) == 6.25
+
+    def test_skips_views_without_score(self):
+        from bizniz.ux_designer.pro_ux_designer import ProUXDesigner
+        views = [
+            {"route": "/", "final_score": 8},
+            {"route": "/skipped", "final_score": None},
+            {"route": "/dashboard", "final_score": 6},
+        ]
+        s = ProUXDesigner.compute_app_score(views, acceptable_score=7)
+        assert s["covered"] == 2
+        assert s["total"] == 3
+        assert s["mean"] == 7.0
+
+
 class TestBucketShotsByRoute:
     def test_groups_by_requested_route(self, tmp_path):
         d = _designer()
