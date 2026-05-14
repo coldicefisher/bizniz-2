@@ -100,7 +100,10 @@ class ProUXDesigner(ClaudeUXDesigner):
             "step": None,
             "design_plan": None,
             "global_fix_result": None,
-            "home_iterations": [],
+            # views: list of {route, view_type, iterations: [...],
+            # initial_score, final_score, stopped_reason} — one entry
+            # per route in per_view_plan. Home is the first entry.
+            "views": [],
             "initial_score": None,
             "final_score": None,
             "stopped_reason": None,
@@ -187,36 +190,94 @@ class ProUXDesigner(ClaudeUXDesigner):
                 )
                 return result
 
-        # ── Step 3: Home page screenshot loop ─────────────────────────
+        # ── Step 3: Per-view screenshot loops ─────────────────────────
         if self._coder_factory is None:
-            result["stopped_reason"] = "no coder_factory for home loop"
+            result["stopped_reason"] = "no coder_factory for per-view loop"
             return result
 
-        _log(self._on_status, f"ProUXDesigner: home page loop starting...")
-        result["step"] = "home_loop"
-        for iteration in range(1, self._max_home_iterations + 1):
-            iter_result = self._home_page_iteration(
-                iteration=iteration,
-                service=service, workspace=workspace,
-                compose_path=compose_path,
-                problem_statement=problem_statement,
-                milestone_scope=milestone_scope,
-                design_plan=plan,
-                auth_contract=auth_contract,
-                backend_url=backend_url,
+        # The design plan's per_view_plan is the canonical route list.
+        # Home (route="/") is the first entry; iterating in order keeps
+        # the flow "establish the marketing entry, then walk inward".
+        per_view_plan = plan.get("per_view_plan") or []
+        if not per_view_plan:
+            result["stopped_reason"] = "design plan had no per_view_plan"
+            return result
+
+        _log(
+            self._on_status,
+            f"ProUXDesigner: per-view loop starting "
+            f"({len(per_view_plan)} routes)..."
+        )
+        result["step"] = "per_view_loop"
+        for view_idx, view_meta in enumerate(per_view_plan):
+            route = view_meta.get("route", "/")
+            view_type = view_meta.get("view_type", "")
+            _log(
+                self._on_status,
+                f"ProUXDesigner: view {view_idx + 1}/{len(per_view_plan)} — "
+                f"route={route} type={view_type}"
             )
-            result["home_iterations"].append(iter_result)
-            if iter_result.get("initial_score") is not None and result["initial_score"] is None:
-                result["initial_score"] = iter_result["initial_score"]
-            result["final_score"] = iter_result.get("final_score") or result["final_score"]
+            view_result: Dict = {
+                "route": route,
+                "view_type": view_type,
+                "iterations": [],
+                "initial_score": None,
+                "final_score": None,
+                "stopped_reason": None,
+            }
+            for iteration in range(1, self._max_home_iterations + 1):
+                iter_result = self._view_iteration(
+                    route=route,
+                    view_meta=view_meta,
+                    view_label=self._safe_view_label(route),
+                    iteration=iteration,
+                    service=service, workspace=workspace,
+                    compose_path=compose_path,
+                    problem_statement=problem_statement,
+                    milestone_scope=milestone_scope,
+                    design_plan=plan,
+                    auth_contract=auth_contract,
+                    backend_url=backend_url,
+                )
+                view_result["iterations"].append(iter_result)
+                if (
+                    view_result["initial_score"] is None
+                    and iter_result.get("initial_score") is not None
+                ):
+                    view_result["initial_score"] = iter_result["initial_score"]
+                if iter_result.get("final_score") is not None:
+                    view_result["final_score"] = iter_result["final_score"]
+                if iter_result.get("stop"):
+                    view_result["stopped_reason"] = iter_result.get(
+                        "stop_reason", "stop_recommendation",
+                    )
+                    break
+            else:
+                view_result["stopped_reason"] = "iter cap reached"
+            result["views"].append(view_result)
+            # Track the home page's score on the top-level result for
+            # quick "did we improve" reporting.
+            if route == "/" and result["initial_score"] is None:
+                result["initial_score"] = view_result["initial_score"]
+                result["final_score"] = view_result["final_score"]
 
-            if iter_result.get("stop"):
-                result["stopped_reason"] = iter_result.get("stop_reason", "stop_recommendation")
-                break
-        else:
-            result["stopped_reason"] = "iter cap reached"
-
+        result["stopped_reason"] = "all views iterated"
         return result
+
+    @staticmethod
+    def _safe_view_label(route: str) -> str:
+        """A filesystem-safe label for a route. ``/`` → ``home``,
+        ``/recipes/:id`` → ``recipes_id``. Used to namespace
+        per-iteration screenshot dirs and raw-response dumps."""
+        if not route or route == "/":
+            return "home"
+        return (
+            route.strip("/")
+            .replace("/", "_")
+            .replace(":", "")
+            .replace(".", "_")
+            or "home"
+        )
 
     # ── Step 1: Code review ────────────────────────────────────────────
 
@@ -277,10 +338,13 @@ class ProUXDesigner(ClaudeUXDesigner):
             "notes": [],
         }
 
-    # ── Step 3: Home page iteration ────────────────────────────────────
+    # ── Step 3: Per-view iteration ─────────────────────────────────────
 
-    def _home_page_iteration(
+    def _view_iteration(
         self,
+        route: str,
+        view_meta: Dict,
+        view_label: str,
         iteration: int,
         service: ServiceDefinition,
         workspace,
@@ -291,12 +355,19 @@ class ProUXDesigner(ClaudeUXDesigner):
         auth_contract: Optional[str],
         backend_url: Optional[str],
     ) -> Dict:
-        """One screenshot → eval → fix cycle for the home page."""
+        """One screenshot → eval → fix cycle for a single route.
+
+        ``view_label`` is a filesystem-safe slug (e.g. ``home``,
+        ``recipes_id_edit``) used to namespace per-iteration dirs and
+        raw-response dumps so screenshots from /login don't overwrite
+        screenshots from /dashboard."""
         _log(
             self._on_status,
-            f"ProUXDesigner: home iter {iteration} — capturing screenshot..."
+            f"ProUXDesigner: {view_label} iter {iteration} — capturing..."
         )
-        screenshots = self._take_home_screenshots(
+        screenshots = self._take_view_screenshots(
+            route=route,
+            view_label=view_label,
             iteration=iteration,
             service=service, workspace=workspace,
             compose_path=compose_path,
@@ -320,10 +391,13 @@ class ProUXDesigner(ClaudeUXDesigner):
 
         _log(
             self._on_status,
-            f"ProUXDesigner: home iter {iteration} — evaluating..."
+            f"ProUXDesigner: {view_label} iter {iteration} — evaluating..."
         )
-        evaluation = self._evaluate_home_page(
+        evaluation = self._evaluate_view(
             screenshots=screenshots,
+            route=route,
+            view_meta=view_meta,
+            view_label=view_label,
             iteration=iteration,
             design_plan=design_plan,
             service=service,
@@ -333,7 +407,7 @@ class ProUXDesigner(ClaudeUXDesigner):
         stop_rec = (evaluation.get("stop_recommendation") or "").lower()
         _log(
             self._on_status,
-            f"ProUXDesigner: home iter {iteration} — score={score}/10, "
+            f"ProUXDesigner: {view_label} iter {iteration} — score={score}/10, "
             f"{len(issues)} issue(s), stop_rec={stop_rec or 'n/a'}"
         )
 
@@ -362,23 +436,27 @@ class ProUXDesigner(ClaudeUXDesigner):
             return out
 
         # Apply fixes through Coder (factory path same as base class).
-        fix_result = self._apply_home_fixes(
+        fix_result = self._apply_view_fixes(
             issues=issues,
+            view_meta=view_meta,
+            view_label=view_label,
             design_plan=design_plan,
             service=service, workspace=workspace,
         )
         out["fix_result"] = fix_result
         _log(
             self._on_status,
-            f"ProUXDesigner: home iter {iteration} — applied "
+            f"ProUXDesigner: {view_label} iter {iteration} — applied "
             f"{len(fix_result.get('files_written', []))} file change(s)"
         )
         return out
 
     # ── Helpers ────────────────────────────────────────────────────────
 
-    def _take_home_screenshots(
+    def _take_view_screenshots(
         self,
+        route: str,
+        view_label: str,
         iteration: int,
         service: ServiceDefinition,
         workspace,
@@ -388,19 +466,16 @@ class ProUXDesigner(ClaudeUXDesigner):
         auth_contract: Optional[str],
         backend_url: Optional[str],
     ) -> List[Dict]:
-        """Wrap the parent's screenshot pipeline but constrain routes
-        to ``/`` and copy the captured PNGs into a per-iteration dir
-        so before/after pairs survive."""
-        # Reuse the parent's full screenshot harness, asking only for
-        # the home route. The parent's prompt template inserts our
-        # ``routes`` into the Playwright generation prompt.
+        """Capture screenshots for a single route and copy them into a
+        per-view per-iteration dir so before/after pairs survive across
+        the multi-route loop."""
         shots = self._take_screenshots(
             service=service,
             workspace=workspace,
             compose_path=compose_path,
             problem_statement=problem_statement,
             milestone_scope=milestone_scope,
-            routes=["/"],
+            routes=[route],
             auth_contract=auth_contract,
             backend_url=backend_url,
         )
@@ -408,7 +483,7 @@ class ProUXDesigner(ClaudeUXDesigner):
             return shots
 
         ws_root = Path(workspace.root)
-        iter_dir = ws_root / "screenshots" / f"iter_{iteration}"
+        iter_dir = ws_root / "screenshots" / view_label / f"iter_{iteration}"
         iter_dir.mkdir(parents=True, exist_ok=True)
         copied = []
         for s in shots:
@@ -427,9 +502,12 @@ class ProUXDesigner(ClaudeUXDesigner):
             })
         return copied or shots
 
-    def _evaluate_home_page(
+    def _evaluate_view(
         self,
         screenshots: List[Dict],
+        route: str,
+        view_meta: Dict,
+        view_label: str,
         iteration: int,
         design_plan: Dict,
         service: ServiceDefinition,
@@ -446,9 +524,13 @@ class ProUXDesigner(ClaudeUXDesigner):
         first_path = Path(screenshots[0]["path"])
         screenshots_dir = first_path.parent
         plan_summary = self._design_plan_summary(design_plan)
+        # Augment the plan summary with the per-view direction so the
+        # eval is scoring against the specific spec for this route.
+        view_section = self._render_view_meta(route, view_meta)
+        full_summary = f"{plan_summary}\n\n{view_section}"
         user_prompt = HOME_PAGE_EVAL_USER_TEMPLATE.format(
             iteration=iteration,
-            design_plan_summary=plan_summary,
+            design_plan_summary=full_summary,
             app_type=design_plan.get("app_type", "hybrid"),
             framework=service.framework or "react",
         )
@@ -461,7 +543,8 @@ class ProUXDesigner(ClaudeUXDesigner):
             "--add-dir", str(screenshots_dir),
         ] + self._additional_args
         parsed = self._invoke_and_parse(
-            cmd, user_prompt, screenshots_dir, label=f"home_eval_iter{iteration}",
+            cmd, user_prompt, screenshots_dir,
+            label=f"{view_label}_eval_iter{iteration}",
         )
         if parsed is None:
             return {
@@ -474,9 +557,24 @@ class ProUXDesigner(ClaudeUXDesigner):
             }
         return parsed
 
-    def _apply_home_fixes(
+    @staticmethod
+    def _render_view_meta(route: str, view_meta: Dict) -> str:
+        """Compact the view-specific design direction for the eval prompt."""
+        return (
+            f"VIEW UNDER REVIEW:\n"
+            f"  route: {route}\n"
+            f"  view_type: {view_meta.get('view_type', '?')}\n"
+            f"  current_problems_from_code: "
+            f"{view_meta.get('current_problems_from_code', '')[:400]}\n"
+            f"  design_direction: "
+            f"{view_meta.get('design_direction', '')[:600]}"
+        )
+
+    def _apply_view_fixes(
         self,
         issues: List[Dict],
+        view_meta: Dict,
+        view_label: str,
         design_plan: Dict,
         service: ServiceDefinition,
         workspace,
@@ -496,9 +594,14 @@ class ProUXDesigner(ClaudeUXDesigner):
                 f"   Fix: {fix}\n"
                 f"   File: {target}"
             )
+        full_summary = (
+            self._design_plan_summary(design_plan)
+            + "\n\n"
+            + self._render_view_meta(view_meta.get("route", "/"), view_meta)
+        )
         user_prompt = HOME_PAGE_FIX_USER_TEMPLATE.format(
             issues_block="\n\n".join(issues_block),
-            design_plan_summary=self._design_plan_summary(design_plan),
+            design_plan_summary=full_summary,
         )
         cmd = [
             self._command, "--print",
@@ -509,7 +612,7 @@ class ProUXDesigner(ClaudeUXDesigner):
             "--add-dir", str(ws_root),
         ] + self._additional_args
         return self._invoke_and_parse(
-            cmd, user_prompt, ws_root, label="home_fix",
+            cmd, user_prompt, ws_root, label=f"{view_label}_fix",
         ) or {
             "status": "failed", "files_written": [],
             "summary": "fix step returned no JSON", "notes": [],

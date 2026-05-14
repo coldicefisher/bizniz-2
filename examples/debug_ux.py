@@ -258,14 +258,14 @@ def main():
         service = r.get("service", "?")
         plan = r.get("design_plan") or {}
         gf = r.get("global_fix_result") or {}
-        iters = r.get("home_iterations") or []
+        views = r.get("views") or []
         initial = r.get("initial_score")
         final = r.get("final_score")
         stopped = r.get("stopped_reason") or ""
         print(
             f"  {service}: app_type={plan.get('app_type', '?')}  "
             f"home score {initial}→{final}/10  "
-            f"home_iters={len(iters)}  stopped={stopped}",
+            f"views={len(views)}  stopped={stopped}",
             flush=True,
         )
         print(
@@ -276,21 +276,31 @@ def main():
         )
         if plan.get("summary"):
             print(f"    plan: {plan.get('summary')[:180]}", flush=True)
-        for iter_r in iters:
-            ev = iter_r.get("evaluation") or {}
-            n = iter_r.get("iteration")
-            score = ev.get("overall_score")
-            issues = (ev.get("issues") or [])
+        for view_r in views:
+            route = view_r.get("route", "?")
+            vtype = view_r.get("view_type", "?")
+            v_initial = view_r.get("initial_score")
+            v_final = view_r.get("final_score")
+            v_stop = view_r.get("stopped_reason") or "-"
             print(
-                f"    iter{n}: score={score}/10 issues={len(issues)} "
-                f"stop_reason={iter_r.get('stop_reason') or '-'}",
+                f"    {route} ({vtype}): {v_initial}→{v_final}/10  "
+                f"iters={len(view_r.get('iterations') or [])}  stop={v_stop}",
                 flush=True,
             )
-            for issue in issues[:3]:
-                sev = issue.get("severity", "?")
-                cat = issue.get("category", "?")
-                desc = issue.get("description", "")[:120]
-                print(f"      [{sev}/{cat}] {desc}", flush=True)
+            for iter_r in view_r.get("iterations") or []:
+                ev = iter_r.get("evaluation") or {}
+                n = iter_r.get("iteration")
+                score = ev.get("overall_score")
+                issues = (ev.get("issues") or [])
+                print(
+                    f"      iter{n}: score={score}/10 issues={len(issues)}",
+                    flush=True,
+                )
+                for issue in issues[:2]:
+                    sev = issue.get("severity", "?")
+                    cat = issue.get("category", "?")
+                    desc = issue.get("description", "")[:100]
+                    print(f"        [{sev}/{cat}] {desc}", flush=True)
 
     elapsed = time.time() - _start_time
     print(f"\n  Elapsed: {elapsed:.0f}s", flush=True)
