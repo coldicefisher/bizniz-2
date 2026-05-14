@@ -50,6 +50,29 @@ STRUCTURE — emit one `test('screenshot <name>', ...)` block per route:
         return text.length > 20 || interactive > 0;
       }}, {{ timeout: 30000, polling: 1000 }});
       await page.screenshot({{ path: `/workspace/screenshots/${{filename}}.png`, fullPage: true }});
+      // ALSO write a metadata JSON next to the PNG so the Python
+      // harness can deterministically verify we captured the right
+      // page (final URL after redirects, what the headings say). On
+      // mismatch the harness skips the expensive Coder fix step for
+      // this iteration.
+      try {{
+        const finalUrl = page.url();
+        const title = await page.title().catch(() => '');
+        const headings = await page.locator('h1, h2, h3').allInnerTexts().catch(() => []);
+        const bodyText = await page.locator('body').innerText().catch(() => '');
+        const meta = {{
+          requested_route: route,
+          final_url: finalUrl,
+          final_pathname: new URL(finalUrl).pathname,
+          title,
+          headings: headings.slice(0, 8),
+          body_sample: (bodyText || '').slice(0, 600),
+        }};
+        require('fs').writeFileSync(
+          `/workspace/screenshots/${{filename}}.meta.json`,
+          JSON.stringify(meta, null, 2),
+        );
+      }} catch (e) {{ /* meta write is best-effort */ }}
     }}
 
     test('screenshot home', async ({{ page }}) => {{ await captureRoute(page, '/', 'home'); }});

@@ -273,6 +273,12 @@ class ProUXDesigner(ClaudeUXDesigner):
         )
         result["step"] = "per_view_loop"
         result["route_count"] = len(views_to_iterate)
+        # Tee the full route list so _verify_capture can detect
+        # dynamic-route → literal-sibling collisions (recipes_id →
+        # recipes_new style).
+        self._sibling_routes = [
+            v.get("route", "") for v in views_to_iterate
+        ]
         for view_idx, view_meta in enumerate(views_to_iterate):
             route = view_meta.get("route", "/")
             view_type = view_meta.get("view_type", "")
@@ -453,6 +459,27 @@ class ProUXDesigner(ClaudeUXDesigner):
                 "stop_reason": "no screenshots captured",
             }
 
+        # Sentinel check: did Playwright actually land on the route
+        # we asked for? Each screenshot has a sibling .meta.json with
+        # the final URL after redirects. Mismatch (e.g. dashboard
+        # captured login because we weren't authed; /recipes/:id
+        # captured /recipes/new because the wrong link was clicked)
+        # is the dominant root cause of low-score iterations spinning
+        # on the wrong page.
+        # ``sibling_routes`` is set via ProUXDesigner._sibling_routes
+        # in the per-view dispatch — we tee it here for the collision
+        # check.
+        capture_ok, capture_reason = self._verify_capture(
+            route=route, screenshots=screenshots,
+            sibling_routes=getattr(self, "_sibling_routes", None),
+        )
+        if not capture_ok:
+            _log(
+                self._on_status,
+                f"ProUXDesigner: {view_label} iter {iteration} — "
+                f"capture mismatch: {capture_reason}"
+            )
+
         _log(
             self._on_status,
             f"ProUXDesigner: {view_label} iter {iteration} — evaluating..."
@@ -482,6 +509,8 @@ class ProUXDesigner(ClaudeUXDesigner):
             "fix_result": None,
             "initial_score": score,
             "final_score": score,
+            "captured_correctly": capture_ok,
+            "capture_mismatch_reason": capture_reason if not capture_ok else None,
             "stop": False,
             "stop_reason": None,
         }
@@ -497,6 +526,16 @@ class ProUXDesigner(ClaudeUXDesigner):
         if not issues:
             out["stop"] = True
             out["stop_reason"] = "no actionable issues despite low score"
+            return out
+
+        # Don't dispatch a fix when we know the capture was wrong —
+        # the eval was scoring the wrong page and any "fixes" would
+        # be misdirected (this was the dominant failure mode on
+        # /recipes/:id: captured /recipes/new, fixed the wrong file,
+        # next iteration captured /recipes/new again, etc.).
+        if not capture_ok:
+            out["stop"] = True
+            out["stop_reason"] = f"capture mismatch: {capture_reason}"
             return out
 
         # Apply fixes through Coder (factory path same as base class).
@@ -516,6 +555,80 @@ class ProUXDesigner(ClaudeUXDesigner):
         return out
 
     # ── Helpers ────────────────────────────────────────────────────────
+
+    def _verify_capture(
+        self,
+        route: str,
+        screenshots: List[Dict],
+        sibling_routes: Optional[List[str]] = None,
+    ) -> tuple:
+        """Read each screenshot's sibling ``<name>.meta.json`` and
+        verify the captured URL matches the requested route. Returns
+        ``(ok, reason)``.
+
+        Two failure modes covered:
+          1. URL pattern doesn't match at all (auth-protected route
+             captured as ``/login``, etc.).
+          2. URL pattern matches a dynamic route but the captured
+             pathname is a more-specific sibling — e.g. requested
+             ``/recipes/:id`` but captured ``/recipes/new`` because
+             Strategy A clicked the New Recipe CTA. We catch this by
+             checking ``sibling_routes`` for any literal match.
+
+        Missing meta file → pass through (older captures predating
+        the meta-emission contract).
+        """
+        if not screenshots:
+            return (False, "no screenshots")
+        expected_re = self._route_to_regex(route)
+        siblings = [
+            s for s in (sibling_routes or [])
+            if s != route and ":" not in s
+        ]
+        for s in screenshots:
+            sp = Path(s["path"])
+            meta_path = sp.with_suffix(".meta.json")
+            if not meta_path.exists():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text())
+            except Exception:
+                continue
+            actual = (meta.get("final_pathname") or "").rstrip("/") or "/"
+            if not expected_re.match(actual):
+                return (
+                    False,
+                    f"expected {route!r}, captured {actual!r} "
+                    f"(file={sp.name})"
+                )
+            # Dynamic-route collision: if the route is dynamic and
+            # the actual pathname is one of the known LITERAL sibling
+            # routes, the dynamic-param resolver clearly grabbed the
+            # wrong target.
+            if ":" in route and actual in siblings:
+                return (
+                    False,
+                    f"requested dynamic {route!r}, captured the literal "
+                    f"sibling {actual!r} (collision; check route order or "
+                    f"link selector)"
+                )
+        return (True, "")
+
+    @staticmethod
+    def _route_to_regex(route: str):
+        """Turn ``/recipes/:id/edit`` into a regex that matches
+        ``/recipes/<anything-but-slash>/edit``. Trailing slash and
+        query string are ignored. Colon is not a regex metachar so
+        we substitute on the plain ``:name`` form before any escape."""
+        # Substitute :params with a placeholder, escape, then swap
+        # the placeholder for the real regex segment. This avoids
+        # the asymmetry between re.escape's behavior on different
+        # Python versions.
+        SENTINEL = "\x00PARAM\x00"
+        normalized = re.sub(r":[A-Za-z_]\w*", SENTINEL, route)
+        escaped = re.escape(normalized)
+        with_params = escaped.replace(re.escape(SENTINEL), r"[^/]+")
+        return re.compile(f"^{with_params}/?$")
 
     def _take_view_screenshots(
         self,
