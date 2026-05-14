@@ -272,6 +272,83 @@ class TestPluggableAgent:
         assert called == []  # Tier 1 was enough
 
 
+class TestAuthDetection:
+    def test_react_require_auth_wrapper_marks_protected(self, tmp_path):
+        _write(tmp_path / "src/routes/dashboard.tsx", '''
+            const routeEntry = {
+              path: "/dashboard",
+              element: <RequireAuth><Dashboard /></RequireAuth>,
+            };
+            export default routeEntry;
+        ''')
+        routes = discover_react_routes(tmp_path)
+        assert len(routes) == 1
+        assert routes[0].requires_auth is True
+        assert "RequireAuth" in routes[0].auth_signals
+
+    def test_react_admin_guard(self, tmp_path):
+        _write(tmp_path / "src/routes/admin.tsx", '''
+            const routeEntry = {
+              path: "/admin",
+              element: <AdminRouteGuard><AdminPanel /></AdminRouteGuard>,
+            };
+            export default routeEntry;
+        ''')
+        routes = discover_react_routes(tmp_path)
+        assert routes[0].requires_auth is True
+        assert "AdminRouteGuard" in routes[0].auth_signals
+
+    def test_react_login_route_marked_public(self, tmp_path):
+        _write(tmp_path / "src/routes/login.tsx", '''
+            const routeEntry = { path: "/login", element: <Login /> };
+            export default routeEntry;
+        ''')
+        routes = discover_react_routes(tmp_path)
+        assert routes[0].requires_auth is False
+
+    def test_react_unwrapped_route_unknown(self, tmp_path):
+        # Generic non-guarded, non-public-named route → leave as None.
+        _write(tmp_path / "src/routes/about.tsx", '''
+            const routeEntry = { path: "/about", element: <About /> };
+            export default routeEntry;
+        ''')
+        routes = discover_react_routes(tmp_path)
+        # /about is in the public-named set.
+        assert routes[0].requires_auth is False
+
+    def test_react_jsx_routes_wrapper_context(self, tmp_path):
+        _write(tmp_path / "src/App.tsx", '''
+            <Routes>
+              <Route path="/" element={<Home />} />
+              <Route path="/login" element={<Login />} />
+              <RequireAuth>
+                <Route path="/dashboard" element={<Dashboard />} />
+              </RequireAuth>
+            </Routes>
+        ''')
+        routes = discover_react_routes(tmp_path)
+        d = {r.path: r for r in routes}
+        assert d["/dashboard"].requires_auth is True
+        # /login is in the public-named set.
+        assert d["/login"].requires_auth is False
+        # / is also public.
+        assert d["/"].requires_auth is False
+
+    def test_angular_canactivate_marks_protected(self, tmp_path):
+        _write(tmp_path / "src/app/app.routes.ts", '''
+            const routes: Routes = [
+              { path: 'dashboard', component: DashboardComponent,
+                canActivate: [AuthGuard] },
+              { path: 'login', component: LoginComponent },
+            ];
+        ''')
+        routes = discover_angular_routes(tmp_path)
+        d = {r.path: r for r in routes}
+        assert d["/dashboard"].requires_auth is True
+        assert "canActivate" in d["/dashboard"].auth_signals
+        assert d["/login"].requires_auth is False
+
+
 class TestTextClientAgent:
     def test_returns_empty_without_client(self, tmp_path):
         from bizniz.ux_designer.route_discovery import (

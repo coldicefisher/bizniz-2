@@ -201,6 +201,7 @@ class ProUXDesigner(ClaudeUXDesigner):
         # routes. Then merge each discovered route with the matching
         # per_view_plan entry to keep the design direction notes.
         from bizniz.ux_designer.route_discovery import (
+            apply_conservative_auth_default,
             discover_routes_with_fallback,
         )
         from pathlib import Path as _Path
@@ -213,6 +214,18 @@ class ProUXDesigner(ClaudeUXDesigner):
             framework=service.framework or "react",
             on_status=self._on_status,
         )
+        # Fill in ``requires_auth=True`` for unknown non-public routes
+        # — the safer default, since pre-authing a public route is
+        # harmless while skipping auth on a protected one captures
+        # the login redirect.
+        if discovered:
+            apply_conservative_auth_default(discovered)
+            n_auth = sum(1 for r in discovered if r.requires_auth)
+            _log(
+                self._on_status,
+                f"ProUXDesigner: auth detection — "
+                f"{n_auth}/{len(discovered)} routes flagged requires_auth"
+            )
         if discovered:
             _log(
                 self._on_status,

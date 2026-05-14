@@ -46,6 +46,17 @@ class RouteSpec(BaseModel):
     params: List[str] = Field(default_factory=list)
     is_dynamic: bool = False
     source_file: Optional[str] = None
+    # Whether visiting this route unauthenticated redirects to login
+    # / yields a denied state. Detected deterministically by grepping
+    # for guard wrappers in the source file (React) or canActivate
+    # in the route config (Angular). ``None`` = unknown / undetected
+    # (caller may probe by curl). Public routes (``/``, ``/login``,
+    # ``/register``) typically resolve to False.
+    requires_auth: Optional[bool] = None
+    # Comma-separated list of guard names found, for diagnostics
+    # ("RequireAuth", "AdminRouteGuard", "canActivate"). Empty when
+    # no guards detected.
+    auth_signals: List[str] = Field(default_factory=list)
 
 
 # ── Tier 1: framework-specific parsers ──────────────────────────────────
@@ -61,6 +72,20 @@ _REACT_JSX_PATH_RE = re.compile(
 # Angular: { path: 'foo', component: FooComponent }
 _ANGULAR_PATH_RE = re.compile(
     r"""path\s*:\s*['"`]([^'"`]+)['"`]""",
+)
+
+# React-style guard wrappers. Match conservatively — wrapping element
+# names like ``<RequireAuth>`` or ``<AdminRouteGuard>``. ``Protected
+# Route``, ``AuthGate``, ``RequireRole`` are common variants. Custom
+# guard names get caught by the agent fallback (Tier 2).
+_REACT_GUARD_RE = re.compile(
+    r"""<\s*(RequireAuth|RequireRole|AdminRouteGuard|ProtectedRoute|AuthGate|RequireLogin)\b""",
+    re.IGNORECASE,
+)
+# Angular: ``canActivate: [SomeGuard]`` or
+# ``canActivateChild: [SomeGuard]`` — both signal auth/role checks.
+_ANGULAR_GUARD_RE = re.compile(
+    r"""\bcan(Activate|ActivateChild|Load)\s*:\s*\[""",
 )
 
 
@@ -85,12 +110,21 @@ def discover_react_routes(workspace_root: Path) -> List[RouteSpec]:
             text = _safe_read(fp)
             if not text:
                 continue
+            guard_signals = _detect_react_guards(text)
             for m in _REACT_PATH_RE.finditer(text):
                 path = _normalize_path(m.group(1))
                 if not path or path in seen:
                     continue
                 seen.add(path)
-                out.append(_make_route(path, str(fp.relative_to(workspace_root))))
+                spec = _make_route(
+                    path, str(fp.relative_to(workspace_root)),
+                )
+                if guard_signals:
+                    spec.requires_auth = True
+                    spec.auth_signals = guard_signals
+                elif _is_publicly_named_route(path):
+                    spec.requires_auth = False
+                out.append(spec)
 
     # Inline JSX <Route path="..." /> declarations.
     for rel in (
@@ -103,14 +137,70 @@ def discover_react_routes(workspace_root: Path) -> List[RouteSpec]:
         if not fp.is_file():
             continue
         text = _safe_read(fp)
+        # File-level guard signals apply to every JSX <Route> that
+        # appears inside a guard wrapper. We approximate by scanning
+        # the line around each match — full JSX parsing would be
+        # more accurate but is heavier than the value gives us.
         for m in _REACT_JSX_PATH_RE.finditer(text):
             path = _normalize_path(m.group(1))
             if not path or path in seen:
                 continue
             seen.add(path)
-            out.append(_make_route(path, rel))
+            spec = _make_route(path, rel)
+            # Look at the 200 chars before this match for a guard
+            # wrapper ancestor.
+            ctx = text[max(0, m.start() - 200):m.start()]
+            ctx_guards = _detect_react_guards(ctx)
+            if ctx_guards:
+                spec.requires_auth = True
+                spec.auth_signals = ctx_guards
+            elif _is_publicly_named_route(path):
+                spec.requires_auth = False
+            out.append(spec)
 
     return out
+
+
+def _detect_react_guards(text: str) -> List[str]:
+    """Return the list of guard component names found in ``text``."""
+    return sorted({m.group(1) for m in _REACT_GUARD_RE.finditer(text)})
+
+
+def apply_conservative_auth_default(routes: List[RouteSpec]) -> None:
+    """Fill in ``requires_auth=True`` for any route where detection
+    returned None and the path doesn't match a publicly-named pattern.
+
+    Rationale: guards sometimes live inside page components rather than
+    in the route file (recipe_box's ``/dashboard`` is just
+    ``<DashboardPage />`` — the auth check is inside the page). When
+    we can't tell from a quick grep, the safer default is to assume
+    protected: pre-authing for a route that's actually public still
+    captures the right page, while skipping auth on a protected route
+    captures the login redirect.
+
+    Caller invokes this AFTER all parsers run if they want the safer
+    default. Not applied automatically by ``discover_routes`` so tests
+    and callers that care about the raw "unknown" signal still see it.
+    """
+    for r in routes:
+        if r.requires_auth is None and not _is_publicly_named_route(r.path):
+            r.requires_auth = True
+            r.auth_signals = ["(conservative-default)"]
+
+
+# Routes whose names strongly imply public access. We mark these as
+# ``requires_auth=False`` so the screenshot script doesn't pre-auth
+# for them. (Pre-auth still wouldn't hurt, but it lets the test more
+# honestly capture the public marketing entry.)
+_PUBLIC_ROUTE_NAMES = frozenset({
+    "/", "/login", "/register", "/signup", "/sign-up", "/sign-in",
+    "/forgot-password", "/reset-password", "/verify-email",
+    "/about", "/pricing", "/contact", "/privacy", "/terms",
+})
+
+
+def _is_publicly_named_route(path: str) -> bool:
+    return path in _PUBLIC_ROUTE_NAMES
 
 
 def discover_angular_routes(workspace_root: Path) -> List[RouteSpec]:
@@ -139,19 +229,24 @@ def discover_angular_routes(workspace_root: Path) -> List[RouteSpec]:
             continue
         for m in _ANGULAR_PATH_RE.finditer(text):
             raw = m.group(1).strip()
-            # Angular paths are usually written without a leading slash.
-            # Normalize to ``/foo`` for consistency with React's shape.
             normalized = "/" + raw.lstrip("/") if raw else "/"
-            if normalized == "/" and raw == "":
-                # The empty-string path means "redirect index" — keep
-                # it as "/" only once.
-                pass
             if normalized in seen:
                 continue
             seen.add(normalized)
-            out.append(_make_route(
+            spec = _make_route(
                 normalized, str(fp.relative_to(workspace_root)),
-            ))
+            )
+            # Walk the ``Routes`` array entry for this path and check
+            # if it declares canActivate. We use a small window
+            # forward from the path match.
+            window = text[m.end():m.end() + 400]
+            guards = _ANGULAR_GUARD_RE.findall(window)
+            if guards:
+                spec.requires_auth = True
+                spec.auth_signals = [f"can{g}" for g in guards]
+            elif _is_publicly_named_route(normalized):
+                spec.requires_auth = False
+            out.append(spec)
 
     return out
 
