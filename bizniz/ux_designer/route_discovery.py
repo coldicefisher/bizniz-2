@@ -28,9 +28,17 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from pydantic import BaseModel, Field
+
+
+# Pluggable agent signature. Any callable matching this shape can
+# stand in as a Tier 2 backend — Claude CLI today, Gemini or another
+# model tomorrow when we A/B test architecture quality. Returns a
+# list of route dicts (loosely shaped; the dispatcher normalizes
+# them through ``_make_route``).
+RouteDiscoveryAgent = Callable[[Path, Optional[str]], List[dict]]
 
 
 class RouteSpec(BaseModel):
@@ -272,10 +280,14 @@ def agent_discover_routes(
     timeout_seconds: float = _AGENT_TIMEOUT_S,
     on_status=None,
 ) -> List[RouteSpec]:
-    """Shell out to ``claude --print --add-dir <workspace>`` and ask it
-    to walk the code, returning a JSON route list. Falls back to ``[]``
-    on any subprocess failure (caller decides whether to use the plan's
-    per_view_plan instead).
+    """Claude CLI implementation of the Tier 2 agent. Spawns
+    ``claude --print --add-dir <workspace>`` so the model can use its
+    native Read/Glob/Grep tools to walk the code.
+
+    Returns ``[]`` on any subprocess failure. For a non-Claude backend
+    (Gemini, OpenAI, etc.), use ``text_client_agent_discover_routes``,
+    which renders the workspace into the prompt and makes a single
+    text call.
     """
     if shutil.which(command) is None:
         return []
@@ -391,6 +403,129 @@ def _parse_agent_result(text: str):
     return None
 
 
+# ── Text-client Tier 2: any BaseAIClient ──────────────────────────────
+
+
+def text_client_agent_discover_routes(
+    workspace_root: Path,
+    framework: Optional[str] = None,
+    *,
+    client=None,
+    on_status=None,
+    max_files: int = 40,
+    max_bytes_per_file: int = 8000,
+) -> List[RouteSpec]:
+    """BaseAIClient-driven route discovery. Renders the relevant
+    frontend files into the prompt (Tier 1's candidate paths + a
+    small src/ snapshot), then makes a single text call. Works with
+    any client that implements ``BaseAIClient.get_text`` — Gemini,
+    OpenAI, etc. — so we can A/B this against the Claude CLI agent.
+
+    Tradeoff vs the Claude CLI variant: no native file-tool access,
+    so we have to choose what to send. We bias toward router config
+    files (much smaller window). Returns ``[]`` on parse failure or
+    when no client is supplied.
+    """
+    if client is None:
+        return []
+
+    rendered = _render_router_candidates(
+        workspace_root, max_files=max_files,
+        max_bytes_per_file=max_bytes_per_file,
+    )
+    if not rendered:
+        return []
+
+    sys_prompt = AGENT_DISCOVERY_SYSTEM_PROMPT + (
+        "\n\nIMPORTANT: you do NOT have file-system tools in this "
+        "mode. Read ONLY the files included inline in the user "
+        "message. Do not invent paths."
+    )
+    user_prompt = (
+        AGENT_DISCOVERY_USER_TEMPLATE.format(framework=framework or "unknown")
+        + "\n\nROUTER-CONFIG CANDIDATE FILES:\n\n"
+        + rendered
+    )
+
+    try:
+        text, _, _ = client.get_text(
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            use_message_history=False,
+        )
+    except Exception as e:
+        if on_status:
+            try:
+                on_status(
+                    f"text_client_agent_discover_routes: client call "
+                    f"raised {type(e).__name__}: {e}"
+                )
+            except Exception:
+                pass
+        return []
+
+    parsed = _parse_agent_result(text or "")
+    if parsed is None:
+        return []
+    out: List[RouteSpec] = []
+    seen: set = set()
+    for entry in parsed.get("routes") or []:
+        path = _normalize_path(str(entry.get("path") or ""))
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        out.append(_make_route(path, entry.get("source_file")))
+    return out
+
+
+def _render_router_candidates(
+    workspace_root: Path,
+    *,
+    max_files: int,
+    max_bytes_per_file: int,
+) -> str:
+    """Collect the small set of files most likely to declare routes
+    and render them into a single string for the prompt."""
+    patterns = (
+        "src/routes/*.tsx", "src/routes/*.jsx",
+        "src/routes/*.ts",  "src/routes/*.js",
+        "src/App.tsx", "src/App.jsx",
+        "src/main.tsx", "src/main.jsx",
+        "src/router.tsx", "src/router.ts",
+        "src/index.tsx", "src/index.jsx",
+        "src/app/**/*-routing.module.ts",
+        "src/app/**/*.routes.ts",
+        "src/router/index.ts", "src/router/index.js",
+        "app/**/page.tsx", "pages/**/*.tsx",  # Next.js
+        "src/routes/**/+page.svelte",         # SvelteKit
+    )
+    found: List[Path] = []
+    seen: set = set()
+    for p in patterns:
+        for fp in workspace_root.glob(p):
+            if fp in seen or not fp.is_file():
+                continue
+            seen.add(fp)
+            found.append(fp)
+            if len(found) >= max_files:
+                break
+        if len(found) >= max_files:
+            break
+
+    parts = []
+    for fp in found:
+        text = _safe_read(fp)
+        if not text:
+            continue
+        if len(text) > max_bytes_per_file:
+            text = text[:max_bytes_per_file] + "\n... [truncated]"
+        rel = fp.relative_to(workspace_root)
+        parts.append(f"--- {rel} ---\n{text}")
+    return "\n\n".join(parts)
+
+
 # ── Combined discovery: Tier 1 then Tier 2 ──────────────────────────────
 
 
@@ -399,23 +534,33 @@ def discover_routes_with_fallback(
     framework: Optional[str] = None,
     *,
     enable_agent_fallback: bool = True,
+    agent_fn: Optional[RouteDiscoveryAgent] = None,
     command: str = "claude",
     on_status=None,
 ) -> List[RouteSpec]:
-    """Try the deterministic parser first; if empty AND the agent
-    fallback is enabled, dispatch claude --print to walk the code."""
+    """Tier 1 first; if empty AND fallback enabled, dispatch the
+    pluggable agent.
+
+    ``agent_fn`` is the swappable backend. When ``None``, the default
+    is the Claude CLI variant (``agent_discover_routes``). Pass any
+    ``Callable[[Path, Optional[str]], List[RouteSpec]]`` to swap in
+    Gemini, OpenAI, or your own — useful for A/B-ing architecture
+    quality against different model backends.
+    """
     routes = discover_routes(workspace_root, framework=framework)
     if routes or not enable_agent_fallback:
         return routes
     if on_status:
         try:
             on_status(
-                "route_discovery: Tier 1 found nothing — falling back to "
-                "claude --print agent"
+                "route_discovery: Tier 1 found nothing — falling "
+                "through to Tier 2 agent"
             )
         except Exception:
             pass
-    return agent_discover_routes(
-        workspace_root, framework=framework,
-        command=command, on_status=on_status,
+    fn = agent_fn or (
+        lambda ws, fw: agent_discover_routes(
+            ws, framework=fw, command=command, on_status=on_status,
+        )
     )
+    return fn(workspace_root, framework)

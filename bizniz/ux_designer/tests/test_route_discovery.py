@@ -230,3 +230,103 @@ class TestAgentFallback:
             )
         assert m.call_count == 1
         assert any(r.path == "/" for r in out)
+
+
+class TestPluggableAgent:
+    def test_agent_fn_is_called_instead_of_default(self, tmp_path):
+        from bizniz.ux_designer.route_discovery import (
+            RouteSpec, discover_routes_with_fallback,
+        )
+        called_with = []
+
+        def fake_agent(ws, fw):
+            called_with.append((ws, fw))
+            return [RouteSpec(path="/from-fake-agent")]
+
+        out = discover_routes_with_fallback(
+            tmp_path, framework="weird",
+            agent_fn=fake_agent,
+        )
+        # Tier 1 returned nothing (empty workspace) → fake_agent fired.
+        assert len(called_with) == 1
+        assert called_with[0] == (tmp_path, "weird")
+        assert [r.path for r in out] == ["/from-fake-agent"]
+
+    def test_agent_fn_skipped_when_tier_1_finds_routes(self, tmp_path):
+        from bizniz.ux_designer.route_discovery import (
+            discover_routes_with_fallback,
+        )
+        _write(tmp_path / "src/routes/home.tsx",
+               'const r = { path: "/" };')
+        called = []
+
+        def fake_agent(ws, fw):
+            called.append(1)
+            return []
+
+        out = discover_routes_with_fallback(
+            tmp_path, framework="react",
+            agent_fn=fake_agent,
+        )
+        assert any(r.path == "/" for r in out)
+        assert called == []  # Tier 1 was enough
+
+
+class TestTextClientAgent:
+    def test_returns_empty_without_client(self, tmp_path):
+        from bizniz.ux_designer.route_discovery import (
+            text_client_agent_discover_routes,
+        )
+        out = text_client_agent_discover_routes(tmp_path, client=None)
+        assert out == []
+
+    def test_returns_empty_when_no_candidate_files(self, tmp_path):
+        from unittest.mock import MagicMock
+        from bizniz.ux_designer.route_discovery import (
+            text_client_agent_discover_routes,
+        )
+        client = MagicMock()
+        out = text_client_agent_discover_routes(tmp_path, client=client)
+        assert out == []
+        # No client call because there's nothing to send.
+        client.get_text.assert_not_called()
+
+    def test_calls_client_with_rendered_files_and_parses_response(self, tmp_path):
+        import json
+        from unittest.mock import MagicMock
+        from bizniz.ux_designer.route_discovery import (
+            text_client_agent_discover_routes,
+        )
+        _write(tmp_path / "src/App.tsx",
+               '<Route path="/" element={<H />} />')
+        client = MagicMock()
+        client.get_text.return_value = (
+            json.dumps({"routes": [
+                {"path": "/", "source_file": "src/App.tsx"},
+                {"path": "/profile/:id"},
+            ]}),
+            "session-id",
+            [],
+        )
+        out = text_client_agent_discover_routes(
+            tmp_path, framework="react", client=client,
+        )
+        paths = sorted(r.path for r in out)
+        assert paths == ["/", "/profile/:id"]
+        # is_dynamic derived from path, not trusted from agent.
+        profile = next(r for r in out if r.path == "/profile/:id")
+        assert profile.is_dynamic is True
+
+    def test_client_exception_returns_empty(self, tmp_path):
+        from unittest.mock import MagicMock
+        from bizniz.ux_designer.route_discovery import (
+            text_client_agent_discover_routes,
+        )
+        _write(tmp_path / "src/App.tsx",
+               '<Route path="/" element={<H />} />')
+        client = MagicMock()
+        client.get_text.side_effect = RuntimeError("provider down")
+        out = text_client_agent_discover_routes(
+            tmp_path, framework="react", client=client,
+        )
+        assert out == []
