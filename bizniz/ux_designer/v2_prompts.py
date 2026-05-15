@@ -130,6 +130,17 @@ Hard rules:
     chain are inert.
   - When you add packages to package.json, leave dependency
     installation to the runtime (the build harness handles it).
+  - **Every primitive you write under ``src/components/ui/`` MUST
+    ship a sibling ``<Component>.stories.tsx`` file.** The bizniz
+    UX-review pipeline runs interaction tests against these stories;
+    a primitive with no story is invisible to that phase and the
+    project fails its Storybook gate. Each story file exports a
+    ``Meta`` default + one named ``Story`` per canonical state. For
+    interactive primitives include at minimum: ``Default``,
+    ``Loading``, ``Disabled``, ``Error`` (when applicable). See
+    ``src/components/common/Toast.stories.tsx`` (skeleton-shipped)
+    for the canonical pattern. Use ``@storybook/react`` for the
+    types: ``import type {{ Meta, StoryObj }} from "@storybook/react";``.
 """
 
 GLOBAL_DESIGN_FIX_USER_TEMPLATE = """\
@@ -147,7 +158,27 @@ YOUR JOB:
 3. Write the primitives listed in ``primitives_to_build`` into the
    declared target_files. Each primitive should accept className for
    composition and forward refs where it matters.
-4. Update existing pages/components to use the primitives where the
+4. For EVERY primitive you write in step 3, also write a sibling
+   ``<Component>.stories.tsx`` file in the SAME directory. Skipping
+   this fails the UX-review pipeline's Storybook gate. Minimal
+   shape:
+
+       import type {{ Meta, StoryObj }} from "@storybook/react";
+       import Button from "./Button";
+
+       const meta: Meta<typeof Button> = {{
+         title: "UI/Button",
+         component: Button,
+         tags: ["autodocs"],
+       }};
+       export default meta;
+       type Story = StoryObj<typeof Button>;
+
+       export const Default: Story = {{ args: {{ children: "Click me" }} }};
+       export const Loading: Story = {{ args: {{ loading: true, children: "Saving..." }} }};
+       export const Disabled: Story = {{ args: {{ disabled: true, children: "Unavailable" }} }};
+
+5. Update existing pages/components to use the primitives where the
    substitution is obvious (e.g. replace ad-hoc ``<button
    className="bg-blue-500 ...">`` with ``<Button variant="primary">``).
    Don't redesign the pages — just adopt the primitives.
