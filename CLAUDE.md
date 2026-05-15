@@ -295,13 +295,38 @@ by default via `pyproject.toml` `addopts = "-m 'not functional'"`.
 
 ## Commands you'll need
 
-```bash
-# Run the pipeline (default: pet groomer prompt)
-cd ~/bizniz && set -a && source .env && set +a \
-  && PYTHONPATH=. .venv/bin/python -u examples/auto_architect.py
+**Canonical entry point: `examples/v2_build.py`.** The older
+`examples/auto_architect.py` and friends predate the v2.5 refactor
+(2026-05-06) and broke when modules moved; they live in
+`examples/_deprecated/` for git archaeology. The smoke test at
+`tests/test_examples_smoke.py` keeps the current set honest.
 
-# Run with no skeleton (apples-to-apples cost experiment)
-... examples/auto_architect.py --no-skeleton
+```bash
+# Run the pipeline on a fresh project
+cd ~/bizniz && set -a && source .env && set +a \
+  && PYTHONPATH=. .venv/bin/python -u examples/v2_build.py \
+       --project <slug> --auto "$(cat path/to/prompt.txt)"
+
+# Pre-canned prompts under examples/prompts/
+cd ~/bizniz && set -a && source .env && set +a \
+  && PYTHONPATH=. .venv/bin/python -u examples/v2_build.py \
+       --project crm_v1 --auto "$(cat examples/prompts/crm.txt)"
+
+# Plan only (cheap dry-run)
+PYTHONPATH=. .venv/bin/python -u examples/v2_build.py \
+  --project <slug> --plan-only "<problem statement>"
+
+# Run a specific milestone (1-indexed, inclusive)
+PYTHONPATH=. .venv/bin/python -u examples/v2_build.py \
+  --project <slug> --milestone 2 --auto "<problem>"
+
+# Resume from the most recent run (no problem statement needed)
+PYTHONPATH=. .venv/bin/python -u examples/v2_build.py \
+  --project <slug> --resume --auto
+
+# Run ONE phase only
+PYTHONPATH=. .venv/bin/python -u examples/v2_build.py \
+  --project <slug> --milestone N --phase integration_api
 
 # Re-run ONLY integration phase + debugger on an existing project
 # (skips engineering — fast iteration on debugger tuning)
@@ -309,6 +334,10 @@ PYTHONPATH=. .venv/bin/python -u examples/debug_integration.py \
   ~/bizniz_projects/pet_groomer_v11
 # Flags: --backend-only, --frontend-only, --max-iterations 5,
 #         --debugger-model gemini-pro
+
+# Re-run ONLY the UX phase on an existing project
+PYTHONPATH=. .venv/bin/python -u examples/debug_ux.py \
+  ~/bizniz_projects/<slug> --debug
 
 # E2E lifecycle test (property manager)
 ./tests/e2e/property_manager/run.sh plan    # plan only (~$0.01)
