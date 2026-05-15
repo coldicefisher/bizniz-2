@@ -174,11 +174,28 @@ class MilestoneLoop:
             except Exception:
                 pass
         service_names = [s.name for s in architecture.services]
-        recovery_result = self._smoke_recovery.recover(
-            critical_failures=smoke_result.critical_failures,
-            service_names=service_names,
-            milestone_title=milestone.title,
-        )
+        # Defensive: if SmokeRecovery itself raises (a bug in the
+        # recovery code, an unexpected Milestone field, etc.), don't
+        # bring down the whole pipeline — fall back to the existing
+        # hard-halt path. A 'recovery did not run' is strictly no worse
+        # than the pre-recovery world.
+        try:
+            recovery_result = self._smoke_recovery.recover(
+                critical_failures=smoke_result.critical_failures,
+                service_names=service_names,
+                milestone_title=milestone.name,
+            )
+        except Exception as e:
+            if self._on_status:
+                try:
+                    self._on_status(
+                        f"SmokeRecovery: dispatch raised "
+                        f"{type(e).__name__}: {e} — falling back to "
+                        f"original hard-halt"
+                    )
+                except Exception:
+                    pass
+            return smoke_result
         state.mark_phase(
             SubPhase.SMOKE,
             {

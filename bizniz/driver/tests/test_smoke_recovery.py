@@ -157,6 +157,20 @@ class TestRecoverFlow:
         assert out.succeeded is False
         assert "is_error" in out.summary
 
+    def test_uses_milestone_name_field(self):
+        """Regression: caller is MilestoneLoop._maybe_recover_smoke
+        which passes ``milestone.name`` as the title. The integration
+        crashed mid-CRM build 2026-05-15 because I'd written
+        ``milestone.title``. The Milestone pydantic model has ``name``,
+        not ``title``. This test pins the contract: recovery accepts
+        whatever string the caller hands it and threads it through.
+        Cross-checked at the call-site by reading planner/types.py."""
+        from bizniz.planner.types import Milestone
+        # If pydantic model changes its field name, this assertion
+        # surfaces the same crash in a unit test before the live build.
+        assert "name" in Milestone.model_fields
+        assert "title" not in Milestone.model_fields
+
     def test_fallback_model_appended_when_set(self):
         with patch(
             "bizniz.driver.smoke_recovery.shutil.which",
