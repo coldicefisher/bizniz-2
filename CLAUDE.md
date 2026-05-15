@@ -356,6 +356,25 @@ PYTHONPATH=. .venv/bin/python -u examples/debug_ux.py \
 docker compose -f ~/bizniz_projects/<slug>/infra/development/docker-compose.yml up -d
 ```
 
+### Claude CLI rate-limit handling
+
+Two env vars surface controls for the Max-plan 5-hour rolling usage
+window so long builds (5+ milestones) survive a window roll:
+
+- `BIZNIZ_CLAUDE_USAGE_CAP_MAX_WAIT_S` — max seconds the client
+  will sleep when it parses a `resets HH:MMam` string from a 429
+  body. Default 6h (above the typical 5h window). Set to 0 to
+  effectively disable wait-on-reset and force a hard fail.
+- `BIZNIZ_CLAUDE_FALLBACK_MODEL` — if set, every Claude CLI
+  invocation gets `--fallback-model <name>` appended. When the
+  primary is overloaded, CLI auto-switches. Example:
+  `BIZNIZ_CLAUDE_FALLBACK_MODEL=claude-haiku-4-5`. Trades quality
+  for "keep moving during rate-limit windows."
+
+Both are opt-in; defaults preserve existing behavior. Transient
+(non-usage-cap) 429s still use the 10/30/60s backoff and hard-fail
+after 4 attempts.
+
 ## Importing memory on a new machine
 
 If you're on a different machine and want auto-memory loading,
