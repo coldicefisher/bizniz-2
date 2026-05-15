@@ -18,36 +18,40 @@
 # The Engineer plans the work for each service: requirements, use cases,
 # domain models, issues. Starts on the cheapest model; escalates via
 # engineer_escalation on repetition-detected stalls or repair iterations.
-engineer_model: gemini-flash-top
+engineer_model: claude-cli
 
 # Escalation chain when Engineer detects a repetition stall (same
 # action three of the last five iterations) or when repair iteration
 # escalates a tier. Indexed by tier 0, 1, 2... — Engineer.implement
 # starts at tier 0 (= engineer_model above). Repair iter N uses tier N.
+# Claude-cli at every tier: subprocess routing to the claude binary
+# ($0 marginal on Max plan), so escalating just means "another shot
+# with the same model" — which works fine when the sticky repair log
+# compounds across attempts.
 engineer_escalation:
-  - gemini-flash-top
-  - gemini-flash-top
-  - gemini-pro
+  - claude-cli
+  - claude-cli
+  - claude-cli
 
 # The Architect decomposes the project into services and orchestrates
 # the milestone walk. One call per milestone, so quality > cost.
-architect_model: gemini-flash-top
+architect_model: claude-cli
 
 # The Planner runs once per project (or rarely on re-plans) and its
 # output drives the entire build sequence — top-tier model is worth
 # the rounding-error cost.
-planner_model: gemini-flash-top
+planner_model: claude-cli
 
 # Top-tier model for integration test generation (HTTPApiTester +
 # WebUITester). Hallucinations here get amplified by the debugger
 # into real code corruption (e.g. fake /grooming routes appearing in
 # a property-manager app), so we pay for the better model.
-integration_tester_model: gemini-pro
+integration_tester_model: claude-cli
 
 # Legacy single-tier debugger model — only used as a fallback when
 # `debugger_escalation` (further down) is empty. The active config
 # is the escalation chain, not this field.
-debugger_model: gemini-flash-lite
+debugger_model: claude-cli
 
 
 # ╔═══════════════════════════════════════════════════════════════════╗
@@ -74,25 +78,25 @@ debugger_model: gemini-flash-lite
 # issue description + tests. Escalates when its generated code fails
 # tests repeatedly.
 coder_models:
-  - gemini-flash-lite
-  - gemini-flash
-  - gemini-flash-top
+  - claude-cli
+  - claude-cli
+  - claude-cli
 
 # Tester agent: writes the tests for an issue based on the issue
 # description and target signatures. Escalates when its generated
 # tests are malformed or fail to compile.
 tester_models:
-  - gemini-flash-lite
-  - gemini-flash
-  - gemini-flash-top
+  - claude-cli
+  - claude-cli
+  - claude-cli
 
 # QuickDebugger inline repair: fixes test failures via single-call
 # diagnose-and-patch (no agentic tool loop). Skips the cheapest tier
 # because trivial fixes already pass the Coder; if QuickDebugger is
 # firing, we already need at least mid-tier reasoning.
 repair_models:
-  - gemini-flash
-  - gemini-flash-top
+  - claude-cli
+  - claude-cli
 
 
 # ╔═══════════════════════════════════════════════════════════════════╗
@@ -125,33 +129,28 @@ repair_models:
 # iterations. Skip straight from triage to flash-top, then escalate
 # to pro when flash-top is stuck.
 debugger_escalation:
-  # Tier 1 — quick-pass triage with the cheapest model. Catches truly
-  # trivial fixes (typo, wrong import, missing field name) for
-  # fractions of a cent each. 2 iterations lets the model peek at one
-  # file before forced submission. Two attempts because flash-lite
-  # sometimes mis-diagnoses on the first shot but gets it on the
-  # second after the sticky log clarifies. Beyond 2 attempts the
-  # signal-to-noise drops fast — escalate to the workhorse tier.
-  - model: gemini-flash-lite
-    tool_iterations: 2
+  # Tier 1 — quick-pass triage. Short tool-iteration budget so we
+  # bail fast on truly trivial bugs (typo, wrong import, missing
+  # field name) without burning a long Claude session. Two attempts
+  # because the sticky log compounds — a second pass with the prior
+  # diagnosis in context often nails the fix.
+  - model: claude-cli
+    tool_iterations: 4
     repair_attempts: 2
-  # Tier 2 — workhorse grind. Mid-tier model can hold multi-file
-  # context across iterations and produces real fixes for logic bugs.
-  # 40 tool iterations per attempt = enough to view a dozen files PLUS
-  # do live runtime introspection (run_python_in_container, hit_endpoint,
-  # inspect_env, decode_jwt) before forming a thoughtful diagnosis.
-  # 5 attempts because the sticky log compounds — each attempt builds
-  # on prior diagnoses.
-  - model: gemini-flash-top
+  # Tier 2 — workhorse grind. 40 tool iterations per attempt lets the
+  # model view multiple files + do live runtime introspection
+  # (run_python_in_container, hit_endpoint, inspect_env, decode_jwt)
+  # before forming a diagnosis. 5 attempts because the sticky log
+  # builds across attempts.
+  - model: claude-cli
     tool_iterations: 40
     repair_attempts: 5
-  # Tier 3 — pro escalation. 24 iterations gives pro plenty of runway
-  # to use the live-introspection tools to nail config or auth bugs.
-  # 2 attempts only — pro is the strongest model, so if it can't fix
-  # it after one full grind plus a sticky-log retry, the bug is
-  # structural (wrong skeleton, wrong contract) and no more LLM
-  # iteration will help. Surface for human review.
-  - model: gemini-pro
+  # Tier 3 — final escalation. 24 iterations to use live-introspection
+  # tools for config / auth bugs. 2 attempts only — if a fresh Claude
+  # session with the full sticky log can't fix it after this much
+  # context, the bug is structural (wrong skeleton, wrong contract)
+  # and surfaces for human review.
+  - model: claude-cli
     tool_iterations: 24
     repair_attempts: 2
 
