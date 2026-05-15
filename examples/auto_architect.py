@@ -186,7 +186,38 @@ def _make_engineer(config, workspace, on_status_message=None, image_name=None, l
 
 if __name__ == "__main__":
 
-    no_skeleton = "--no-skeleton" in sys.argv
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Auto-architect a project from a problem statement.",
+        # Keep positional/legacy flags working.
+        allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--no-skeleton", action="store_true",
+        help="Skip skeleton selection (greenfield from scratch).",
+    )
+    parser.add_argument(
+        "--project-name", type=str, default=None,
+        help="Override the project directory name "
+             "(default: 'Pet Groomer V11' / 'Pet Groomer NoSkel').",
+    )
+    parser.add_argument(
+        "--prompt-file", type=str, default=None,
+        help="Path to a file containing the problem statement. "
+             "Overrides the module-level PROBLEM_STATEMENT.",
+    )
+    args = parser.parse_args()
+    no_skeleton = args.no_skeleton
+
+    # Optional override: read problem statement from a file. Lets us
+    # drive different builds without editing this script.
+    if args.prompt_file:
+        prompt_path = Path(args.prompt_file).expanduser().resolve()
+        if not prompt_path.is_file():
+            print(f"ERROR: --prompt-file {prompt_path} not found", flush=True)
+            sys.exit(2)
+        PROBLEM_STATEMENT = prompt_path.read_text()
+        print(f"Using problem statement from {prompt_path} ({len(PROBLEM_STATEMENT)} chars)", flush=True)
 
     print(f"\n{'='*60}", flush=True)
     print(f"  Auto Architect{' (NO SKELETON)' if no_skeleton else ''}", flush=True)
@@ -207,7 +238,9 @@ if __name__ == "__main__":
     architect_client = config.make_client(model=config.architect_model)
     log(f"Architect client ready (model={config.architect_model})")
 
-    project_name = "Pet Groomer NoSkel" if no_skeleton else "Pet Groomer V11"
+    project_name = args.project_name or (
+        "Pet Groomer NoSkel" if no_skeleton else "Pet Groomer V11"
+    )
     project_parent = Path.home() / "bizniz_projects"
     project_parent.mkdir(parents=True, exist_ok=True)
 

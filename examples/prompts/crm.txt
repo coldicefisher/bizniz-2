@@ -1,0 +1,29 @@
+Build a lightweight CRM web application for a small sales team. The
+app supports three related entity types and a pipeline view.
+
+1) Contacts: list, search, create, edit, delete. Each contact has a
+name, email, phone, title, and is associated with a company.
+
+2) Companies: list, search, create, edit. Each company has a name,
+industry, website, and a list of associated contacts.
+
+3) Deals: list view with a kanban pipeline (stages: Lead, Qualified,
+Proposal, Closed Won, Closed Lost), create, edit. Each deal has a
+title, value (USD), stage, expected close date, associated contact,
+and associated company. Users move deals between stages via a stage
+dropdown in the detail view (drag-and-drop is a stretch goal — the
+dropdown is required).
+
+4) Dashboard: overview showing total deals by stage, total deal
+value currently in pipeline, recent activity (last 10 changes).
+
+Authentication is required for all routes except /login. Two roles:
+'sales' (can manage contacts, companies, and their own deals) and
+'admin' (can manage everything including reassigning deals between
+users). FusionAuth handles identity; the backend validates
+FusionAuth-issued RS256 JWTs.
+
+Backend: REST API in Python (FastAPI). Storage: PostgreSQL.
+Frontend: React + Tailwind. Design-system primitives (Button, Modal,
+FormInput, DataTable) must ship with sibling Storybook stories so
+the UX-review pipeline can interaction-test them.
