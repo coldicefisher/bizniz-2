@@ -9,29 +9,36 @@ first; it tells you what to load next.
 
 ## Current roadmap (2026-05-15)
 
-Locked-in order — work items 1 → 8 in sequence. Full text at
+Locked-in order — work items 1 → 9 in sequence. Full text at
 `docs/roadmap.md`. Honor this when prioritizing new work.
 
-1. **Finish UX with Storybook** — make the interaction-test phase
+1. **Confidence signals load-bearing** — make
+   `QualityEngineer.enrich.confidence` actually drive behavior
+   (re-enrich at 0.4-0.6, halt at <0.4). Cheapest quality lever:
+   stops downstream cycles burning on ambiguous specs. Audit +
+   retrofit for other agents rides item 7.
+2. **Finish UX with Storybook** — make the interaction-test phase
    the default UX gate (not screenshot-only loop).
-2. **Add version control** — per-project git ops baked into the
+3. **Add version control** — per-project git ops baked into the
    pipeline (commit per phase, branch per milestone, tag DONE).
-3. **Refactorer agent** — dedupe + move shared business logic to
+4. **Refactorer agent** — dedupe + move shared business logic to
    `shared/<lang>/` core libs.
-4. **Tests / debugging after refactoring** — catch refactor-induced
-   regressions automatically; also bake "full agent escalation on
-   smoke failure" into SmokePhase here.
-5. **Human documentation system** — agents write semantic docs per
+5. **Tests / debugging after refactoring** — catch refactor-induced
+   regressions automatically; also extend smoke-recovery (already
+   shipped one-shot in `29e5ea9`) to multi-tier escalation here.
+6. **Human documentation system** — agents write semantic docs per
    service (README, API reference, architecture, how-to-extend).
-6. **Detailed diagnostic + performance logging** — structured
-   per-call timing/tokens/cache-hits → `performance.json`.
-7. **Performance test on Claude** — 3-5 reference projects, baseline
+7. **Detailed diagnostic + performance logging** — structured
+   per-call timing/tokens/cache-hits → `performance.json`. Pipes
+   the confidence-signal retrofit (Architect, Planner, Coder,
+   Tester self-rating) onto the same instrumentation.
+8. **Performance test on Claude** — 3-5 reference projects, baseline
    established with $0 marginal cost.
-8. **Baseline on Gemini** — same projects, compare architecture
+9. **Baseline on Gemini** — same projects, compare architecture
    quality + cost vs Claude.
 
 Deferred (do NOT pull forward unless explicitly asked):
-- Angular skeleton Storybook variants (until item 1 proves React
+- Angular skeleton Storybook variants (until item 2 proves React
   loop end-to-end).
 - Production-mode Dockerfile variants (until dev-mode loop is
   stable).

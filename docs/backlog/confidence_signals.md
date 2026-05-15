@@ -80,18 +80,18 @@ Once enrich-confidence is load-bearing, the same shape generalizes:
 
 The unifying principle: **structured self-rating only earns its
 keep when the harness acts on it.** Today most ratings are
-descriptive telemetry. The roadmap item 6 (diagnostic logging) is
-the right place to systematize this — define a single
+descriptive telemetry. Roadmap item 7 (diagnostic + perf logging)
+is the right place to systematize this — define a single
 `AgentConfidence` shape, attach to every agent's output, drive
 universal harness behavior off it.
 
 ## Order
 
-1. **Now (this ticket)**: enrich-confidence load-bearing as the
-   reference implementation.
-2. **During roadmap item 6**: define the `AgentConfidence` shape,
+1. **Roadmap item 1 (this ticket)**: enrich-confidence load-bearing
+   as the reference implementation.
+2. **During roadmap item 7**: define the `AgentConfidence` shape,
    audit every agent, retrofit the missing ones.
-3. **During roadmap item 4 (test/debug)**: wire the universal
+3. **During roadmap item 5 (test/debug)**: wire the universal
    action policy (low → retry, very-low → halt) into `GatePolicy`.
 
 ## Related

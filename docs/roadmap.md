@@ -4,9 +4,39 @@ Locked in as of 2026-05-15 after the CRM v1 build surfaced enough
 gaps to warrant explicit sequencing. **Work the items in order** —
 each one's value compounds on the prior items.
 
-## The 8-item plan
+## The 9-item plan
 
-### 1. Finish UX with Storybook
+### 1. Confidence signals — load-bearing or drop the pretense
+
+QE's enrich prompt language says "confidence < 0.6 means Engineer
+should ask follow-up questions" but **nothing in code acts on the
+score**. Same for CodeReviewer.review.confidence (logged, not
+gating). Today only the UX vision score is load-bearing.
+
+Make `QualityEngineer.enrich.confidence` load-bearing as the
+reference impl, then audit + retrofit the rest. Three bands:
+
+- **≥ 0.6**: implement normally (current path)
+- **0.4-0.6**: one re-enrich pass with augmented prompt ("list your
+  ambiguities and either resolve them or write TODOs the Engineer
+  surfaces")
+- **< 0.4**: halt at a new `enrich_low_confidence` soft gate
+  (`--auto` pushes through with a warning)
+
+Full ticket: `docs/backlog/confidence_signals.md`. Includes the
+meta-pattern audit (CodeReviewer, Coder, Tester, Architect, Planner
+all need this shape eventually).
+
+**Why first:** every later item benefits when QE flags ambiguous
+milestones BEFORE 30 minutes of implement/repair burn through on a
+spec the model didn't trust to begin with. Cheapest possible
+quality lever.
+
+**Done when:** ambiguous milestones either get a re-enrich pass or
+halt for review. CodeReviewer + Coder confidence audits scheduled
+for item 7 (perf logging) to ride the same instrumentation.
+
+### 2. Finish UX with Storybook
 
 Get the React-Vite UX loop end-to-end on Storybook so the
 interaction-test phase (Ticket 3 of the UX backlog) becomes the
@@ -22,7 +52,7 @@ default UX gate, not the screenshot-only loop. Today we have:
 **Done when:** UX phase iterates the Storybook catalog, scores per
 primitive, dispatches Coder per primitive (not per route).
 
-### 2. Add version control
+### 3. Add version control
 
 Per-project git ops baked into the pipeline:
 - Initialize `git` in `~/bizniz_projects/<slug>/` on first run
@@ -32,10 +62,10 @@ Per-project git ops baked into the pipeline:
   prior work
 - Tag DONE state at each milestone boundary
 
-**Why first:** the refactorer (item 3) MUST run on a commit-tracked
-codebase or we can't safely roll back a bad refactor.
+**Why before refactorer:** the refactorer (item 4) MUST run on a
+commit-tracked codebase or we can't safely roll back a bad refactor.
 
-### 3. Refactorer agent — dedupe + move to shared core
+### 4. Refactorer agent — dedupe + move to shared core
 
 We have a v1 Refactorer (single Claude CLI session at the project
 root). It works minimum-viable but doesn't:
@@ -49,9 +79,9 @@ root). It works minimum-viable but doesn't:
 `shared/<lang>/` libraries, consumer services import them, tests
 pass, each extraction is its own commit.
 
-### 4. Tests / debugging after refactoring
+### 5. Tests / debugging after refactoring
 
-Refactors can break things. After (3) runs, drive a focused
+Refactors can break things. After (4) runs, drive a focused
 test+repair loop:
 - Run every service's test suite
 - On failure, dispatch the AgenticDebugger
@@ -60,7 +90,7 @@ test+repair loop:
 **Done when:** refactorer-induced regressions are caught + fixed
 automatically, not by humans noticing later.
 
-### 5. Human documentation system
+### 6. Human documentation system
 
 Agents write semantic documentation for the generated project:
 - README.md per service (what it does, how to run it)
@@ -71,7 +101,7 @@ Agents write semantic documentation for the generated project:
 **Why this order:** the docs need to describe the *post-refactor*
 shape, not the pre-refactor shape. Documenting twice is waste.
 
-### 6. Detailed diagnostic + performance logging
+### 7. Detailed diagnostic + performance logging
 
 Wire structured logging across every agent:
 - Per-call timing (already partial via cost tracker)
@@ -80,15 +110,18 @@ Wire structured logging across every agent:
 - Per-issue convergence path (which tier, which iter, why)
 - Repair sticky-log compaction stats
 - Cache hit rates (plan cache, route resolver, primitive probes)
+- **Confidence-signal audit + retrofit** for the agents that don't
+  self-rate yet (Architect, Planner, Coder, Tester) — same shape as
+  item 1 but extended across the pipeline.
 
 **Done when:** a single `bizniz_projects/<slug>/docs/runs/<job_id>/
 performance.json` answers "where did this build spend time/tokens
 and what could be cheaper."
 
-### 7. Performance test on Claude
+### 8. Performance test on Claude
 
 Build 3-5 reference projects (CRM, blog, e-commerce mini, ...) on
-Claude with the full instrumentation from (6). Establish baselines:
+Claude with the full instrumentation from (7). Establish baselines:
 - Wall clock per milestone
 - Token cost per service per milestone
 - Repair iterations needed
@@ -98,9 +131,9 @@ Claude with the full instrumentation from (6). Establish baselines:
 **Why on Claude first:** $0 marginal on Max plan lets us iterate
 without budget pressure during baseline-finding.
 
-### 8. Baseline on Gemini
+### 9. Baseline on Gemini
 
-Run the same reference projects on Gemini, compare against (7)'s
+Run the same reference projects on Gemini, compare against (8)'s
 Claude baselines:
 - Where does Gemini close the gap?
 - Where does it widen?
@@ -111,29 +144,34 @@ where to invest next.
 
 ## Order rationale
 
-- **1 first** because UX is the most user-visible quality bar — the
+- **1 first** because it's the cheapest quality lever — preventing
+  burnt cycles on ambiguous specs costs basically nothing to wire
+  and earns every downstream item more reliable inputs.
+- **2 next** because UX is the most user-visible quality bar — the
   thing buyers see — and Storybook is the right shape.
-- **2 → 3 → 4** is the refactor-safety stack. Can't do 3 without 2;
-  4 catches what 3 misses.
-- **5 after 3** so docs reflect the refactored shape, not the
+- **3 → 4 → 5** is the refactor-safety stack. Can't do 4 without 3;
+  5 catches what 4 misses.
+- **6 after 4** so docs reflect the refactored shape, not the
   pre-refactor sprawl.
-- **6 before 7** so the baseline data exists in structured form.
-- **7 before 8** so we have Claude numbers to compare Gemini against.
+- **7 before 8** so the baseline data exists in structured form.
+- **8 before 9** so we have Claude numbers to compare Gemini against.
 
 ## What's NOT in this plan (deferred)
 
 - Angular skeletons (skeleton-angular, teams, saas) get Storybook
-  scaffolding only AFTER item 1 proves the React loop end-to-end.
+  scaffolding only AFTER item 2 proves the React loop end-to-end.
 - Full escalation on smoke gate (replace hard-fail with cheap-tier
-  AgenticDebugger one-shot) — design decision logged for item 4's
-  test/debug pass.
+  AgenticDebugger one-shot) — ALREADY SHIPPED in commit `29e5ea9`
+  via `SmokeRecovery`. Future work: extend to multi-tier escalation
+  inside roadmap item 5 if one-shot isn't enough on real failures.
 - Production-mode Dockerfile variants (no `--reload`, Alembic
   migrations) — deferred until the dev-mode loop is stable.
 
 ## Feedback baked in this session
 
-  - On smoke failures, prefer full agent escalation (try to recover
-    the container) rather than hard-halt at the gate. Bake into
-    SmokePhase as part of item 4's test+debug work — the
-    AgenticDebugger should get a shot at fixing state drift before
-    the human takes over.
+- On smoke failures, prefer full agent escalation (try to recover
+  the container) rather than hard-halt at the gate. **Shipped
+  2026-05-15 (`29e5ea9`)** — one-shot `SmokeRecovery` agent runs
+  before hard-halt. Multi-tier escalation deferred to item 5.
+- Agent self-rated confidence fields should be load-bearing or
+  removed from prompts. **Now item 1** of this roadmap.
