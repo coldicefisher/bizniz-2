@@ -172,10 +172,20 @@ def main():
         log("docker compose up timed out after 180s")
         sys.exit(1)
 
-    # Wait for frontend(s) to be reachable on the host
+    # Wait for frontend(s) to be reachable on the host. Resolve the
+    # compose-mapped host port — ``fe.port`` is the container-internal
+    # port (5173 for Vite), but compose remaps to a free host port
+    # when there's a collision with another stack.
+    from bizniz.integration.contracts import _resolve_host_port
     from bizniz.integration.runner import _wait_http_ok
     for fe in frontends:
-        url = f"http://localhost:{fe.port}/"
+        try:
+            host_port = _resolve_host_port(compose_path, fe.name, fe.port)
+        except Exception as e:
+            log(f"frontend port resolve failed ({type(e).__name__}: {e}); "
+                f"falling back to container port {fe.port}")
+            host_port = fe.port
+        url = f"http://localhost:{host_port}/"
         log(f"Waiting for {url}...")
         ok = _wait_http_ok(url, deadline_s=120)
         if not ok:
@@ -249,6 +259,26 @@ def main():
                 auth_contract_path.read_text()
                 if auth_contract_path.exists() else None
             )
+            # Resolve the backend's host-side URL so the route resolver
+            # can probe the live API. Falls back to localhost:8000 if
+            # compose port lookup fails.
+            backend_url = None
+            backend_svc = next(
+                (s for s in architecture.services if s.service_type == "backend"),
+                None,
+            )
+            if backend_svc is not None:
+                try:
+                    from bizniz.integration.contracts import _resolve_host_port
+                    host_port = _resolve_host_port(
+                        compose_path, backend_svc.name, backend_svc.port,
+                    )
+                    backend_url = f"http://localhost:{host_port}"
+                except Exception as e:
+                    log(f"backend port resolve failed ({type(e).__name__}: {e}); "
+                        f"using default localhost:8000")
+                    backend_url = "http://localhost:8000"
+            log(f"backend_url for resolver: {backend_url}")
             r = designer.review_frontend(
                 service=frontend,
                 workspace=ws,
@@ -256,6 +286,7 @@ def main():
                 problem_statement=problem_statement,
                 milestone_scope=args.milestone_scope,
                 auth_contract=auth_contract,
+                backend_url=backend_url,
             )
             results.append(r)
     except KeyboardInterrupt:

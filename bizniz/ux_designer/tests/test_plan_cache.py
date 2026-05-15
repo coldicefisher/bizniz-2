@@ -10,6 +10,7 @@ from bizniz.ux_designer.plan_cache import (
     compute_input_mtime,
     is_cache_valid,
     load_cache,
+    managed_files_from_cache,
     save_cache,
 )
 
@@ -42,6 +43,72 @@ class TestComputeInputMtime:
         m = compute_input_mtime(tmp_path)
         # App.tsx was newer than package.json.
         assert m == (tmp_path / "src/App.tsx").stat().st_mtime
+
+    def test_exclude_relpaths_skips_managed_files(self, tmp_path):
+        # The global design step writes src/index.css after a quiet
+        # workspace baseline. Without exclude, the next run sees
+        # index.css as the newest input → cache miss. With exclude,
+        # the baseline (App.tsx) is the fingerprint.
+        _write(tmp_path / "src/App.tsx", "export default () => null;")
+        time.sleep(0.01)
+        _write(tmp_path / "src/index.css", "/* fresh from global_design */")
+        baseline = compute_input_mtime(tmp_path)
+        # Without exclusion → newer file wins.
+        assert baseline == (tmp_path / "src/index.css").stat().st_mtime
+        # With exclusion → App.tsx wins (older).
+        with_excl = compute_input_mtime(
+            tmp_path,
+            exclude_relpaths=["src/index.css"],
+        )
+        assert with_excl == (tmp_path / "src/App.tsx").stat().st_mtime
+
+    def test_exclude_skips_named_files(self, tmp_path):
+        # tailwind.config.ts is a named file, not a glob. The exclude
+        # set must work for both paths.
+        _write(tmp_path / "src/App.tsx", "export default () => null;")
+        time.sleep(0.01)
+        _write(tmp_path / "tailwind.config.ts", "export default {};")
+        with_excl = compute_input_mtime(
+            tmp_path,
+            exclude_relpaths=["tailwind.config.ts"],
+        )
+        # tailwind.config.ts was excluded; App.tsx remains.
+        assert with_excl == (tmp_path / "src/App.tsx").stat().st_mtime
+
+    def test_exclude_empty_iterable_same_as_no_exclude(self, tmp_path):
+        _write(tmp_path / "src/App.tsx", "export default () => null;")
+        assert (
+            compute_input_mtime(tmp_path)
+            == compute_input_mtime(tmp_path, exclude_relpaths=[])
+            == compute_input_mtime(tmp_path, exclude_relpaths=None)
+        )
+
+    def test_exclude_unknown_path_is_noop(self, tmp_path):
+        _write(tmp_path / "src/App.tsx", "export default () => null;")
+        m = compute_input_mtime(
+            tmp_path,
+            exclude_relpaths=["does/not/exist.tsx"],
+        )
+        assert m == (tmp_path / "src/App.tsx").stat().st_mtime
+
+
+class TestManagedFilesFromCache:
+    def test_empty_cache(self):
+        assert managed_files_from_cache(None) == []
+        assert managed_files_from_cache({}) == []
+
+    def test_returns_keys_from_files_written_mtimes(self):
+        cache = {
+            "files_written_mtimes": {
+                "src/index.css": 1.0,
+                "tailwind.config.ts": 2.0,
+            },
+        }
+        out = managed_files_from_cache(cache)
+        assert set(out) == {"src/index.css", "tailwind.config.ts"}
+
+    def test_missing_key_returns_empty(self):
+        assert managed_files_from_cache({"plan": {}}) == []
 
 
 class TestSaveLoad:

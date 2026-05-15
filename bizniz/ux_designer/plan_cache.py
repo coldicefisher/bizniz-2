@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 
 CACHE_FILENAME = "ux_plan.json"
@@ -65,13 +65,34 @@ _INPUT_NAMED_FILES = (
 )
 
 
-def compute_input_mtime(workspace_root: Path) -> Optional[float]:
+def compute_input_mtime(
+    workspace_root: Path,
+    *,
+    exclude_relpaths: Optional[Iterable[str]] = None,
+) -> Optional[float]:
     """Walk the watched globs + named files and return the latest
-    mtime. ``None`` if nothing matched."""
+    mtime. ``None`` if nothing matched.
+
+    ``exclude_relpaths`` lets the caller suppress files that are
+    *written by the global design step itself* (tailwind.config,
+    src/index.css, primitive components). Without exclusion, every
+    run's writes bump the input fingerprint and self-invalidate the
+    cache — which means the global design step re-runs every time
+    and the site's styling drifts run-to-run. Caller passes the
+    cached ``files_written_mtimes`` keyset so the second run on a
+    clean workspace can cache-hit.
+    """
     best: Optional[float] = None
+    exclude = set(exclude_relpaths or ())
 
     def _record(fp: Path) -> None:
         nonlocal best
+        try:
+            rel = str(fp.relative_to(workspace_root))
+        except ValueError:
+            rel = ""
+        if rel and rel in exclude:
+            return
         try:
             m = fp.stat().st_mtime
         except OSError:
@@ -84,10 +105,21 @@ def compute_input_mtime(workspace_root: Path) -> Optional[float]:
             if fp.is_file():
                 _record(fp)
     for rel in _INPUT_NAMED_FILES:
+        if rel in exclude:
+            continue
         fp = workspace_root / rel
         if fp.is_file():
             _record(fp)
     return best
+
+
+def managed_files_from_cache(cached: Optional[Dict]) -> List[str]:
+    """Helper: pull the global-design-managed file list from a loaded
+    cache payload. Returns ``[]`` when no cache or no prior writes."""
+    if not cached:
+        return []
+    fwm = cached.get("files_written_mtimes") or {}
+    return list(fwm.keys())
 
 
 def cache_path(workspace_root: Path) -> Path:

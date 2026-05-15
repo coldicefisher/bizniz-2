@@ -78,6 +78,37 @@ class TestComputeAppScore:
         assert s["total"] == 3
         assert s["mean"] == 7.0
 
+    def test_excludes_not_reviewable_views(self):
+        # Ticket 2 — capture mismatches mark a view not_reviewable.
+        # Those routes must NOT pollute APP SCORE even if they
+        # somehow have a score attached.
+        from bizniz.ux_designer.pro_ux_designer import ProUXDesigner
+        views = [
+            {"route": "/", "final_score": 8, "not_reviewable": False},
+            {"route": "/admin", "final_score": 9, "not_reviewable": True,
+             "capture_mismatch_reason": "captured /admin/users"},
+            {"route": "/dashboard", "final_score": 7},
+        ]
+        s = ProUXDesigner.compute_app_score(views, acceptable_score=7)
+        # /admin's 9 must not inflate the mean.
+        assert s["mean"] == 7.5
+        assert s["covered"] == 2
+        assert s["total"] == 3
+        assert s["passing"] == 2
+        assert s["not_reviewable_routes"] == ["/admin"]
+
+    def test_all_not_reviewable_yields_empty_score(self):
+        from bizniz.ux_designer.pro_ux_designer import ProUXDesigner
+        views = [
+            {"route": "/admin", "final_score": None, "not_reviewable": True},
+            {"route": "/recipes", "final_score": None, "not_reviewable": True},
+        ]
+        s = ProUXDesigner.compute_app_score(views, acceptable_score=7)
+        assert s["mean"] is None
+        assert s["covered"] == 0
+        assert set(s["not_reviewable_routes"]) == {"/admin", "/recipes"}
+        assert s["total"] == 2
+
 
 class TestBucketShotsByRoute:
     def test_groups_by_requested_route(self, tmp_path):

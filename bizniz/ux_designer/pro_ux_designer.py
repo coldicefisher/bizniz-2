@@ -152,8 +152,17 @@ class ProUXDesigner(ClaudeUXDesigner):
         from bizniz.ux_designer import plan_cache
         from pathlib import Path as _Path
         ws_root_path = _Path(workspace.root)
-        cur_input_mtime = plan_cache.compute_input_mtime(ws_root_path)
+        # Load the prior cache first so we can exclude global-design's
+        # own outputs from the fingerprint — otherwise the step that
+        # writes 40 src/ files always self-invalidates the cache on
+        # the next run, causing the site's styling to subtly drift
+        # every invocation. See ticket
+        # docs/backlog/ux_followups_2026-05-14.md (Ticket 1).
         cached_payload = plan_cache.load_cache(ws_root_path)
+        managed = plan_cache.managed_files_from_cache(cached_payload)
+        cur_input_mtime = plan_cache.compute_input_mtime(
+            ws_root_path, exclude_relpaths=managed,
+        )
         plan = None
         global_fix = None
         if cached_payload is not None:
@@ -210,12 +219,20 @@ class ProUXDesigner(ClaudeUXDesigner):
             self._record_timing("global_design", time.time() - _t0)
             # Save the cache only when BOTH phases ran fresh. If we
             # came in with a hit, the cache is already current.
+            # ``input_mtime`` here excludes the files global_design
+            # just wrote — same logic as the cache-check above so
+            # next run can compare apples-to-apples.
             try:
+                fresh_managed = list(
+                    (global_fix or {}).get("files_written") or []
+                )
                 plan_cache.save_cache(
                     ws_root_path,
                     plan=plan,
                     global_fix_result=global_fix,
-                    input_mtime=plan_cache.compute_input_mtime(ws_root_path),
+                    input_mtime=plan_cache.compute_input_mtime(
+                        ws_root_path, exclude_relpaths=fresh_managed,
+                    ),
                 )
             except Exception as e:
                 _log(
@@ -388,6 +405,52 @@ class ProUXDesigner(ClaudeUXDesigner):
         from datetime import datetime as _dt
         current_globals_mtime = max_global_mtime(_Path(workspace.root))
 
+        # ── Dynamic-route resolution ─────────────────────────────────
+        # For every dynamic route (e.g. /recipes/:id), ask the resolver
+        # agent for a concrete URL (e.g. /recipes/abc-123) so the
+        # Playwright script can navigate directly instead of inventing
+        # ids. Cached in .bizniz/ux_resolved_routes.json + validated
+        # via HTTP probe each run. See route_resolver.py.
+        self._resolved_url_by_template: Dict[str, str] = {}
+        if discovered:
+            dynamic_specs = [r for r in discovered if r.is_dynamic]
+            if dynamic_specs:
+                from bizniz.ux_designer.route_resolver import (
+                    resolve_dynamic_routes,
+                )
+                openapi = self._find_openapi(_Path(workspace.root))
+                _t0 = time.time()
+                try:
+                    resolved = resolve_dynamic_routes(
+                        _Path(workspace.root),
+                        discovered,
+                        backend_url=backend_url,
+                        openapi_path=openapi,
+                        auth_contract=auth_contract,
+                        on_status=self._on_status,
+                    )
+                    self._resolved_url_by_template = {
+                        t: r.concrete_url
+                        for t, r in resolved.items()
+                        if r.concrete_url
+                    }
+                    self._record_timing("route_resolve", time.time() - _t0)
+                    _log(
+                        self._on_status,
+                        f"ProUXDesigner: resolved "
+                        f"{len(self._resolved_url_by_template)}/"
+                        f"{len(dynamic_specs)} dynamic route(s) — "
+                        f"{', '.join(f'{t}→{u}' for t, u in list(self._resolved_url_by_template.items())[:3])}"
+                    )
+                except Exception as e:
+                    _log(
+                        self._on_status,
+                        f"ProUXDesigner: route_resolver raised "
+                        f"{type(e).__name__}: {e} — falling back to "
+                        f"in-script seeding"
+                    )
+                    self._resolved_url_by_template = {}
+
         # ── Pre-capture optimization ─────────────────────────────────
         # Generate ONE multi-route Playwright script + run the sidecar
         # ONCE. Per-view iter 1 reads from these cached PNGs; iter 2+
@@ -415,12 +478,12 @@ class ProUXDesigner(ClaudeUXDesigner):
                     compose_path=compose_path,
                     problem_statement=problem_statement,
                     milestone_scope=milestone_scope,
-                    routes=all_routes,
+                    routes=self._translate_to_concrete(all_routes),
                     auth_contract=auth_contract,
                     backend_url=backend_url,
                 )
-                self._precaptured_by_route = self._bucket_shots_by_route(
-                    bulk_shots,
+                self._precaptured_by_route = self._rekey_to_templates(
+                    self._bucket_shots_by_route(bulk_shots),
                 )
                 covered = sum(
                     1 for r in all_routes
@@ -503,6 +566,11 @@ class ProUXDesigner(ClaudeUXDesigner):
                 "final_score": None,
                 "stopped_reason": None,
                 "cached": False,
+                # Set to True if ALL iterations had capture mismatches
+                # (Ticket 2). The view is excluded from APP SCORE and
+                # not persisted to review_store.
+                "not_reviewable": False,
+                "capture_mismatch_reason": None,
             }
             # Adaptive budget: if this route hit the iter cap last
             # time without converging, grant +2 extra iterations
@@ -544,6 +612,16 @@ class ProUXDesigner(ClaudeUXDesigner):
                         "stop_reason", "stop_recommendation",
                     )
                     break
+            # A view is not_reviewable when every iteration had a
+            # capture mismatch (Ticket 2). One good capture is enough
+            # to score; only "no good captures" knocks the view out
+            # of the APP SCORE aggregation.
+            iters = view_result["iterations"]
+            if iters and all(it.get("not_reviewable") for it in iters):
+                view_result["not_reviewable"] = True
+                view_result["capture_mismatch_reason"] = iters[-1].get(
+                    "capture_mismatch_reason"
+                )
             else:
                 view_result["stopped_reason"] = "iter cap reached"
             result["views"].append(view_result)
@@ -556,7 +634,15 @@ class ProUXDesigner(ClaudeUXDesigner):
             # Persist the review result so the next run can short-
             # circuit clean routes. Iterations count = how many
             # screenshot→fix cycles were needed to converge.
-            if self._review_store is not None and self._project_slug:
+            # Skip the upsert when the view was not_reviewable
+            # (Ticket 2): caching a "passing 8/10" for /admin when
+            # the screenshot was actually /admin/users would let the
+            # next run skip /admin without ever seeing the real page.
+            if (
+                self._review_store is not None
+                and self._project_slug
+                and not view_result.get("not_reviewable")
+            ):
                 final_score = view_result["final_score"]
                 iters_run = len(view_result["iterations"])
                 try:
@@ -609,6 +695,7 @@ class ProUXDesigner(ClaudeUXDesigner):
         # Headline app score.
         app_score = self.compute_app_score(views, self._acceptable_score)
         result["app_score"] = app_score
+        not_reviewable = app_score.get("not_reviewable_routes") or []
         if app_score.get("mean") is not None:
             failing_summary = (
                 f" — laggards: {', '.join(app_score['failing'][:3])}"
@@ -621,6 +708,24 @@ class ProUXDesigner(ClaudeUXDesigner):
                 f"(min={app_score['min']} at "
                 f"{app_score['min_route']}){failing_summary}"
             )
+        if not_reviewable:
+            # Surface separately — these aren't passing or failing,
+            # they're "couldn't see the right page". Operator needs
+            # to know they exist so the underlying redirect/auth
+            # issue can be addressed at the engineering layer.
+            _log(
+                self._on_status,
+                f"ProUXDesigner: {len(not_reviewable)} route(s) "
+                f"not_reviewable (capture mismatch — not in APP SCORE): "
+                f"{', '.join(not_reviewable[:5])}"
+            )
+            for v in views:
+                if v.get("not_reviewable"):
+                    _log(
+                        self._on_status,
+                        f"  not_reviewable: {v.get('route')} — "
+                        f"{v.get('capture_mismatch_reason', '')[:200]}"
+                    )
 
         # Append the run summary to the per-project log so the next
         # invocation can show the trend.
@@ -667,6 +772,11 @@ class ProUXDesigner(ClaudeUXDesigner):
     def compute_app_score(views: List[Dict], acceptable_score: int = 7) -> Dict:
         """Roll the per-view scores up to an app-level metric.
 
+        Excludes views marked ``not_reviewable`` (Ticket 2 — capture
+        mismatches like ``/admin`` → ``/admin/users``). Those routes
+        are surfaced via ``not_reviewable_routes`` so the operator
+        can see them without them polluting the score.
+
         Returns a dict with:
           mean: float | None — average of all final_score values
           min:  int   | None — lowest final_score across views
@@ -676,11 +786,17 @@ class ProUXDesigner(ClaudeUXDesigner):
           failing: List[str] — routes that didn't meet the bar (sorted
                                by score ascending — laggards first)
           covered: int — number of views with a non-None final_score
-          total:   int — total number of views
+          not_reviewable_routes: List[str] — routes skipped due to
+                                             capture mismatch
+          total:   int — total number of views (incl. not_reviewable)
         """
         scores = []
         scored_views = []
+        not_reviewable_routes = []
         for v in views:
+            if v.get("not_reviewable"):
+                not_reviewable_routes.append(v.get("route", "?"))
+                continue
             s = v.get("final_score")
             if s is None:
                 continue
@@ -690,6 +806,7 @@ class ProUXDesigner(ClaudeUXDesigner):
             return {
                 "mean": None, "min": None, "min_route": None,
                 "passing": 0, "failing": [], "covered": 0,
+                "not_reviewable_routes": not_reviewable_routes,
                 "total": len(views),
             }
         mean = sum(scores) / len(scores)
@@ -706,6 +823,7 @@ class ProUXDesigner(ClaudeUXDesigner):
             "passing": passing,
             "failing": failing,
             "covered": len(scores),
+            "not_reviewable_routes": not_reviewable_routes,
             "total": len(views),
         }
 
@@ -894,12 +1012,34 @@ class ProUXDesigner(ClaudeUXDesigner):
             route=route, screenshots=screenshots,
             sibling_routes=getattr(self, "_sibling_routes", None),
         )
+        # Short-circuit on capture mismatch (Ticket 2). When Playwright
+        # landed on a different URL than we asked for (admin index
+        # redirected to admin/users; recipes redirected to dashboard;
+        # protected route bounced to login; dynamic sibling collision),
+        # the eval would score the WRONG page — inflating APP SCORE and
+        # caching a misleading record. Mark the view ``not_reviewable``,
+        # skip eval+fix, save tokens, and let the harness diagnose the
+        # redirect rather than chase phantom fixes.
         if not capture_ok:
             _log(
                 self._on_status,
                 f"ProUXDesigner: {view_label} iter {iteration} — "
-                f"capture mismatch: {capture_reason}"
+                f"capture mismatch: {capture_reason}; skipping eval+fix "
+                f"(view marked not_reviewable)"
             )
+            return {
+                "iteration": iteration,
+                "screenshots": [str(s["path"]) for s in screenshots],
+                "evaluation": None,
+                "fix_result": None,
+                "initial_score": None,
+                "final_score": None,
+                "captured_correctly": False,
+                "capture_mismatch_reason": capture_reason,
+                "not_reviewable": True,
+                "stop": True,
+                "stop_reason": f"capture mismatch: {capture_reason}",
+            }
 
         _log(
             self._on_status,
@@ -932,8 +1072,9 @@ class ProUXDesigner(ClaudeUXDesigner):
             "fix_result": None,
             "initial_score": score,
             "final_score": score,
-            "captured_correctly": capture_ok,
-            "capture_mismatch_reason": capture_reason if not capture_ok else None,
+            "captured_correctly": True,
+            "capture_mismatch_reason": None,
+            "not_reviewable": False,
             "stop": False,
             "stop_reason": None,
         }
@@ -949,16 +1090,6 @@ class ProUXDesigner(ClaudeUXDesigner):
         if not issues:
             out["stop"] = True
             out["stop_reason"] = "no actionable issues despite low score"
-            return out
-
-        # Don't dispatch a fix when we know the capture was wrong —
-        # the eval was scoring the wrong page and any "fixes" would
-        # be misdirected (this was the dominant failure mode on
-        # /recipes/:id: captured /recipes/new, fixed the wrong file,
-        # next iteration captured /recipes/new again, etc.).
-        if not capture_ok:
-            out["stop"] = True
-            out["stop_reason"] = f"capture mismatch: {capture_reason}"
             return out
 
         # Apply fixes through Coder (factory path same as base class).
@@ -1055,6 +1186,48 @@ class ProUXDesigner(ClaudeUXDesigner):
         with_params = escaped.replace(re.escape(SENTINEL), r"[^/]+")
         return re.compile(f"^{with_params}/?$")
 
+    def _translate_to_concrete(self, routes: List[str]) -> List[str]:
+        """Substitute dynamic templates with the resolver's concrete
+        URLs. Returns the input list unchanged when no resolutions
+        are known (e.g. resolver fell back / disabled). The mapping
+        is ``_resolved_url_by_template`` set in review_frontend."""
+        mapping = getattr(self, "_resolved_url_by_template", {}) or {}
+        if not mapping:
+            return list(routes)
+        return [mapping.get(r, r) for r in routes]
+
+    def _rekey_to_templates(
+        self, buckets: Dict[str, List[Dict]],
+    ) -> Dict[str, List[Dict]]:
+        """Reverse the concrete-URL substitution applied at capture
+        time. Playwright writes ``requested_route`` = whatever we
+        passed in (e.g. ``/recipes/abc-123``); the per-view loop and
+        review cache key by template (``/recipes/:id``). Walk every
+        bucket and re-key the dynamic ones back to their template.
+        Static routes pass through unchanged."""
+        mapping = getattr(self, "_resolved_url_by_template", {}) or {}
+        if not mapping or not buckets:
+            return buckets
+        # Build inverse: concrete_url → template.
+        inverse = {v: k for k, v in mapping.items()}
+        out: Dict[str, List[Dict]] = {}
+        for key, shots in buckets.items():
+            new_key = inverse.get(key, key)
+            out.setdefault(new_key, []).extend(shots)
+        return out
+
+    def _find_openapi(self, workspace_root: Path) -> Optional[Path]:
+        """Best-effort OpenAPI discovery. The integration phase writes
+        ``<project>/contracts/<service>.openapi.json``. From a frontend
+        workspace, that's ``workspace.parent/contracts/``. Returns the
+        first match, or None."""
+        project_root = workspace_root.parent
+        contracts_dir = project_root / "contracts"
+        if not contracts_dir.is_dir():
+            return None
+        candidates = sorted(contracts_dir.glob("*.openapi.json"))
+        return candidates[0] if candidates else None
+
     def _bucket_shots_by_route(
         self, shots: List[Dict],
     ) -> Dict[str, List[Dict]]:
@@ -1108,13 +1281,14 @@ class ProUXDesigner(ClaudeUXDesigner):
                 f"{view_label} iter1: using {len(shots)} pre-captured shot(s)"
             )
         else:
+            concrete = self._translate_to_concrete([route])
             all_shots = self._take_screenshots(
                 service=service,
                 workspace=workspace,
                 compose_path=compose_path,
                 problem_statement=problem_statement,
                 milestone_scope=milestone_scope,
-                routes=[route],
+                routes=concrete,
                 auth_contract=auth_contract,
                 backend_url=backend_url,
             )
@@ -1123,11 +1297,12 @@ class ProUXDesigner(ClaudeUXDesigner):
             # workspace and emits tests for them too. When we fall
             # through to per-route capture, ``all_shots`` is the
             # full grab-bag (10+ PNGs from a 1-route request). Bucket
-            # by ``requested_route`` from each shot's meta and keep
-            # only the ones for the route we actually asked about.
-            # Without this filter, _verify_capture trips on the first
-            # off-route shot (recipes_id captured admin-users in v2.7).
-            buckets = self._bucket_shots_by_route(all_shots)
+            # by ``requested_route`` from each shot's meta, re-map
+            # concrete URLs back to templates, and keep only the ones
+            # for the route we actually asked about.
+            buckets = self._rekey_to_templates(
+                self._bucket_shots_by_route(all_shots),
+            )
             shots = buckets.get(route, [])
             self._log_debug(
                 f"{view_label} iter{iteration}: per-route capture "
@@ -1319,13 +1494,46 @@ class ProUXDesigner(ClaudeUXDesigner):
         self,
         service: ServiceDefinition,
         compose_path: str,
+        max_attempts: int = 3,
+        backoff_seconds: tuple = (0.0, 3.0, 7.0),
     ) -> Dict:
-        """Fetch the rendered HTML from the frontend dev server and
-        check whether linked stylesheets actually contain Tailwind
-        output. Returns ``{ok: bool, detail: str, css_urls: [...]}``.
-        Best-effort and resilient to docker-network DNS quirks — when
-        we can't probe at all, returns ``ok=False`` with a reason so
-        the caller can decide whether to push on or stop."""
+        """Verify Tailwind CSS is being served by the dev container.
+
+        Retries with backoff to absorb Vite/PostCSS warm-up races
+        after container restart. v2.12 surfaced the failure mode:
+        cold-cache run probed too early, got CSS without Tailwind
+        markers, dispatched a 120s no-op Coder repair — Vite had
+        actually finished building 5s later. The single-shot probe
+        was racing the dev server's first-build cycle.
+
+        Returns ``{ok, detail, css_urls, attempts}`` — same shape as
+        the original single-shot probe plus ``attempts`` so the
+        caller can see how long it took to settle.
+        """
+        last_result = None
+        for attempt in range(max_attempts):
+            wait = backoff_seconds[attempt] if attempt < len(backoff_seconds) else backoff_seconds[-1]
+            if wait > 0:
+                time.sleep(wait)
+            result = self._probe_tailwind_once(service, compose_path)
+            result["attempts"] = attempt + 1
+            last_result = result
+            if result.get("ok"):
+                return result
+        return last_result or {
+            "ok": False, "detail": "no probe attempts ran",
+            "css_urls": [], "attempts": 0,
+        }
+
+    def _probe_tailwind_once(
+        self,
+        service: ServiceDefinition,
+        compose_path: str,
+    ) -> Dict:
+        """Single-shot tailwind-serving probe. Fetches the rendered
+        HTML, follows linked stylesheets + inline ``<style>`` blocks,
+        greps for ``--tw-*`` markers. See ``_verify_tailwind_serving``
+        for the retry-with-backoff wrapper."""
         import urllib.request
         import urllib.error
         try:

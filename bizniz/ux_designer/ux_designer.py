@@ -192,11 +192,15 @@ class UXDesigner:
         """
         # Generate the screenshot script via AI
         routes_section = ""
+        has_templates = False  # any route with a ``:placeholder``
         if routes:
             routes_section = "Known routes:\n" + "\n".join(f"  - {r}" for r in routes)
+            has_templates = any(":" in r for r in routes)
         else:
             # Try to discover routes from workspace files
             routes_section = self._discover_routes(workspace, service)
+            # Conservative: assume templates may be present.
+            has_templates = True
 
         if auth_contract:
             auth_contract_section = (
@@ -211,6 +215,21 @@ class UXDesigner:
             )
             login_source_section = "(no auth contract — skip auth setup entirely)"
 
+        # Choose dynamic-routes guidance based on whether the caller
+        # has pre-resolved every template. ProUXDesigner's resolver
+        # passes concrete URLs, in which case we explicitly tell the
+        # model "do not seed, just navigate." When templates leak
+        # through (resolver disabled, fallback path), we keep the
+        # seed-via-API instructions.
+        from bizniz.ux_designer.prompts import (
+            DYNAMIC_ROUTES_PRERESOLVED,
+            DYNAMIC_ROUTES_TEMPLATES,
+        )
+        dynamic_routes_section = (
+            DYNAMIC_ROUTES_TEMPLATES if has_templates
+            else DYNAMIC_ROUTES_PRERESOLVED
+        )
+
         script_prompt = SCREENSHOT_SCRIPT_PROMPT.format(
             framework=service.framework,
             problem_statement=problem_statement,
@@ -218,6 +237,7 @@ class UXDesigner:
             routes_section=routes_section,
             auth_contract_section=auth_contract_section,
             login_source_section=login_source_section,
+            dynamic_routes_section=dynamic_routes_section,
         )
 
         script_text, _, _ = self._vision.get_text(
