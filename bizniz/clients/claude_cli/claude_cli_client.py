@@ -24,11 +24,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
 import uuid
+from datetime import datetime, timedelta
 from typing import Any, Callable, List, Optional, Tuple
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except ImportError:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 
 from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.clients.chatgpt.messages import Message, MessageList
@@ -36,6 +42,63 @@ from bizniz.clients.chatgpt.types.response_format import ResponseFormat
 
 
 _DEFAULT_TIMEOUT_S = 1800.0
+
+# Max wall-clock wait when sleeping for a Max-plan usage-cap reset.
+# 5-hour windows are typical; cap at 6h so a bug in time parsing
+# can't sleep forever. Overridable via env.
+_DEFAULT_USAGE_CAP_MAX_WAIT_S = 6 * 60 * 60
+
+# Matches the reset-time string the CLI emits on a Max-plan usage cap:
+#   "You've hit your limit · resets 11:20am (America/Los_Angeles)"
+#   "resets 3:05pm (UTC)"
+_RESET_RE = re.compile(
+    r"resets?\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>[ap]m)"
+    r"(?:\s*\((?P<tz>[A-Za-z][A-Za-z0-9_/+\-]*)\))?",
+    re.IGNORECASE,
+)
+
+
+def _parse_usage_cap_reset(body: str) -> Optional[float]:
+    """Parse the reset-time string from a Max-plan 429 body and return
+    seconds-until-reset (with a 30s buffer past the actual reset).
+
+    Returns None for 429s that don't include a parseable reset time
+    (i.e. transient server-side throttles — caller falls back to the
+    short backoff schedule).
+
+    Past-but-recent reset times (within 60s) are treated as "now" so
+    a slightly-late message doesn't accidentally schedule a 24-hour
+    wait. Older-than-60s past times assume the same time tomorrow.
+    """
+    if not body:
+        return None
+    m = _RESET_RE.search(body)
+    if not m:
+        return None
+    hour = int(m.group("hour"))
+    minute = int(m.group("minute"))
+    ampm = m.group("ampm").lower()
+    tz_name = m.group("tz") or ""
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    tz = None
+    if tz_name and ZoneInfo is not None:
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = None
+    now = datetime.now(tz) if tz else datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    delta = (target - now).total_seconds()
+    if delta < -60:
+        # Reset already happened > 1 min ago — must mean tomorrow.
+        target = target + timedelta(days=1)
+        delta = (target - now).total_seconds()
+    if delta < 0:
+        delta = 0  # very recent reset; treat as "now"
+    return delta + 30.0  # 30s buffer past the published reset
 
 
 class ClaudeCliClientError(Exception):
@@ -64,12 +127,23 @@ class ClaudeCliClient(BaseAIClient):
         additional_args: Optional[List[str]] = None,
         timeout_s: float = _DEFAULT_TIMEOUT_S,
         on_message_callback: Optional[Callable[[Message], None]] = None,
+        fallback_model: Optional[str] = None,
     ):
         self._model_name = model_name
         self._command = command
         self._additional_args = list(additional_args or [])
         self._timeout_s = timeout_s
         self._on_message_callback = on_message_callback
+        # When the primary model is overloaded, the CLI's
+        # --fallback-model auto-switches to this for the duration of
+        # the call. Useful during Max-plan usage-cap windows: rather
+        # than waiting 30+ min for the window to roll, drop to Haiku
+        # and keep moving. Env var override:
+        # ``BIZNIZ_CLAUDE_FALLBACK_MODEL``.
+        self._fallback_model = (
+            fallback_model
+            or os.environ.get("BIZNIZ_CLAUDE_FALLBACK_MODEL")
+        )
         # Set by ``_client_for`` so the cost tracker can tag this
         # client's calls with the originating agent.
         self._caller_agent: str = "unknown"
@@ -159,6 +233,14 @@ class ClaudeCliClient(BaseAIClient):
         cmd = [
             self._command, "--print",
             "--output-format=json",
+        ]
+        if self._fallback_model:
+            # ``--fallback-model`` auto-switches to this model when the
+            # default is overloaded. The user opts into accepting
+            # potentially-degraded output to keep the job moving when
+            # the primary is rate-limited.
+            cmd.extend(["--fallback-model", self._fallback_model])
+        cmd.extend([
             # Single-call agents are prompt-in, text-out by design — no
             # tool use. Without disabling tools, recipe_box's
             # WebUITester emitted a 700-byte narrative ("Wrote 9
@@ -173,7 +255,7 @@ class ClaudeCliClient(BaseAIClient):
             # produced narrative now returns clean JS source.
             # Tool-using callers use ``ClaudeCliCoder``.
             "--disallowedTools", "Edit Write Bash Read Glob Grep",
-        ]
+        ])
         if system_prompt:
             cmd.extend(["--append-system-prompt", system_prompt])
         cmd.extend(self._additional_args)
@@ -188,11 +270,24 @@ class ClaudeCliClient(BaseAIClient):
         # is the most common transient and the retry budget caller
         # uses (3 attempts in call_with_retry) burns through it in
         # 5 seconds without this.
+        #
+        # Max-plan USAGE-CAP 429s (body contains "resets HH:MMam") are
+        # handled separately: we parse the reset time and sleep until
+        # then (capped by BIZNIZ_CLAUDE_USAGE_CAP_MAX_WAIT_S or the
+        # 6h default). That makes long-running builds survive a
+        # Max-window roll without crashing the whole pipeline.
         backoff_schedule = [10.0, 30.0, 60.0]
+        max_usage_wait = float(
+            os.environ.get(
+                "BIZNIZ_CLAUDE_USAGE_CAP_MAX_WAIT_S",
+                str(_DEFAULT_USAGE_CAP_MAX_WAIT_S),
+            )
+        )
         t0 = time.time()
         proc = None
         last_429_body = ""
-        for attempt_idx in range(len(backoff_schedule) + 1):
+        transient_attempt = 0  # only incremented on transient 429s
+        while True:
             try:
                 proc = subprocess.run(
                     cmd,
@@ -228,14 +323,49 @@ class ClaudeCliClient(BaseAIClient):
 
             if not is_429:
                 break  # Either success or a non-retryable error.
-            if attempt_idx >= len(backoff_schedule):
-                # Exhausted retries.
+
+            # Usage-cap path: body has a parseable "resets HH:MMam"
+            # string → sleep until then (capped) and retry indefinitely
+            # (the work isn't a transient blip; it's a wall-clock wait).
+            usage_cap_wait = _parse_usage_cap_reset(last_429_body)
+            if usage_cap_wait is not None:
+                actual_wait = min(usage_cap_wait, max_usage_wait)
+                import sys as _sys
+                print(
+                    f"  [ClaudeCliClient] Max-plan usage cap hit, "
+                    f"sleeping {actual_wait:.0f}s "
+                    f"({actual_wait/60:.1f} min) until reset window "
+                    f"rolls — {last_429_body[:120]}",
+                    file=_sys.stderr, flush=True,
+                )
+                # Long sleeps log progress every 5 min so the user
+                # sees the process is alive.
+                slept = 0.0
+                while slept < actual_wait:
+                    chunk = min(300.0, actual_wait - slept)
+                    time.sleep(chunk)
+                    slept += chunk
+                    if slept < actual_wait:
+                        remaining = actual_wait - slept
+                        print(
+                            f"  [ClaudeCliClient] still waiting for "
+                            f"usage-cap reset — {remaining/60:.1f} min "
+                            f"to go...",
+                            file=_sys.stderr, flush=True,
+                        )
+                # Usage-cap retries are unbounded — keep going until
+                # we get a real answer. Reset the transient-attempt
+                # counter so the small backoff schedule isn't burned.
+                continue
+
+            if transient_attempt >= len(backoff_schedule):
+                # Exhausted transient retries.
                 raise ClaudeCliClientError(
                     f"claude --print rate-limited (429) after "
                     f"{len(backoff_schedule) + 1} attempts: "
                     f"{last_429_body}"
                 )
-            wait_s = backoff_schedule[attempt_idx]
+            wait_s = backoff_schedule[transient_attempt]
             # Best-effort status log so the user sees what's happening.
             try:
                 from bizniz.cost import get_tracker as _gt
@@ -244,12 +374,13 @@ class ClaudeCliClient(BaseAIClient):
                 pass
             import sys as _sys
             print(
-                f"  [ClaudeCliClient] 429 rate-limit hit, "
+                f"  [ClaudeCliClient] transient 429 (no reset time), "
                 f"backing off {wait_s:.0f}s before retry "
-                f"({attempt_idx + 1}/{len(backoff_schedule)})...",
+                f"({transient_attempt + 1}/{len(backoff_schedule)})...",
                 file=_sys.stderr, flush=True,
             )
             time.sleep(wait_s)
+            transient_attempt += 1
 
         if proc.returncode != 0:
             raise ClaudeCliClientError(

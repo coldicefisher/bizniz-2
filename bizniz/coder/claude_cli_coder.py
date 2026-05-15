@@ -109,6 +109,7 @@ class ClaudeCliCoder:
         model_name: str = "claude-cli",
         command: str = "claude",
         additional_args: Optional[List[str]] = None,
+        fallback_model: Optional[str] = None,
     ):
         self._workspace = workspace
         self._compose_path = compose_path
@@ -121,6 +122,14 @@ class ClaudeCliCoder:
         self._model_name = model_name
         self._command = command
         self._additional_args = list(additional_args or [])
+        # When the primary model is overloaded, CLI auto-switches to
+        # this for the call. Trades quality for "the build keeps
+        # moving" during Max-plan usage caps. Env override:
+        # ``BIZNIZ_CLAUDE_FALLBACK_MODEL``.
+        self._fallback_model = (
+            fallback_model
+            or os.environ.get("BIZNIZ_CLAUDE_FALLBACK_MODEL")
+        )
 
         if shutil.which(self._command) is None:
             raise CoderError(
@@ -188,7 +197,10 @@ class ClaudeCliCoder:
             "--allowed-tools", " ".join(_ALLOWED_TOOLS),
             "--add-dir", str(ws_root),
             "--mcp-config", str(mcp_config_path),
-        ] + self._additional_args
+        ]
+        if self._fallback_model:
+            cmd.extend(["--fallback-model", self._fallback_model])
+        cmd.extend(self._additional_args)
 
         # Pass project context to the MCP server via env so its tools
         # can find the DB + run state without parsing args.
