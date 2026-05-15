@@ -38,6 +38,7 @@ from bizniz.coder.agent import Coder
 from bizniz.driver.gates import GatePolicy
 from bizniz.driver.integration_phase import IntegrationPhase
 from bizniz.driver.smoke_phase import SmokePhase
+from bizniz.driver.smoke_recovery import SmokeRecovery
 from bizniz.driver.ux_phase import UXPhase
 from bizniz.driver.refactor_phase import RefactorPhase
 from bizniz.driver.milestone_code_dispatcher import MilestoneCodeDispatcher
@@ -445,6 +446,21 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
 
     smoke_phase = SmokePhase(on_status=on_status)
 
+    # Smoke recovery — one-shot Claude CLI agent that tries to fix
+    # smoke 5xx failures (stale process, missing migration, etc.)
+    # before the pipeline hard-halts. Only available when claude is
+    # on PATH; otherwise the smoke gate halts as before.
+    import shutil as _shutil_smoke
+    smoke_recovery = (
+        SmokeRecovery(
+            compose_path=compose_path,
+            project_root=Path(project_root),
+            on_status=on_status,
+        )
+        if _shutil_smoke.which("claude") is not None
+        else None
+    )
+
     # UXPhase factory: per-frontend, builds a UX designer.
     #
     # Picks the implementation by binary availability:
@@ -567,6 +583,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         code_reviewer=cr,
         integration_phase=integration_phase,
         smoke_phase=smoke_phase,
+        smoke_recovery=smoke_recovery,
         gates=gates,
         workspace_for_service=workspace_for_service,
         primary_workspace=primary_workspace,

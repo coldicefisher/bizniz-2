@@ -1,0 +1,139 @@
+# Bizniz Roadmap — 2026-05-15 onward
+
+Locked in as of 2026-05-15 after the CRM v1 build surfaced enough
+gaps to warrant explicit sequencing. **Work the items in order** —
+each one's value compounds on the prior items.
+
+## The 8-item plan
+
+### 1. Finish UX with Storybook
+
+Get the React-Vite UX loop end-to-end on Storybook so the
+interaction-test phase (Ticket 3 of the UX backlog) becomes the
+default UX gate, not the screenshot-only loop. Today we have:
+
+- ✅ Storybook scaffolding in `bizniz-skeleton-react`
+- ✅ Engineer prompt requires `.stories.tsx` per primitive
+- ✅ `v2_build` routes UX through `ProUXDesigner` (not legacy)
+- ⏳ ProUXDesigner consumes stories — currently it still
+  screenshots routes, not stories
+- ⏳ Angular skeleton variants (skeleton-angular, teams, saas)
+
+**Done when:** UX phase iterates the Storybook catalog, scores per
+primitive, dispatches Coder per primitive (not per route).
+
+### 2. Add version control
+
+Per-project git ops baked into the pipeline:
+- Initialize `git` in `~/bizniz_projects/<slug>/` on first run
+- Commit per phase (planner → architect → provisioner → per
+  milestone → per repair iter → integration → UX)
+- Branch per milestone so a failure is reversible without losing
+  prior work
+- Tag DONE state at each milestone boundary
+
+**Why first:** the refactorer (item 3) MUST run on a commit-tracked
+codebase or we can't safely roll back a bad refactor.
+
+### 3. Refactorer agent — dedupe + move to shared core
+
+We have a v1 Refactorer (single Claude CLI session at the project
+root). It works minimum-viable but doesn't:
+- Move API code to shared core libraries when business logic
+  duplicates across services
+- Detect cross-service abstraction opportunities
+- Coordinate with version control to commit each extraction
+  separately
+
+**Done when:** a multi-service project's business logic lives in
+`shared/<lang>/` libraries, consumer services import them, tests
+pass, each extraction is its own commit.
+
+### 4. Tests / debugging after refactoring
+
+Refactors can break things. After (3) runs, drive a focused
+test+repair loop:
+- Run every service's test suite
+- On failure, dispatch the AgenticDebugger
+- Roll back via git if convergence fails
+
+**Done when:** refactorer-induced regressions are caught + fixed
+automatically, not by humans noticing later.
+
+### 5. Human documentation system
+
+Agents write semantic documentation for the generated project:
+- README.md per service (what it does, how to run it)
+- API reference (auto-generated from OpenAPI + narrative)
+- Architecture overview (services + interactions)
+- "How to extend" guides per skeleton-shipped extension point
+
+**Why this order:** the docs need to describe the *post-refactor*
+shape, not the pre-refactor shape. Documenting twice is waste.
+
+### 6. Detailed diagnostic + performance logging
+
+Wire structured logging across every agent:
+- Per-call timing (already partial via cost tracker)
+- Token usage breakdown
+- Tool-loop step counts
+- Per-issue convergence path (which tier, which iter, why)
+- Repair sticky-log compaction stats
+- Cache hit rates (plan cache, route resolver, primitive probes)
+
+**Done when:** a single `bizniz_projects/<slug>/docs/runs/<job_id>/
+performance.json` answers "where did this build spend time/tokens
+and what could be cheaper."
+
+### 7. Performance test on Claude
+
+Build 3-5 reference projects (CRM, blog, e-commerce mini, ...) on
+Claude with the full instrumentation from (6). Establish baselines:
+- Wall clock per milestone
+- Token cost per service per milestone
+- Repair iterations needed
+- UX score per route
+- Refactor extractions per multi-service project
+
+**Why on Claude first:** $0 marginal on Max plan lets us iterate
+without budget pressure during baseline-finding.
+
+### 8. Baseline on Gemini
+
+Run the same reference projects on Gemini, compare against (7)'s
+Claude baselines:
+- Where does Gemini close the gap?
+- Where does it widen?
+- What prompt / agent tweaks move the needle?
+
+**Goal:** durable architecture comparison, not a one-off run. Drives
+where to invest next.
+
+## Order rationale
+
+- **1 first** because UX is the most user-visible quality bar — the
+  thing buyers see — and Storybook is the right shape.
+- **2 → 3 → 4** is the refactor-safety stack. Can't do 3 without 2;
+  4 catches what 3 misses.
+- **5 after 3** so docs reflect the refactored shape, not the
+  pre-refactor sprawl.
+- **6 before 7** so the baseline data exists in structured form.
+- **7 before 8** so we have Claude numbers to compare Gemini against.
+
+## What's NOT in this plan (deferred)
+
+- Angular skeletons (skeleton-angular, teams, saas) get Storybook
+  scaffolding only AFTER item 1 proves the React loop end-to-end.
+- Full escalation on smoke gate (replace hard-fail with cheap-tier
+  AgenticDebugger one-shot) — design decision logged for item 4's
+  test/debug pass.
+- Production-mode Dockerfile variants (no `--reload`, Alembic
+  migrations) — deferred until the dev-mode loop is stable.
+
+## Feedback baked in this session
+
+  - On smoke failures, prefer full agent escalation (try to recover
+    the container) rather than hard-halt at the gate. Bake into
+    SmokePhase as part of item 4's test+debug work — the
+    AgenticDebugger should get a shot at fixing state drift before
+    the human takes over.

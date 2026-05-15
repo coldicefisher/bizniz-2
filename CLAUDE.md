@@ -7,6 +7,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This file orients a Claude session in the bizniz repo. Read this
 first; it tells you what to load next.
 
+## Current roadmap (2026-05-15)
+
+Locked-in order — work items 1 → 8 in sequence. Full text at
+`docs/roadmap.md`. Honor this when prioritizing new work.
+
+1. **Finish UX with Storybook** — make the interaction-test phase
+   the default UX gate (not screenshot-only loop).
+2. **Add version control** — per-project git ops baked into the
+   pipeline (commit per phase, branch per milestone, tag DONE).
+3. **Refactorer agent** — dedupe + move shared business logic to
+   `shared/<lang>/` core libs.
+4. **Tests / debugging after refactoring** — catch refactor-induced
+   regressions automatically; also bake "full agent escalation on
+   smoke failure" into SmokePhase here.
+5. **Human documentation system** — agents write semantic docs per
+   service (README, API reference, architecture, how-to-extend).
+6. **Detailed diagnostic + performance logging** — structured
+   per-call timing/tokens/cache-hits → `performance.json`.
+7. **Performance test on Claude** — 3-5 reference projects, baseline
+   established with $0 marginal cost.
+8. **Baseline on Gemini** — same projects, compare architecture
+   quality + cost vs Claude.
+
+Deferred (do NOT pull forward unless explicitly asked):
+- Angular skeleton Storybook variants (until item 1 proves React
+  loop end-to-end).
+- Production-mode Dockerfile variants (until dev-mode loop is
+  stable).
+
 ## What bizniz is (one paragraph)
 
 Bizniz is a multi-agent AI pipeline that takes a natural-language

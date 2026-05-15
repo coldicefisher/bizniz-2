@@ -28,6 +28,7 @@ from bizniz.code_reviewer.types import CodeReviewReport
 from bizniz.driver.gates import GatePolicy, GateViolation
 from bizniz.driver.integration_phase import IntegrationPhase, IntegrationPhaseResult
 from bizniz.driver.smoke_phase import SmokePhase, SmokePhaseResult
+from bizniz.driver.smoke_recovery import SmokeRecovery
 from bizniz.driver.ux_phase import UXPhase
 from bizniz.driver.refactor_phase import RefactorPhase
 from bizniz.driver.milestone_code_dispatcher import MilestoneCodeDispatcher
@@ -85,6 +86,7 @@ class MilestoneLoop:
         primary_workspace: BaseWorkspace,
         compose_path: str,
         project_root: Path,
+        smoke_recovery: Optional["SmokeRecovery"] = None,
         repair_budget: int = 3,
         repair_engineer_factory: Optional[Callable[[int], Engineer]] = None,
         engineer_escalation_factory: Optional[Callable[[int], Engineer]] = None,
@@ -102,6 +104,7 @@ class MilestoneLoop:
         self._cr = code_reviewer
         self._integration = integration_phase
         self._smoke = smoke_phase
+        self._smoke_recovery = smoke_recovery
         self._ux_phase = ux_phase
         self._refactor_phase = refactor_phase
         self._total_milestones = total_milestones
@@ -143,6 +146,85 @@ class MilestoneLoop:
         except Exception:
             # Cost tracking is best-effort; never break a real run.
             pass
+
+    def _maybe_recover_smoke(
+        self,
+        smoke_result: SmokePhaseResult,
+        milestone,
+        architecture,
+        auth_contract: Optional[str],
+        state,
+    ) -> SmokePhaseResult:
+        """One-shot agent recovery for a failing smoke phase. Returns
+        either the (possibly-passing) re-run result or the original
+        failure if recovery wasn't attempted or didn't take.
+
+        Behavior is a no-op when ``smoke_recovery`` wasn't injected —
+        preserves prior pipelines that don't opt in.
+        """
+        if self._smoke_recovery is None:
+            return smoke_result
+        if self._on_status:
+            try:
+                self._on_status(
+                    f"SmokePhase: {len(smoke_result.critical_failures)} "
+                    f"critical failure(s); attempting one-shot recovery "
+                    f"before halting..."
+                )
+            except Exception:
+                pass
+        service_names = [s.name for s in architecture.services]
+        recovery_result = self._smoke_recovery.recover(
+            critical_failures=smoke_result.critical_failures,
+            service_names=service_names,
+            milestone_title=milestone.title,
+        )
+        state.mark_phase(
+            SubPhase.SMOKE,
+            {
+                **smoke_result.model_dump(),
+                "recovery": recovery_result.model_dump(),
+            },
+        )
+        if not recovery_result.attempted:
+            return smoke_result
+        if self._on_status:
+            try:
+                self._on_status(
+                    f"SmokeRecovery: attempted={recovery_result.attempted}, "
+                    f"self_reported_ok={recovery_result.succeeded}, "
+                    f"{len(recovery_result.actions_taken)} action(s) — "
+                    f"re-running smoke for verification..."
+                )
+            except Exception:
+                pass
+        # Re-run smoke independently of the agent's self-report. The
+        # external check is the source of truth.
+        verify_result = self._smoke.run(
+            milestone=milestone,
+            architecture=architecture,
+            project_root=self._project_root,
+            auth_contract=auth_contract,
+        )
+        state.mark_phase(
+            SubPhase.SMOKE,
+            {
+                **verify_result.model_dump(),
+                "recovery": recovery_result.model_dump(),
+                "after_recovery": True,
+            },
+        )
+        if self._on_status:
+            try:
+                self._on_status(
+                    f"SmokePhase (after recovery): "
+                    f"{'PASSED' if verify_result.passed else 'STILL FAILING'} "
+                    f"— {len(verify_result.critical_failures)} "
+                    f"critical failure(s)"
+                )
+            except Exception:
+                pass
+        return verify_result
 
     # ── Public ─────────────────────────────────────────────────────────
 
@@ -261,6 +343,20 @@ class MilestoneLoop:
                 auth_contract=auth_contract,
             )
             state.mark_phase(SubPhase.SMOKE, smoke_result.model_dump())
+            if not smoke_result.passed:
+                # Recovery attempt before hard-halt (2026-05-15 ask):
+                # most smoke 5xx are state drift (stale uvicorn, cached
+                # bundle, missing migration) — a one-shot Claude session
+                # with Bash + Edit can restart/inspect/fix in 30s and
+                # let the pipeline continue. If the re-probe still
+                # fails after recovery, we hard-halt as before.
+                smoke_result = self._maybe_recover_smoke(
+                    smoke_result=smoke_result,
+                    milestone=milestone,
+                    architecture=architecture,
+                    auth_contract=auth_contract,
+                    state=state,
+                )
             if not smoke_result.passed:
                 self._gates.hard(
                     "smoke_failed",
