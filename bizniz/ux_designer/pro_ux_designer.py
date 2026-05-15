@@ -1494,17 +1494,22 @@ class ProUXDesigner(ClaudeUXDesigner):
         self,
         service: ServiceDefinition,
         compose_path: str,
-        max_attempts: int = 3,
-        backoff_seconds: tuple = (0.0, 3.0, 7.0),
+        max_attempts: int = 6,
+        backoff_seconds: tuple = (0.0, 10.0, 30.0, 60.0, 90.0, 110.0),
     ) -> Dict:
         """Verify Tailwind CSS is being served by the dev container.
 
-        Retries with backoff to absorb Vite/PostCSS warm-up races
-        after container restart. v2.12 surfaced the failure mode:
-        cold-cache run probed too early, got CSS without Tailwind
-        markers, dispatched a 120s no-op Coder repair — Vite had
-        actually finished building 5s later. The single-shot probe
-        was racing the dev server's first-build cycle.
+        Retries with backoff to absorb dev-server cold-build races:
+
+          - Vite + PostCSS warm-up after container restart (5-10s)
+          - Vite first-build on a cold cache after a global_design
+            step writes 20+ files (30-60s)
+          - Angular cold build (the whole bundle compile, 3-5 min)
+
+        Schedule: 0 + 10 + 30 + 60 + 90 + 110 = 300s total worst case.
+        Warm builds return immediately at attempt 1. crm_v1 M3 case
+        (Vite + 23 new files, ~30-60s) settles around attempt 3-4.
+        Angular cold builds settle around attempt 5-6.
 
         Returns ``{ok, detail, css_urls, attempts}`` — same shape as
         the original single-shot probe plus ``attempts`` so the

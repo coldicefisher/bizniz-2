@@ -57,10 +57,10 @@ class TestRetryWrapper:
         assert out["ok"] is True
         assert out["attempts"] == 3
         assert d._probe_tailwind_once.call_count == 3
-        # Attempt 2 sleeps 3s; attempt 3 sleeps 7s. Attempt 1 sleeps 0.
-        # time.sleep is only called when wait > 0.
+        # With the 5-min budget (0/10/30/60/90/110), attempt 2 sleeps
+        # 10s, attempt 3 sleeps 30s. Attempt 1 sleeps 0 (not called).
         slept = [c.args[0] for c in sleep.call_args_list]
-        assert slept == [3.0, 7.0]
+        assert slept == [10.0, 30.0]
 
     def test_returns_last_failure_after_all_attempts(self):
         d = _designer()
@@ -69,8 +69,9 @@ class TestRetryWrapper:
         with patch("bizniz.ux_designer.pro_ux_designer.time.sleep"):
             out = d._verify_tailwind_serving(_service(), "compose.yml")
         assert out["ok"] is False
-        assert out["attempts"] == 3
-        assert d._probe_tailwind_once.call_count == 3
+        # 6 attempts to cover Angular cold builds (~5 min total wait).
+        assert out["attempts"] == 6
+        assert d._probe_tailwind_once.call_count == 6
 
     def test_max_attempts_one_is_single_shot(self):
         d = _designer()
