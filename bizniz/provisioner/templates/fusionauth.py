@@ -19,6 +19,7 @@ https://fusionauth.io/docs/v1/tech/installation-guide/kickstart
 from __future__ import annotations
 
 import json
+import re
 
 from bizniz.provisioner.templates.base import (
     InfraTemplate,
@@ -47,6 +48,16 @@ class FusionAuthTemplate(InfraTemplate):
     # to itself fails with a tenants_pkey unique-constraint violation.
     # Instead, reference the UUID literally in PATCH URLs.
     DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000000"
+    # FusionAuth ships a built-in "FusionAuth" application with this
+    # ID — it's the system admin app. To bypass the first-run setup
+    # wizard (``/admin/setup-wizard``), the kickstart must register
+    # the bootstrap admin against this app with role=admin. Without
+    # the registration, FA shows the setup wizard on every fresh
+    # boot regardless of how many app users exist — surfaced
+    # 2026-05-15 when ``localhost:9024/`` redirected to the wizard
+    # despite a successful kickstart that created the project app
+    # admin.
+    FUSIONAUTH_SYSTEM_APP_ID = "3c219e58-ed0e-4b18-ad48-f4f92793ae32"
 
     def render(self, ctx: TemplateContext) -> TemplateOutput:
         host_port = ctx.service.port or self.DEFAULT_CONTAINER_PORT
@@ -59,7 +70,15 @@ class FusionAuthTemplate(InfraTemplate):
         pg_name = pg.name if pg is not None else "postgres"
         own_name = ctx.service.name
         # Dev defaults; the project owner replaces these in .env for prod.
-        admin_email = f"admin@{slug}.local"
+        # Email validator in FA rejects underscores in the domain part
+        # (RFC 5321 requires the domain be a valid hostname; underscores
+        # aren't legal in hostnames). Slugs like ``recipe_box`` produced
+        # an invalid email and kickstart failed with
+        # ``[notEmail]user.email`` until 2026-05-15. Sanitize to a
+        # hostname-safe form (letters, digits, hyphens) before building
+        # the email.
+        email_safe_slug = re.sub(r"[^a-zA-Z0-9-]", "-", slug).strip("-") or "bizniz"
+        admin_email = f"admin@{email_safe_slug}.local"
         admin_password = "ChangeMe123!"
         api_key = "bf69486b-4733-4470-a592-f1bfce7af580"
         issuer = f"http://{own_name}:{self.DEFAULT_CONTAINER_PORT}"
@@ -73,6 +92,7 @@ class FusionAuthTemplate(InfraTemplate):
                 "apiKey": api_key,
                 "appName": slug,
                 "accessTokenKeyId": self.ACCESS_TOKEN_KEY_ID,
+                "systemAppId": self.FUSIONAUTH_SYSTEM_APP_ID,
             },
             "apiKeys": [
                 {
@@ -160,7 +180,7 @@ class FusionAuthTemplate(InfraTemplate):
                         }
                     },
                 },
-                # Admin user with admin role
+                # Admin user with admin role in the project's application.
                 {
                     "method": "POST",
                     "url": "/api/user/registration/#{adminUserId}",
@@ -171,6 +191,26 @@ class FusionAuthTemplate(InfraTemplate):
                         },
                         "registration": {
                             "applicationId": "#{applicationId}",
+                            "roles": ["admin"],
+                        },
+                    },
+                },
+                # Second registration: bind the same admin to the
+                # FusionAuth built-in system application so FA
+                # recognizes them as a system admin and skips the
+                # setup-wizard redirect on /admin/. Without this,
+                # ``localhost:9024/`` 302s to ``/admin/setup-wizard``
+                # on every fresh boot even though kickstart created
+                # the project's admin successfully — FA's wizard
+                # gate is "any user registered against
+                # FUSIONAUTH_SYSTEM_APP_ID", not "any user with an
+                # admin role anywhere".
+                {
+                    "method": "POST",
+                    "url": "/api/user/registration/#{adminUserId}",
+                    "body": {
+                        "registration": {
+                            "applicationId": "#{systemAppId}",
                             "roles": ["admin"],
                         },
                     },
