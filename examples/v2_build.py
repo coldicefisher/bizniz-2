@@ -445,19 +445,29 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
 
     smoke_phase = SmokePhase(on_status=on_status)
 
-    # UXPhase factory: per-frontend, builds a UXDesigner.
+    # UXPhase factory: per-frontend, builds a UX designer.
     #
     # Picks the implementation by binary availability:
-    #   - ``claude`` on PATH → ClaudeUXDesigner (vision via
-    #     ``claude --print`` + Read on PNG files; $0 on Max plan)
+    #   - ``claude`` on PATH → ProUXDesigner (three-step flow with
+    #     route resolver + capture-mismatch handling + plan cache +
+    #     run log; subclass of ClaudeUXDesigner). $0 on Max plan.
     #   - else → legacy UXDesigner with GeminiClient inline image
     #     vision
     #
-    # The UX fix path is ClaudeCliCoder regardless; only the eval
-    # mechanism differs. Choosing by binary (not config) means the
-    # selector survives bizniz.yaml flavors that mix Claude + Gemini.
+    # The UX fix path is ClaudeCliCoder regardless; only the eval +
+    # iteration mechanism differs. Choosing by binary (not config)
+    # means the selector survives bizniz.yaml flavors that mix
+    # Claude + Gemini.
     import shutil as _shutil
     use_claude_ux = _shutil.which("claude") is not None
+
+    # ReviewStore for the per-route cache so M2+ can skip clean
+    # routes that haven't changed since M1's UX pass. Project-wide,
+    # one db per project_slug. (Mirrors the debug_ux.py harness.)
+    from bizniz.ux_designer.review_store import ReviewStore as _ReviewStore
+    _review_store = _ReviewStore(
+        Path(project_root) / ".bizniz" / "ux_reviews.db",
+    )
 
     def ux_designer_factory(frontend_service):
         def ux_coder_factory(workspace):
@@ -474,13 +484,15 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
 
         if use_claude_ux:
             from bizniz.clients.claude_cli.claude_cli_client import ClaudeCliClient
-            from bizniz.ux_designer.claude_ux_designer import ClaudeUXDesigner
+            from bizniz.ux_designer.pro_ux_designer import ProUXDesigner
             # Text-only client for screenshot script generation.
             vision_client = ClaudeCliClient(model_name="claude-cli")
-            return ClaudeUXDesigner(
+            return ProUXDesigner(
                 vision_client=vision_client,
                 coder_factory=ux_coder_factory,
                 on_status=on_status,
+                review_store=_review_store,
+                project_slug=project_slug,
             )
 
         from bizniz.clients.gemini.gemini_client import GeminiClient
