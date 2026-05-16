@@ -12,11 +12,11 @@ first; it tells you what to load next.
 Locked-in order — work items 1 → 9 in sequence. Full text at
 `docs/roadmap.md`. Honor this when prioritizing new work.
 
-1. **Confidence signals load-bearing** — make
-   `QualityEngineer.enrich.confidence` actually drive behavior
-   (re-enrich at 0.4-0.6, halt at <0.4). Cheapest quality lever:
-   stops downstream cycles burning on ambiguous specs. Audit +
-   retrofit for other agents rides item 7.
+1. ✅ **Confidence signals load-bearing** — SHIPPED 2026-05-15
+   (commit `5de1059`). `QualityEngineer.enrich.confidence` now drives
+   the harness: re-enrich at 0.4-0.6, soft gate at <0.4. Meta-pattern
+   audit + retrofit for Architect/Planner/Coder/Tester moves to
+   item 7.
 2. **Finish UX with Storybook** — make the interaction-test phase
    the default UX gate (not screenshot-only loop).
 3. **Add version control** — per-project git ops baked into the

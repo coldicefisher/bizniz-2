@@ -6,35 +6,29 @@ each one's value compounds on the prior items.
 
 ## The 9-item plan
 
-### 1. Confidence signals — load-bearing or drop the pretense
+### 1. Confidence signals — load-bearing or drop the pretense ✅ SHIPPED
 
-QE's enrich prompt language says "confidence < 0.6 means Engineer
-should ask follow-up questions" but **nothing in code acts on the
-score**. Same for CodeReviewer.review.confidence (logged, not
-gating). Today only the UX vision score is load-bearing.
+**Shipped 2026-05-15** (commit `5de1059`). Three bands now drive
+harness behavior:
 
-Make `QualityEngineer.enrich.confidence` load-bearing as the
-reference impl, then audit + retrofit the rest. Three bands:
+- **≥ 0.6**: implement normally
+- **0.4-0.6**: harness runs one `QualityEngineer.re_enrich` pass
+  with an augmented "name your ambiguities, resolve or surface as
+  TODOs" prompt. Take whichever spec has higher confidence.
+- **< 0.4**: fires `enrich_low_confidence` soft gate. Halts in
+  `--interactive`, warns + continues in `--auto`/strict.
 
-- **≥ 0.6**: implement normally (current path)
-- **0.4-0.6**: one re-enrich pass with augmented prompt ("list your
-  ambiguities and either resolve them or write TODOs the Engineer
-  surfaces")
-- **< 0.4**: halt at a new `enrich_low_confidence` soft gate
-  (`--auto` pushes through with a warning)
+Pieces shipped: `QualityEngineer.re_enrich`, `build_reenrich_prompt`,
+`MilestoneLoop._maybe_re_enrich` with `confidence_low_threshold`
+(0.6) + `confidence_halt_threshold` (0.4) constructor params,
+updated ENRICH_SYSTEM_PROMPT, +11 unit tests.
 
-Full ticket: `docs/backlog/confidence_signals.md`. Includes the
-meta-pattern audit (CodeReviewer, Coder, Tester, Architect, Planner
-all need this shape eventually).
+The meta-pattern audit + retrofit for the other agents
+(CodeReviewer, Coder, Tester, Architect, Planner) is now part of
+item 7's diagnostic logging push — same `AgentConfidence` shape,
+universal harness behavior off it.
 
-**Why first:** every later item benefits when QE flags ambiguous
-milestones BEFORE 30 minutes of implement/repair burn through on a
-spec the model didn't trust to begin with. Cheapest possible
-quality lever.
-
-**Done when:** ambiguous milestones either get a re-enrich pass or
-halt for review. CodeReviewer + Coder confidence audits scheduled
-for item 7 (perf logging) to ride the same instrumentation.
+Full ticket: `docs/backlog/confidence_signals.md`.
 
 ### 2. Finish UX with Storybook
 
