@@ -29,6 +29,7 @@ from bizniz.auth_operator import (
 from bizniz.auth_planner import AuthPlanner
 from bizniz.driver.gates import GatePolicy, GateViolation
 from bizniz.driver.milestone_loop import MilestoneLoop, MilestoneOutcome
+from bizniz.driver.project_git import ProjectGit
 from bizniz.driver.state import RunState, SubPhase, TopPhase
 
 # Friendly --phase aliases for the CLI; expand to canonical SubPhase values.
@@ -95,6 +96,52 @@ class V2Pipeline:
         self._auth_operator_factory = auth_operator_factory
         self._auth_code_examples_client = auth_code_examples_client
         self._project_root = project_root
+        # Per-project git checkpoints (roadmap item 3). Best-effort:
+        # if git isn't installed or any op fails, the pipeline keeps
+        # running. Initialized on first run inside ``_run_inner`` so
+        # the project_root exists by then.
+        self._project_git: Optional[ProjectGit] = None
+
+    def _init_project_git(self, architecture: SystemArchitecture) -> None:
+        """Lazy-init the per-project git tracker. Idempotent — only
+        runs ``git init`` if .git/ doesn't already exist. Safe to call
+        on every run."""
+        if self._project_git is not None:
+            return
+        # Resolve project root the same way the rest of v2_build does:
+        # if not handed in, derive from BIZNIZ_PROJECTS_ROOT / slug.
+        root = self._project_root
+        if root is None:
+            import os
+            base = (
+                os.environ.get("BIZNIZ_PROJECTS_ROOT")
+                or str(Path.home() / "bizniz_projects")
+            )
+            root = Path(base) / (
+                architecture.project_slug or self._project_name
+            )
+        self._project_git = ProjectGit(
+            project_root=root, on_status=self._on_status,
+        )
+        self._project_git.init_if_needed()
+
+    def _git_commit(self, message: str, tag: Optional[str] = None) -> None:
+        """Best-effort commit helper used at phase boundaries. Never
+        raises out to the pipeline — git failures degrade silently to
+        the pre-item-3 (no-tracking) behavior."""
+        if self._project_git is None:
+            return
+        try:
+            self._project_git.commit_all(message=message, tag=tag)
+        except Exception as e:
+            if self._on_status:
+                try:
+                    self._on_status(
+                        f"V2Pipeline._git_commit raised "
+                        f"{type(e).__name__}: {e} — continuing without"
+                    )
+                except Exception:
+                    pass
 
     def _tag_top(self, phase: TopPhase) -> None:
         if self._cost_tracker is None:
@@ -313,6 +360,17 @@ class V2Pipeline:
 
         provision_result = self._top_provision(architecture)
 
+        # Initialize git tracking for the materialized project (item 3).
+        # Idempotent: skips if .git/ already exists. Commits the
+        # provisioner's output as the m0 checkpoint so subsequent
+        # milestone commits + future refactor reverts have a base
+        # state to anchor against.
+        self._init_project_git(architecture)
+        self._git_commit(
+            "Initial provision (architect + provisioner)",
+            tag="m0",
+        )
+
         # Bring the stack up BEFORE auth — AuthAgent talks to the live
         # FusionAuth API to configure roles/users; FA must be reachable.
         # MilestoneLoop's integration phase also assumes the stack is up.
@@ -351,6 +409,13 @@ class V2Pipeline:
             milestones_done.append(milestone.name)
             if outcome.enriched_spec is not None:
                 prior_specs.append(outcome.enriched_spec)
+            # Per-milestone checkpoint (item 3). Each milestone DONE
+            # gets its own commit + tag so future refactor reverts
+            # (item 5) can roll back to any prior milestone cleanly.
+            self._git_commit(
+                f"M{i}: {milestone.name} DONE",
+                tag=f"m{i}-done",
+            )
 
         return V2PipelineResult(
             project_slug=architecture.project_slug,
