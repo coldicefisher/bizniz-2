@@ -46,18 +46,25 @@ default UX gate, not the screenshot-only loop. Today we have:
 **Done when:** UX phase iterates the Storybook catalog, scores per
 primitive, dispatches Coder per primitive (not per route).
 
-### 3. Add version control
+### 3. Add version control ✅ SHIPPED
 
-Per-project git ops baked into the pipeline:
-- Initialize `git` in `~/bizniz_projects/<slug>/` on first run
-- Commit per phase (planner → architect → provisioner → per
-  milestone → per repair iter → integration → UX)
-- Branch per milestone so a failure is reversible without losing
-  prior work
-- Tag DONE state at each milestone boundary
+**Shipped 2026-05-15** (commit `8c65435`). Per-project git
+checkpoints at every phase boundary:
 
-**Why before refactorer:** the refactorer (item 4) MUST run on a
-commit-tracked codebase or we can't safely roll back a bad refactor.
+- After Provisioner → `git init` + commit "Initial provision"
+  tagged `m0`
+- After each MilestoneLoop.run() → commit "M<N>: <name> DONE"
+  tagged `m<N>-done`
+
+`ProjectGit.revert_to_tag(...)` provides the rollback path the
+refactorer (item 5) needs. `.bizniz/` is tracked (so reverts roll
+back internal state coherently). All ops are best-effort: git
+failures never tank the pipeline. +18 tests.
+
+Phase-level commits (planner / architect / per repair iter / per
+integration) NOT wired yet — milestone DONE checkpoints are
+sufficient for refactor revert. If finer granularity is needed
+later, add per-phase commits to `MilestoneLoop` callsites.
 
 ### 4. Granular issue decomposition
 

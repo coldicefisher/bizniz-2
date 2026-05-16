@@ -21,8 +21,11 @@ Locked-in order — work items 1 → 10 in sequence. Full text at
    the default UX gate (not screenshot-only loop). Two sub-tickets
    already filed: design-system-lock (SHIPPED `fd72c94`) and
    orphan-shot-fallback (open).
-3. **Add version control** — per-project git ops baked into the
-   pipeline (commit per phase, branch per milestone, tag DONE).
+3. ✅ **Add version control** — SHIPPED 2026-05-15 (commit
+   `8c65435`). `ProjectGit` writes `m0` tag after provisioner +
+   `m<N>-done` tags after each milestone. Phase-level commits not
+   wired yet (milestone granularity is sufficient for refactor
+   revert).
 4. **Granular issue decomposition** — ServicePlanner currently
    emits feature-sized issues (Coder p95 = 9.5 min, max = 18 min).
    Force per-file / per-concern decomposition + a >300s validator.
