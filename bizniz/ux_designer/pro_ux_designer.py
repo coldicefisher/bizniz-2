@@ -71,6 +71,12 @@ class ProUXDesigner(ClaudeUXDesigner):
         review_store=None,
         project_slug: Optional[str] = None,
         debug: bool = False,
+        # Design system lock (sub-ticket of roadmap item 2). When a
+        # design_lock.json exists in the workspace, code_review +
+        # apply_global_design are skipped — the established design
+        # is reused. Set ``force_redesign=True`` to ignore + replace
+        # the lock; useful for explicit "redesign milestone" runs.
+        force_redesign: bool = False,
     ):
         super().__init__(
             vision_client=vision_client,
@@ -90,6 +96,7 @@ class ProUXDesigner(ClaudeUXDesigner):
         self._review_store = review_store
         self._project_slug = project_slug
         self._debug = debug
+        self._force_redesign = force_redesign
         # Per-run timing. Populated by ``_timed`` calls and surfaced
         # on the ``result["timing"]`` dict at the end of
         # review_frontend.
@@ -152,41 +159,82 @@ class ProUXDesigner(ClaudeUXDesigner):
         from bizniz.ux_designer import plan_cache
         from pathlib import Path as _Path
         ws_root_path = _Path(workspace.root)
-        # Load the prior cache first so we can exclude global-design's
-        # own outputs from the fingerprint — otherwise the step that
-        # writes 40 src/ files always self-invalidates the cache on
-        # the next run, causing the site's styling to subtly drift
-        # every invocation. See ticket
-        # docs/backlog/ux_followups_2026-05-14.md (Ticket 1).
-        cached_payload = plan_cache.load_cache(ws_root_path)
-        managed = plan_cache.managed_files_from_cache(cached_payload)
-        cur_input_mtime = plan_cache.compute_input_mtime(
-            ws_root_path, exclude_relpaths=managed,
-        )
+        # ── Design system lock (sub-ticket of roadmap item 2) ──
+        # If a design_lock.json exists, the design system was
+        # established on a prior milestone — skip code_review +
+        # apply_global_design entirely. Without this, every milestone
+        # whose plan_cache misses (i.e. every milestone, because
+        # IMPLEMENT legitimately writes new files) would re-derive
+        # the palette + typography + primitives. Cost: ~15 min per
+        # milestone wasted + visual jitter as the model drifts hex
+        # values between runs.
+        #
+        # ``force_redesign=True`` (constructor) ignores + replaces
+        # the lock — for explicit "redesign milestone" runs.
+        from bizniz.ux_designer import design_lock as _design_lock
+        if self._force_redesign:
+            removed = _design_lock.remove_lock(ws_root_path)
+            if removed:
+                _log(
+                    self._on_status,
+                    "ProUXDesigner: force_redesign=True — removed "
+                    "existing design_lock.json; re-establishing "
+                    "from scratch"
+                )
+        lock = _design_lock.load_lock(ws_root_path)
         plan = None
         global_fix = None
-        if cached_payload is not None:
-            valid, reason = plan_cache.is_cache_valid(
-                cached_payload,
-                current_input_mtime=cur_input_mtime,
-                workspace_root=ws_root_path,
+        if lock is not None:
+            plan = lock.plan
+            global_fix = lock.global_fix_result
+            _log(
+                self._on_status,
+                f"ProUXDesigner: design lock HIT — reusing design "
+                f"established at milestone {lock.milestone_index} on "
+                f"{lock.established_at.isoformat()[:19]} "
+                f"({len(lock.files_managed)} managed file(s))"
             )
-            if valid:
-                plan = cached_payload.get("plan")
-                global_fix = cached_payload.get("global_fix_result")
-                _log(
-                    self._on_status,
-                    f"ProUXDesigner: plan cache HIT — reusing prior "
-                    f"plan + global-design (saved "
-                    f"{cached_payload.get('saved_at', '?')[:19]})"
+            self._record_timing("code_review_locked", 0.0)
+            self._record_timing("global_design_locked", 0.0)
+            result["design_lock_hit"] = True
+        else:
+            result["design_lock_hit"] = False
+
+        # Load the prior cache (within-milestone-resume optimization
+        # — distinct from the design lock above). Only consulted when
+        # the lock didn't already provide plan + global_fix. The cache
+        # catches the case where an M1 run was interrupted mid-UX and
+        # we resume before the lock could be saved.
+        # See docs/backlog/ux_followups_2026-05-14.md (Ticket 1).
+        cached_payload = None
+        if plan is None:
+            cached_payload = plan_cache.load_cache(ws_root_path)
+            managed = plan_cache.managed_files_from_cache(cached_payload)
+            cur_input_mtime = plan_cache.compute_input_mtime(
+                ws_root_path, exclude_relpaths=managed,
+            )
+            if cached_payload is not None:
+                valid, reason = plan_cache.is_cache_valid(
+                    cached_payload,
+                    current_input_mtime=cur_input_mtime,
+                    workspace_root=ws_root_path,
                 )
-                self._record_timing("code_review_cached", 0.0)
-                self._record_timing("global_design_cached", 0.0)
-            else:
-                _log(
-                    self._on_status,
-                    f"ProUXDesigner: plan cache MISS — {reason}"
-                )
+                if valid:
+                    plan = cached_payload.get("plan")
+                    global_fix = cached_payload.get("global_fix_result")
+                    _log(
+                        self._on_status,
+                        f"ProUXDesigner: plan cache HIT — reusing prior "
+                        f"plan + global-design (saved "
+                        f"{cached_payload.get('saved_at', '?')[:19]})"
+                    )
+                    self._record_timing("code_review_cached", 0.0)
+                    self._record_timing("global_design_cached", 0.0)
+                else:
+                    _log(
+                        self._on_status,
+                        f"ProUXDesigner: plan cache MISS — {reason}"
+                    )
 
         # ── Step 1: Code review → design plan ─────────────────────────
         if plan is None:
@@ -217,11 +265,39 @@ class ProUXDesigner(ClaudeUXDesigner):
                 plan=plan, service=service, workspace=workspace,
             )
             self._record_timing("global_design", time.time() - _t0)
-            # Save the cache only when BOTH phases ran fresh. If we
-            # came in with a hit, the cache is already current.
-            # ``input_mtime`` here excludes the files global_design
-            # just wrote — same logic as the cache-check above so
-            # next run can compare apples-to-apples.
+            # Save the design lock — this is the durable record that
+            # future milestones consult to skip code_review +
+            # apply_global_design entirely. Sub-ticket of roadmap
+            # item 2.
+            try:
+                files_written = list(
+                    (global_fix or {}).get("files_written") or []
+                )
+                new_lock = _design_lock.DesignLock(
+                    milestone_index=getattr(
+                        service, "milestone_index", 0,
+                    ),
+                    plan=plan or {},
+                    global_fix_result=global_fix or {},
+                    files_managed=files_written,
+                )
+                _design_lock.save_lock(ws_root_path, new_lock)
+                _log(
+                    self._on_status,
+                    f"ProUXDesigner: design lock saved at "
+                    f"{ws_root_path}/.bizniz/design_lock.json "
+                    f"({len(files_written)} files managed)"
+                )
+            except Exception as e:
+                _log(
+                    self._on_status,
+                    f"ProUXDesigner: design_lock save failed "
+                    f"({type(e).__name__}: {e}) — non-fatal"
+                )
+            # Save the within-milestone plan cache too (for resume
+            # within the same milestone if interrupted before the
+            # lock load on next run). ``input_mtime`` here excludes
+            # the files global_design just wrote.
             try:
                 fresh_managed = list(
                     (global_fix or {}).get("files_written") or []
