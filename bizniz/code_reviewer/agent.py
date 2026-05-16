@@ -97,12 +97,36 @@ class CodeReviewer:
         # restates it differently).
         raw["milestone_name"] = milestone.name
 
+        # Lenient fallback — code review failure is side-channel
+        # (drives REPAIR iters). On schema validation failure, return
+        # a conservative "not approved, no findings, low confidence"
+        # verdict. The milestone's existing repair-iter cap will
+        # eventually accept and move on rather than loop forever.
+        # Confidence=0.0 marks this as a fallback so future tooling
+        # can distinguish from a real "0 findings" clean review.
         try:
             report = CodeReviewReport.model_validate(raw)
         except Exception as e:
-            raise CodeReviewError(
-                f"review: LLM output failed schema validation: {e}"
-            ) from e
+            self._log(
+                f"CodeReviewer: schema validation failed ({e}) — "
+                f"returning conservative not-approved fallback"
+            )
+            return CodeReviewReport(
+                milestone_name=milestone.name,
+                approved=False,
+                summary=(
+                    "auto-fallback: code review LLM output failed schema "
+                    "validation; conservative not-approved verdict so "
+                    "the next repair iter (or max-iter cap) decides "
+                    "whether to proceed."
+                ),
+                confidence=0.0,
+                recommendations=[
+                    "CodeReviewer LLM returned malformed JSON after "
+                    "all retries; re-run review or escalate model "
+                    "tier if this persists."
+                ],
+            )
 
         # Force approved=False if any critical finding exists. The LLM
         # occasionally rubber-stamps despite flagging crits.

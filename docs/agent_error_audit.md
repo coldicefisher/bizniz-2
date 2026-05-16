@@ -101,21 +101,21 @@ by an integration test that monkey-patches Decomposer to raise.
 | 103 | `QualityEngineerError` | Enrich: schema validation | **fatal** | OK in enrich (required for confidence gating per item 1). |
 | 108 | `QualityEngineerError` | Enrich: zero capabilities | **fatal** | OK — milestone is undefined without capabilities. |
 | 122 | `QualityEngineerError` | Enrich: zero scenarios across all capabilities | **fatal** | OK. |
-| 184 | `QualityEngineerError` | Re-enrich: schema validation | **fatal** | ⚠️ Re-enrich is a side-channel (called only at confidence 0.4-0.6). On schema failure, **should fall back to the original spec** rather than crash the milestone. |
-| 188 | `QualityEngineerError` | Re-enrich: empty | **fatal** | ⚠️ Same — fall back to original spec. |
-| 252 | `QualityEngineerError` | Review: schema validation | **fatal** | ⚠️ Review-mode is side-channel (drives REPAIR iters). On schema failure, should default to "needs review" verdict rather than crash. |
+| 184 | (removed) | Re-enrich: schema validation | **lenient** | ✅ **SHIPPED**. Returns `prior_spec` on schema failure. Test: `test_bad_json_falls_back_to_prior_spec`. |
+| 188 | (removed) | Re-enrich: empty | **lenient** | ✅ **SHIPPED**. Returns `prior_spec` on zero capabilities. Test: `test_empty_capabilities_falls_back_to_prior_spec`. |
+| 252 | (removed) | Review: schema validation | **lenient** | ✅ **SHIPPED**. Returns conservative `approved=False, confidence=0.0` CoverageReport. Test: `test_bad_response_returns_lenient_fallback`. |
 
 **Follow-up tickets:**
-- `qe_reenrich_lenient_fallback` — lines 184, 188 should return the original spec on failure.
-- `qe_review_lenient_fallback` — line 252 should default to "approved=False with no findings" instead of crashing — repair iter can re-trigger.
+- ✅ `qe_reenrich_lenient_fallback` — SHIPPED.
+- ✅ `qe_review_lenient_fallback` — SHIPPED.
 
 ### CodeReviewer (`bizniz/code_reviewer/agent.py`)
 
 | Line | Exception | Trigger | Class | Status |
 |---|---|---|---|---|
-| 103 | `CodeReviewError` | Schema validation after retry | **fatal** | ⚠️ Review is side-channel. **Should be lenient**: default to "approved=False with no findings" so the milestone proceeds. The repair iter will re-trigger. |
+| 103 | (removed) | Schema validation after retry | **lenient** | ✅ **SHIPPED**. Returns conservative `approved=False, confidence=0.0` CodeReviewReport. Test: `test_invalid_schema_returns_lenient_fallback`. |
 
-**Follow-up ticket:** `code_reviewer_lenient_fallback`.
+**Follow-up ticket:** ✅ `code_reviewer_lenient_fallback` — SHIPPED.
 
 ### Refactorer (`bizniz/refactorer/refactorer.py`)
 
@@ -234,14 +234,14 @@ non-negotiable item 5 done-when.
 |---|---|---|---|---|
 | `service_planner_repair_lenient_payload_validation` | service_planner/agent.py | 211 | 30 min + test | ✅ SHIPPED |
 | `service_planner_repair_lenient_cycles` | service_planner/agent.py | 223 | 30 min + test | ✅ SHIPPED |
-| `qe_reenrich_lenient_fallback` | quality_engineer/agent.py | 184, 188 | 1 hr + tests | open |
-| `qe_review_lenient_fallback` | quality_engineer/agent.py | 252 | 1 hr + test | open |
-| `code_reviewer_lenient_fallback` | code_reviewer/agent.py | 103 | 1 hr + test | open |
+| `qe_reenrich_lenient_fallback` | quality_engineer/agent.py | 184, 188 | 1 hr + tests | ✅ SHIPPED |
+| `qe_review_lenient_fallback` | quality_engineer/agent.py | 252 | 1 hr + test | ✅ SHIPPED |
+| `code_reviewer_lenient_fallback` | code_reviewer/agent.py | 103 | 1 hr + test | ✅ SHIPPED |
 | `milestone_code_dispatcher_raise_audit` | driver/milestone_code_dispatcher.py | TBD | 2 hr (deep-audit) | open |
 | `projectdb_other_operational_errors` | project/project_db.py | TBD | 1 hr (mirror existing pattern) | open |
 
-**Remaining estimated effort:** ~6 hours of focused work to ship
-the remaining lenient-path patches + tests.
+**Remaining estimated effort:** ~3 hours of focused work across
+the 2 remaining open tickets.
 
 ## What's already shipped under item 5
 
@@ -253,6 +253,15 @@ the remaining lenient-path patches + tests.
 - ✅ `ServicePlanner.plan_repair` lenient payload validation + cycle
   breaking via `_break_cycle` helper, with `CyclicDependencyError`
   gaining a structured `cyclic_ids` attribute
+- ✅ `QualityEngineer.re_enrich` lenient fallback — returns the
+  prior spec on schema failure / zero capabilities (side-channel
+  re-enrich never halts the milestone)
+- ✅ `QualityEngineer.review` lenient fallback — returns
+  conservative `approved=False, confidence=0.0` CoverageReport on
+  schema failure (milestone proceeds via repair-iter cap)
+- ✅ `CodeReviewer.review` lenient fallback — returns conservative
+  `approved=False, confidence=0.0` CodeReviewReport on schema
+  failure (milestone proceeds via repair-iter cap)
 
 ## Related
 

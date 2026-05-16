@@ -178,17 +178,28 @@ class QualityEngineer:
             label="QualityEngineer.re_enrich",
         )
         raw["milestone_name"] = milestone.name
+        # Lenient fallbacks — re_enrich is a side-channel (called only
+        # at confidence 0.4-0.6). If the improvement attempt fails, the
+        # original low-confidence spec is still usable; the harness
+        # can still gate on it via the existing confidence threshold.
+        # Halting the milestone for a failed *optional* improvement
+        # would defeat the purpose.
         try:
             spec = EnrichedSpec.model_validate(raw)
         except Exception as e:
-            raise QualityEngineerError(
-                f"re_enrich: LLM output failed schema validation: {e}"
-            ) from e
-        if not spec.capabilities:
-            raise QualityEngineerError(
-                f"re_enrich: returned zero capabilities for milestone "
-                f"{milestone.name!r}."
+            self._log(
+                f"QualityEngineer (re-enrich): schema validation failed "
+                f"({e}) — falling back to prior spec "
+                f"(confidence={prior_spec.confidence:.2f})"
             )
+            return prior_spec
+        if not spec.capabilities:
+            self._log(
+                f"QualityEngineer (re-enrich): returned zero capabilities "
+                f"for milestone {milestone.name!r} — falling back to prior "
+                f"spec (confidence={prior_spec.confidence:.2f})"
+            )
+            return prior_spec
         self._log(
             f"QualityEngineer (re-enrich): {len(spec.capabilities)} capabilities, "
             f"confidence={spec.confidence:.2f} "
@@ -246,12 +257,36 @@ class QualityEngineer:
         # Reconcile milestone name (cf. enrich).
         raw["milestone_name"] = milestone.name
 
+        # Lenient fallback — review failure is side-channel (drives
+        # REPAIR iters). On schema validation failure, return a
+        # conservative "not approved, no findings, low confidence"
+        # verdict. The milestone's existing repair-iter cap will
+        # eventually accept and move on rather than loop forever.
+        # Confidence=0.0 marks this as a fallback so future tooling
+        # can distinguish from a real "0 findings" review.
         try:
             report = CoverageReport.model_validate(raw)
         except Exception as e:
-            raise QualityEngineerError(
-                f"review: LLM output failed schema validation: {e}"
-            ) from e
+            self._log(
+                f"QualityEngineer (review): schema validation failed "
+                f"({e}) — returning conservative not-approved fallback"
+            )
+            return CoverageReport(
+                milestone_name=milestone.name,
+                approved=False,
+                summary=(
+                    "auto-fallback: review LLM output failed schema "
+                    "validation; conservative not-approved verdict so "
+                    "the next repair iter (or max-iter cap) decides "
+                    "whether to proceed."
+                ),
+                confidence=0.0,
+                recommendations=[
+                    "QualityEngineer review LLM returned malformed JSON "
+                    "after all retries; re-run review or escalate model "
+                    "tier if this persists."
+                ],
+            )
 
         # Sanity: every coverage_by_capability key should be a real
         # capability id from the spec. Trim unknown keys with a warning

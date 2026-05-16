@@ -205,17 +205,30 @@ class TestApprovalOverride:
 
 
 class TestBadResponse:
-    def test_invalid_schema_raises(self):
+    def test_invalid_schema_returns_lenient_fallback(self):
+        # Code review is side-channel (drives REPAIR iters). Bad JSON
+        # shouldn't halt the milestone — return a conservative
+        # not-approved verdict instead. Max-repair-iter cap will
+        # eventually accept and the milestone proceeds.
         client = MagicMock(spec=BaseAIClient)
         client.get_text.return_value = (
             json.dumps({"approved": "yes", "confidence": 12}), "j", [],
         )
         cr = CodeReviewer(client=client)
-        with pytest.raises(CodeReviewError, match="schema validation"):
-            cr.review(
-                milestone=_milestone(), enriched_spec=_spec(),
-                changed_files={"x.py": "y"},
-            )
+        report = cr.review(
+            milestone=_milestone(), enriched_spec=_spec(),
+            changed_files={"x.py": "y"},
+        )
+        assert report.approved is False
+        assert report.confidence == 0.0
+        assert "auto-fallback" in report.summary
+        assert any("malformed JSON" in r for r in report.recommendations)
+        # No findings on the fallback — repair iter re-triggers but
+        # doesn't loop on phantom critical findings.
+        assert report.flagged_symbols == []
+        assert report.anti_pattern_violations == []
+        assert report.ungated_auth == []
+        assert report.missing_error_handling == []
 
 
 # ── Prompt threading ───────────────────────────────────────────────────

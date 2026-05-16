@@ -352,21 +352,102 @@ class TestReview:
         user = next(m.content for m in sent if m.role == "user")
         assert "no test files" in user.lower()
 
-    def test_bad_response_raises_quality_engineer_error(self):
-        # Wrong type for ``approved`` -> schema validation explodes.
+    def test_bad_response_returns_lenient_fallback(self):
+        # Lenient repair-mode counterpart to the prior "raises" test.
+        # Review is side-channel — bad JSON shouldn't halt the milestone.
+        # Wrong type for ``approved`` -> schema validation fails.
         client = MagicMock(spec=BaseAIClient)
         client.get_text.return_value = (
             json.dumps({"approved": "yes please", "confidence": 2.0}),
             "id", [],
         )
         qe = QualityEngineer(client=client)
-        with pytest.raises(QualityEngineerError, match="schema validation"):
-            qe.review(
-                milestone=_milestone(),
-                enriched_spec=self._spec(),
-                engineer_plan={},
-                test_files={},
-            )
+        report = qe.review(
+            milestone=_milestone(),
+            enriched_spec=self._spec(),
+            engineer_plan={},
+            test_files={},
+        )
+        # Conservative: not approved, zero confidence, fallback summary.
+        assert report.approved is False
+        assert report.confidence == 0.0
+        assert "auto-fallback" in report.summary
+        assert any("malformed JSON" in r for r in report.recommendations)
+        # No findings — repair iter will re-trigger but won't loop on
+        # phantom issues. Max-repair-iter cap will eventually accept.
+        assert report.coverage_by_capability == {}
+        assert report.missing_scenarios == []
+
+
+# ── re_enrich ──────────────────────────────────────────────────────────
+
+
+class TestReEnrich:
+    """Re-enrich is a side-channel (called only when confidence is
+    0.4-0.6). Failures should fall back to the prior spec rather
+    than halt — the original is still usable, just less confident."""
+
+    def _prior(self, confidence: float = 0.5) -> EnrichedSpec:
+        return EnrichedSpec(
+            milestone_name="Pet CRUD",
+            capabilities=[
+                CapabilitySpec(
+                    id="cap_0", name="Create pet",
+                    description="Create a pet record",
+                    inputs=[Field(name="name", type="string", required=True)],
+                    outputs=[], validation_rules=[], error_cases=[],
+                    edge_cases=[], auth_required=True,
+                    allowed_roles=["groomer"],
+                    test_scenarios=["happy path"],
+                ),
+            ],
+            confidence=confidence,
+        )
+
+    def test_success_returns_new_spec(self):
+        # Sanity baseline.
+        client = _client_returning(_enriched_spec_payload(caps=2, confidence=0.85))
+        qe = QualityEngineer(client=client)
+        spec = qe.re_enrich(
+            milestone=_milestone(),
+            prior_spec=self._prior(confidence=0.5),
+            architecture=_arch(),
+        )
+        assert spec.confidence == 0.85
+        assert len(spec.capabilities) == 2
+
+    def test_bad_json_falls_back_to_prior_spec(self):
+        # Schema validation fails → return prior_spec, do not raise.
+        prior = self._prior(confidence=0.5)
+        client = MagicMock(spec=BaseAIClient)
+        client.get_text.return_value = (
+            json.dumps({"capabilities": "not a list"}),
+            "id", [],
+        )
+        qe = QualityEngineer(client=client)
+        result = qe.re_enrich(
+            milestone=_milestone(),
+            prior_spec=prior,
+            architecture=_arch(),
+        )
+        # Returned the prior spec unchanged.
+        assert result is prior
+        assert result.confidence == 0.5
+
+    def test_empty_capabilities_falls_back_to_prior_spec(self):
+        # LLM returns valid JSON but zero capabilities — also a
+        # fallback case since a milestone without capabilities is
+        # meaningless.
+        prior = self._prior(confidence=0.5)
+        client = _client_returning(_enriched_spec_payload(caps=0, confidence=0.9))
+        qe = QualityEngineer(client=client)
+        result = qe.re_enrich(
+            milestone=_milestone(),
+            prior_spec=prior,
+            architecture=_arch(),
+        )
+        assert result is prior
+        assert result.confidence == 0.5
 
 
 # ── helpers ────────────────────────────────────────────────────────────
