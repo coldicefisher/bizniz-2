@@ -66,35 +66,87 @@ integration) NOT wired yet — milestone DONE checkpoints are
 sufficient for refactor revert. If finer granularity is needed
 later, add per-phase commits to `MilestoneLoop` callsites.
 
-### 4. Granular issue decomposition
+### 4. Granular issue decomposition via Decomposer agent
 
-CRM v1 timing data (2026-05-15): **Coder subprocess time
-dominated everything** — 545 min across 130 calls. Per-call median
-214s, p95 572s, **max 1072s (~18 min)**. The long tail is
-ServicePlanner emitting feature-sized issues that bundle multiple
-concerns (e.g. "create Modal component AND wire it into 4 pages
-that consume it"). A single Coder pass juggling that much
-produces:
+CRM v1 timing data (2026-05-15): Coder subprocess time dominated
+(545 min across 130 calls, p95 572s, max 1072s ≈ 18 min). Root
+cause: ServicePlanner emits feature-sized issues that bundle 3-5
+files of work into one Coder pass. The model under-attends, debug
+blast radius is wide, refactor extractions can't be atomic.
 
-- Higher LLM cost variance (some calls 30s, some 18min)
-- Worse code quality on the long-tail calls (model under-attends)
-- Harder debugger diagnosis (one failure → blast radius of 3-5
-  files)
-- No parallelization possible (issues bundle dependencies)
-- Refactor extractions can't be atomic commits (one bundled issue
-  produces a multi-concern diff)
+**Decision (2026-05-15):** rather than shrinking ServicePlanner's
+issues (which would lose the "feature-as-unit" semantic), add a
+NEW phase between ServicePlanner and Coder: a **Decomposer** agent
+that breaks each issue into an ordered list of **units of work**.
 
-**Done when:** ServicePlanner emits per-file or per-concern issues
-with a validator that flags issues estimated >300s or spanning
->3 files. p95 Coder duration drops below 300s; p50 around 120s.
-Refactor extractions (item 5) consume 1 issue per commit
-cleanly. Issue-level parallelism (within a layer) becomes
-possible.
+**The new dispatch loop:**
 
-**Why between version control and refactor:** smaller issues
-benefit every downstream Coder-driven step (refactorer, test/debug,
-perf-test runs). Putting it before refactor means item 5's
-extractions are well-shaped from the start, not retrofitted.
+```
+ServicePlanner: backend → 8 issue(s) in 4 layer(s)
+  ↓
+For each issue:
+  Decomposer.decompose(issue, workspace, architecture)
+    → ordered List[UnitOfWork]
+  ↓
+  For each unit (in dependency order):
+    Coder writes the unit (and its test inline for v1)
+    Run unit test → if fail, debugger
+    Mark unit complete
+  ↓
+  Issue complete when all units pass
+```
+
+**Unit of work shape (working definition):**
+
+- ONE new exported symbol (function, class, component, route) OR
+  ONE new behavior added to an existing symbol
+- Bounded to one file ideally; pure boilerplate (imports, types,
+  constants) bundles with the symbol that needs it
+- Has explicit `depends_on` listing prior unit IDs OR existing
+  workspace symbols
+- Has `expected_test_kind` (`unit_test` / `no_test_needed`) so the
+  loop knows whether to require a passing test before moving on
+
+**Why a separate agent (vs Coder self-decomposing):**
+
+- Clean separation of concerns — decomposition is its own
+  judgment, distinct from "write the code"
+- Cheap to test in isolation (decompose without coding)
+- Easy to A/B test decomposition strategies later (different
+  prompts, different models)
+- Naturally pluggable across LLM backends — same as our other
+  single-call agents
+
+**Done when:**
+
+1. `bizniz/decomposer/` package: `Decomposer` agent + types +
+   prompts. Single-call (`claude --print --output-format=json`)
+   pattern matching our other agents.
+2. `MilestoneCodeDispatcher` calls Decomposer for each issue
+   before dispatching units to Coder.
+3. Coder loop runs per-unit (not per-issue); test failure halts at
+   the broken unit.
+4. p95 Coder-per-unit drops below 180s; p50 around 90s. Total
+   Coder time roughly flat — split into more, smaller pieces.
+5. Refactor extractions (item 5) consume one unit per commit
+   cleanly.
+
+**v1 scope cuts (defer to follow-ups):**
+
+- Per-unit Tester separation (today's Coder writes code+test
+  inline; that stays for v1). Splitting Tester out is its own
+  micro-ticket once the Decomposer + loop are proven.
+- Resume tracking at unit granularity. Today's MilestoneState
+  tracks per-issue. v1 redoes all units of an issue on resume
+  (idempotent-ish — Coder skips already-correct code).
+- Parallel unit dispatch within independent dependency leaves.
+  Sequential for v1; parallelism is a tier-2 optimization once
+  serial works.
+
+**Why between version control and refactor:** smaller units benefit
+every downstream Coder-driven step. Item 5's extractions become
+naturally atomic (one unit = one commit). Item 8's perf logging
+sees per-unit granularity, which makes baseline data actionable.
 
 ### 5. Refactorer agent — dedupe + move to shared core
 
