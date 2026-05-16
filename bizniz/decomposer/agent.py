@@ -12,8 +12,8 @@ from bizniz.decomposer.prompts.decompose_prompt import (
     DECOMPOSE_SYSTEM_PROMPT,
     build_decompose_prompt,
 )
+from bizniz.coder.types import Issue
 from bizniz.decomposer.types import DecompositionResult, UnitOfWork
-from bizniz.engineer.types import Issue
 from bizniz.lib.llm_utils import call_with_retry
 
 

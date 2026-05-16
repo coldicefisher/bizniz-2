@@ -28,6 +28,8 @@ from bizniz.architect.types import ServiceDefinition, SystemArchitecture
 from bizniz.code_reviewer.types import CodeReviewReport
 from bizniz.coder.agent import Coder
 from bizniz.coder.types import Issue as CoderIssue
+from bizniz.decomposer.agent import Decomposer, DecomposerError
+from bizniz.decomposer.types import UnitOfWork
 from bizniz.engineer.types import (
     EngineerPlan, EngineerResult, Issue as EngineerIssue,
 )
@@ -65,6 +67,11 @@ ProgressionFactory = Callable[[ServiceDefinition], ModelProgression]
 """service → fresh ModelProgression. New per service so escalation in
 one service doesn't bleed into another."""
 
+DecomposerFactory = Callable[[ServiceDefinition], Decomposer]
+"""service → Decomposer. Optional — when wired, each ServicePlanner-
+emitted issue gets broken into ordered units, and Coder runs per-unit
+instead of per-issue. Roadmap item 4."""
+
 
 class MilestoneCodeDispatcher:
     """Drives all services for one milestone via the v2.5 trio."""
@@ -78,6 +85,7 @@ class MilestoneCodeDispatcher:
         on_status: Optional[Callable[[str], None]] = None,
         only_service: Optional[str] = None,
         skip_planning: bool = False,
+        decomposer_factory: Optional[DecomposerFactory] = None,
     ):
         self._planner_factory = service_planner_factory
         self._coder_factory = coder_factory
@@ -92,6 +100,12 @@ class MilestoneCodeDispatcher:
         # store. Used by --retry-failed to avoid re-planning when the
         # plan already exists in the DB.
         self._skip_planning = skip_planning
+        # Optional decomposer (roadmap item 4). When set, each
+        # ServicePlanner-emitted issue is broken into ordered
+        # ``UnitOfWork`` and the Orchestrator's per-issue loop runs
+        # over units instead. None preserves the pre-item-4 behavior
+        # (Coder gets full feature-sized issues).
+        self._decomposer_factory = decomposer_factory
 
     def run(
         self,
@@ -191,8 +205,31 @@ class MilestoneCodeDispatcher:
                         f"emitted {len(issues)} issues"
                     )
 
+                # ── Decomposition (roadmap item 4) ────────────────────
+                # Optional: when ``decomposer_factory`` is wired, break
+                # each issue into granular units of work and replace the
+                # issue list with the flattened unit-shaped issues. The
+                # Orchestrator's per-issue loop then runs per-unit
+                # instead of per-feature, bounding Coder attention to
+                # one concrete file/symbol at a time.
+                #
+                # Defensive: a Decomposer failure on any issue falls back
+                # to dispatching that issue as-is (single-unit
+                # semantics). The build still progresses; only the
+                # granularity drops back to pre-item-4 for that issue.
+                if self._decomposer_factory is not None:
+                    issues = self._decompose_issues(
+                        issues=issues,
+                        service=service,
+                        architecture=architecture,
+                        existing_files_hint=workspace_summary,
+                    )
+
                 # Persist planned issues immediately so resume sees them
-                # even if the dispatcher dies mid-run.
+                # even if the dispatcher dies mid-run. NOTE: after
+                # decomposition the "issues" list is actually
+                # unit-shaped — persisting the units gives unit-level
+                # resume granularity for free.
                 if active_store is not None:
                     active_store.record_planned(service.name, issues)
 
@@ -261,6 +298,67 @@ class MilestoneCodeDispatcher:
         when the plan already exists in the DB."""
         rows = store.all_rows(service=service_name)
         return [_row_to_coder_issue(r) for r in rows]
+
+    # ── Decomposition (roadmap item 4) ────────────────────────────
+
+    def _decompose_issues(
+        self,
+        *,
+        issues: List[CoderIssue],
+        service: ServiceDefinition,
+        architecture: SystemArchitecture,
+        existing_files_hint: Optional[str],
+    ) -> List[CoderIssue]:
+        """Run each issue through the Decomposer and return a flat
+        list of unit-shaped CoderIssues (preserving the original
+        issue ordering, with units within each issue in
+        dependency order).
+
+        On Decomposer failure for any given issue: fall back to
+        dispatching that issue as-is (one issue = one "unit" of
+        coarse granularity). The build still progresses; only the
+        granularity drops to pre-item-4 for that issue.
+        """
+        if self._decomposer_factory is None:
+            return issues
+        decomposer = self._decomposer_factory(service)
+        flat: List[CoderIssue] = []
+        units_total = 0
+        for parent in issues:
+            try:
+                result = decomposer.decompose(
+                    issue=parent,
+                    service=service,
+                    architecture=architecture,
+                    existing_files_hint=existing_files_hint,
+                )
+            except DecomposerError as e:
+                self._log(
+                    f"Decomposer: {parent.id} failed ({e}); "
+                    f"dispatching as single issue"
+                )
+                flat.append(parent)
+                continue
+            except Exception as e:
+                self._log(
+                    f"Decomposer: {parent.id} raised "
+                    f"{type(e).__name__}: {str(e)[:200]}; "
+                    f"dispatching as single issue"
+                )
+                flat.append(parent)
+                continue
+            self._log(
+                f"Decomposer: {parent.id} → {len(result.ordered_units)} "
+                f"unit(s), confidence={result.confidence:.2f}"
+            )
+            units_total += len(result.ordered_units)
+            for unit in result.ordered_units:
+                flat.append(_unit_to_coder_issue(unit, parent))
+        self._log(
+            f"MilestoneCodeDispatcher: decomposed {len(issues)} issue(s) "
+            f"into {units_total} unit(s) for service `{service.name}`"
+        )
+        return flat
 
     # ── Repair ─────────────────────────────────────────────────────────
 
@@ -501,3 +599,41 @@ def _collect_notes(per_service: List[OrchestratorResult]) -> List[str]:
                 note += f" — {o.error[:120]}"
             notes.append(note)
     return notes
+
+
+def _unit_to_coder_issue(
+    unit: UnitOfWork, parent: CoderIssue,
+) -> CoderIssue:
+    """Wrap a ``UnitOfWork`` as a ``CoderIssue`` so the Orchestrator
+    (which knows only Issue) can dispatch units uniformly.
+
+    The wrapper's ``id`` is the unit id (preserves resume granularity
+    via the issue store) but the description threads parent issue
+    context so the Coder understands what feature it's contributing
+    to. Sibling unit ids appear in the description so the Coder
+    doesn't accidentally try to do the whole parent issue.
+    """
+    success: List[str] = [
+        f"{unit.kind} ships at {unit.target_file}",
+    ]
+    if unit.expected_test_kind == "unit_test":
+        success.append(f"passing unit test for {unit.summary}")
+    description = (
+        f"Part of parent issue {parent.id}: {parent.title}\n\n"
+        f"This unit only: {unit.summary}\n\n"
+        f"{unit.description}\n"
+    )
+    if unit.notes:
+        description += f"\nNotes: {unit.notes}\n"
+    return CoderIssue(
+        id=unit.id,
+        title=unit.summary,
+        description=description,
+        service=parent.service,
+        language=parent.language,
+        target_files=[unit.target_file],
+        test_files=[],
+        success_criteria=success,
+        spec_refs=list(parent.spec_refs),
+        depends_on=list(unit.depends_on),
+    )

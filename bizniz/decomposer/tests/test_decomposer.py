@@ -27,7 +27,7 @@ from bizniz.decomposer.types import (
     DecompositionResult,
     UnitOfWork,
 )
-from bizniz.engineer.types import Issue
+from bizniz.coder.types import Issue
 
 
 def _issue(**over) -> Issue:
@@ -39,6 +39,8 @@ def _issue(**over) -> Issue:
             "returns paginated CompanyOut[]. Create accepts CompanyIn "
             "and returns CompanyOut on 201."
         ),
+        service="backend",
+        language="python",
         target_files=["app/api/routes/companies.py"],
         success_criteria=["GET returns 200", "POST returns 201"],
     )
