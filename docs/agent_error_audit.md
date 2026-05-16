@@ -74,14 +74,14 @@ strict; repair mode is lenient on dep-target failures.
 | 98 | `ServicePlannerError` | Greenfield: 0 issues emitted | **fatal** | OK — service can't produce code with no issues. |
 | 114 | `ServicePlannerError` | Greenfield: individual issue payload failed model validation | **fatal** | OK in greenfield. **Audit**: in repair mode (line 211, see below) the same case is also fatal — should auto-drop the bad issue with a warning. |
 | 128 | `ServicePlannerError` | Greenfield: cyclic deps | **fatal** | OK in greenfield. Cycle = LLM contradicted itself. |
-| 211 | `ServicePlannerError` | **Repair**: individual issue payload failed validation | **fatal** | ⚠️ **Should be lenient**. Mirror the fix-issue-dropping pattern from `_validate_files_non_empty` and `_repair_dep_targets`. |
-| 223 | `ServicePlannerError` | **Repair**: cyclic deps | **fatal** | ⚠️ **Should be lenient** — drop the cycle-causing edge rather than crash repair. |
+| 211 | (removed) | **Repair**: individual issue payload failed validation | **lenient** | ✅ **SHIPPED**. Drops bad payload, logs, continues. Returns `[]` if every payload bad. Test: `test_repair_drops_invalid_payload_keeps_valid_siblings`. |
+| 223 | (removed) | **Repair**: cyclic deps | **lenient** | ✅ **SHIPPED** via `_break_cycle`. Drops inter-cycle edges, re-topo-sorts. Tests: `test_repair_breaks_cycle_instead_of_raising`, `test_repair_cycle_preserves_deps_outside_cycle_set`. |
 | 248 | `ServicePlannerError` | Duplicate issue ids (both modes) | **fatal** | OK in greenfield. In repair mode, could deduplicate with a warning. Marginal. |
 | 261 | `ServicePlannerError` | Unknown dep target (greenfield only) | **fatal** | OK. Repair path uses `_repair_dep_targets` (lenient) at line 217. |
 
 **Follow-up tickets:**
-- `service_planner_repair_lenient_payload_validation` — line 211 should drop bad issues, not raise.
-- `service_planner_repair_lenient_cycles` — line 223 should drop the offending edge, not raise.
+- ✅ `service_planner_repair_lenient_payload_validation` — SHIPPED.
+- ✅ `service_planner_repair_lenient_cycles` — SHIPPED.
 
 ### Decomposer (`bizniz/decomposer/agent.py`)
 
@@ -230,18 +230,18 @@ non-negotiable item 5 done-when.
 
 ## Summary table — follow-up tickets
 
-| Ticket | File | Lines | Estimated effort |
-|---|---|---|---|
-| `service_planner_repair_lenient_payload_validation` | service_planner/agent.py | 211 | 30 min + test |
-| `service_planner_repair_lenient_cycles` | service_planner/agent.py | 223 | 30 min + test |
-| `qe_reenrich_lenient_fallback` | quality_engineer/agent.py | 184, 188 | 1 hr + tests |
-| `qe_review_lenient_fallback` | quality_engineer/agent.py | 252 | 1 hr + test |
-| `code_reviewer_lenient_fallback` | code_reviewer/agent.py | 103 | 1 hr + test |
-| `milestone_code_dispatcher_raise_audit` | driver/milestone_code_dispatcher.py | TBD | 2 hr (deep-audit) |
-| `projectdb_other_operational_errors` | project/project_db.py | TBD | 1 hr (mirror existing pattern) |
+| Ticket | File | Lines | Estimated effort | Status |
+|---|---|---|---|---|
+| `service_planner_repair_lenient_payload_validation` | service_planner/agent.py | 211 | 30 min + test | ✅ SHIPPED |
+| `service_planner_repair_lenient_cycles` | service_planner/agent.py | 223 | 30 min + test | ✅ SHIPPED |
+| `qe_reenrich_lenient_fallback` | quality_engineer/agent.py | 184, 188 | 1 hr + tests | open |
+| `qe_review_lenient_fallback` | quality_engineer/agent.py | 252 | 1 hr + test | open |
+| `code_reviewer_lenient_fallback` | code_reviewer/agent.py | 103 | 1 hr + test | open |
+| `milestone_code_dispatcher_raise_audit` | driver/milestone_code_dispatcher.py | TBD | 2 hr (deep-audit) | open |
+| `projectdb_other_operational_errors` | project/project_db.py | TBD | 1 hr (mirror existing pattern) | open |
 
-**Total estimated effort:** ~8 hours of focused work to ship the
-remaining lenient-path patches + tests.
+**Remaining estimated effort:** ~6 hours of focused work to ship
+the remaining lenient-path patches + tests.
 
 ## What's already shipped under item 5
 
@@ -249,7 +249,10 @@ remaining lenient-path patches + tests.
 - ✅ `ServicePlanner._repair_dep_targets` (commit `f24b5d7`)
 - ✅ `call_with_retry` separate transient + permanent budgets with
   exponential backoff and env-var override (commit `ee81331`)
-- ✅ This audit doc
+- ✅ This audit doc (commit `899cbdc`)
+- ✅ `ServicePlanner.plan_repair` lenient payload validation + cycle
+  breaking via `_break_cycle` helper, with `CyclicDependencyError`
+  gaining a structured `cyclic_ids` attribute
 
 ## Related
 

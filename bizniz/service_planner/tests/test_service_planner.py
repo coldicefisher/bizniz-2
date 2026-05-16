@@ -373,3 +373,107 @@ class TestRepair:
         )
         by_id = {i.id: i for i in issues}
         assert by_id["BA-fix1-2"].depends_on == ["BA-fix1-1"]
+
+    def test_repair_drops_invalid_payload_keeps_valid_siblings(self):
+        # LLM emits one valid issue + one malformed issue (missing
+        # required `title`). Lenient repair drops the bad one, keeps
+        # the good one, milestone proceeds.
+        bad = {
+            "id": "BA-fix1-bad",
+            # missing title
+            "description": "incomplete payload",
+            "target_files": ["app/x.py"],
+            "test_files": ["tests/test_x.py"],
+            "success_criteria": ["compiles"],
+            "spec_refs": ["cap_x"],
+            "depends_on": [],
+        }
+        good = _issue_dict("BA-fix1-good")
+        client = _client_returning({"issues": [bad, good]})
+        planner = ServicePlanner(client=client)
+        issues = planner.plan_repair(
+            architecture=_arch(), enriched_spec=_spec(),
+            service=_service(),
+            prior_issues=[_prior_issue("BE-001")],
+            prior_dispositions={"BE-001": "passed"},
+            coverage_report=_coverage(),
+            code_review_report=_code_review(),
+            repair_iteration=1,
+        )
+        assert [i.id for i in issues] == ["BA-fix1-good"]
+
+    def test_repair_all_payloads_invalid_returns_empty(self):
+        # Every payload is bad — return [] rather than raise. Milestone
+        # proceeds to next gate (which can then re-trigger or halt
+        # based on findings).
+        bad_a = {"id": "X", "description": "no title"}
+        bad_b = {"id": "Y", "description": "no title"}
+        client = _client_returning({"issues": [bad_a, bad_b]})
+        planner = ServicePlanner(client=client)
+        issues = planner.plan_repair(
+            architecture=_arch(), enriched_spec=_spec(),
+            service=_service(),
+            prior_issues=[_prior_issue("BE-001")],
+            prior_dispositions={"BE-001": "passed"},
+            coverage_report=_coverage(),
+            code_review_report=_code_review(),
+            repair_iteration=1,
+        )
+        assert issues == []
+
+    def test_repair_breaks_cycle_instead_of_raising(self):
+        # A → B → A cycle. Lenient repair drops the inter-cycle edges
+        # and re-topo-sorts. Both issues should survive with empty
+        # depends_on.
+        client = _client_returning({"issues": [
+            _issue_dict("A", deps=["B"]),
+            _issue_dict("B", deps=["A"]),
+        ]})
+        planner = ServicePlanner(client=client)
+        issues = planner.plan_repair(
+            architecture=_arch(), enriched_spec=_spec(),
+            service=_service(),
+            prior_issues=[_prior_issue("BE-001")],
+            prior_dispositions={"BE-001": "passed"},
+            coverage_report=_coverage(),
+            code_review_report=_code_review(),
+            repair_iteration=1,
+        )
+        assert {i.id for i in issues} == {"A", "B"}
+        by_id = {i.id: i for i in issues}
+        # Both edges (both endpoints in cycle) dropped.
+        assert by_id["A"].depends_on == []
+        assert by_id["B"].depends_on == []
+
+    def test_repair_cycle_preserves_deps_outside_cycle_set(self):
+        # D depends on E (both outside the A↔B cycle). Even when A↔B
+        # are reported as cyclic, D's dep on E must survive.
+        # Note: ``cyclic_ids`` from Kahn's algorithm includes both
+        # items strictly IN the cycle AND items merely blocked behind
+        # it. So a third issue C that depends on A WILL also lose its
+        # edge — that's the cost of best-effort repair: blocked-behind
+        # items lose ordering hint but the milestone keeps moving.
+        client = _client_returning({"issues": [
+            _issue_dict("A", deps=["B"]),
+            _issue_dict("B", deps=["A"]),
+            _issue_dict("D"),
+            _issue_dict("E", deps=["D"]),
+        ]})
+        planner = ServicePlanner(client=client)
+        issues = planner.plan_repair(
+            architecture=_arch(), enriched_spec=_spec(),
+            service=_service(),
+            prior_issues=[_prior_issue("BE-001")],
+            prior_dispositions={"BE-001": "passed"},
+            coverage_report=_coverage(),
+            code_review_report=_code_review(),
+            repair_iteration=1,
+        )
+        by_id = {i.id: i for i in issues}
+        # Cycle edges removed (A and B are in the cycle).
+        assert by_id["A"].depends_on == []
+        assert by_id["B"].depends_on == []
+        # D and E are entirely outside the cycle reachability — their
+        # edge survives.
+        assert by_id["D"].depends_on == []
+        assert by_id["E"].depends_on == ["D"]

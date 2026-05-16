@@ -17,7 +17,7 @@ strictly depend only on layers 0..N-1.
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from typing import Any, Iterable, List, Protocol, TypeVar
+from typing import Any, Iterable, List, Optional, Protocol, TypeVar
 
 
 class _HasIdAndDeps(Protocol):
@@ -31,7 +31,16 @@ T = TypeVar("T")
 
 
 class CyclicDependencyError(Exception):
-    """Items form a dependency cycle — no valid topo order exists."""
+    """Items form a dependency cycle — no valid topo order exists.
+
+    ``cyclic_ids`` carries the ids of all items participating in the
+    cycle (or merely blocked behind it) so callers that want to repair
+    rather than halt can drop edges among those members.
+    """
+
+    def __init__(self, message: str, cyclic_ids: Optional[List[Any]] = None):
+        super().__init__(message)
+        self.cyclic_ids: List[Any] = list(cyclic_ids or [])
 
 
 def _item_id(item: Any) -> Any:
@@ -102,6 +111,7 @@ def topological_layers(items: Iterable[T]) -> List[List[T]]:
             if in_degree[_item_id(it)] > 0
         ]
         raise CyclicDependencyError(
-            f"dependency cycle involving: {cyclic}"
+            f"dependency cycle involving: {cyclic}",
+            cyclic_ids=cyclic,
         )
     return layers

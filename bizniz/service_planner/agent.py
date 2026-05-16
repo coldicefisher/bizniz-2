@@ -203,15 +203,30 @@ class ServicePlanner:
             it["service"] = service.name
             it["language"] = (service.language or "python").lower()
 
+        # Lenient payload validation in repair mode — losing one bad
+        # fix-issue is preferable to crashing the milestone. Same
+        # philosophy as ``_repair_dep_targets`` and
+        # ``_validate_files_non_empty``. Greenfield ``plan_service``
+        # keeps strict validation since unknown payloads there are
+        # real defects worth surfacing.
         issues: List[Issue] = []
+        dropped_payloads = 0
         for it in items:
             try:
                 issues.append(Issue.model_validate(it))
             except Exception as e:
-                raise ServicePlannerError(
-                    f"ServicePlanner.repair({service.name}): issue failed "
-                    f"validation — {e}; payload: {it!r}"
-                ) from e
+                dropped_payloads += 1
+                self._log(
+                    f"ServicePlanner.repair({service.name}): dropping "
+                    f"invalid fix-issue payload — {e}; payload: {it!r}"
+                )
+        if dropped_payloads and not issues:
+            self._log(
+                f"ServicePlanner.repair({service.name}): all "
+                f"{dropped_payloads} payload(s) invalid — returning no "
+                f"fix-issues this iter (milestone will proceed to next gate)"
+            )
+            return []
 
         self._validate_unique_ids(issues, service.name)
         issues = self._repair_dep_targets(issues, service.name)
@@ -219,10 +234,9 @@ class ServicePlanner:
 
         try:
             layers = topological_layers(issues)
-        except CyclicDependencyError as e:
-            raise ServicePlannerError(
-                f"ServicePlanner.repair({service.name}): {e}"
-            ) from e
+        except CyclicDependencyError as cycle_err:
+            issues = self._break_cycle(issues, cycle_err, service.name)
+            layers = topological_layers(issues)
 
         ordered: List[Issue] = []
         for layer in layers:
@@ -262,6 +276,44 @@ class ServicePlanner:
                 f"ServicePlanner({service_name}): depends_on references "
                 f"unknown issue id(s): {bad}"
             )
+
+    def _break_cycle(
+        self,
+        issues: List[Issue],
+        cycle_err: "CyclicDependencyError",
+        service_name: str,
+    ) -> List[Issue]:
+        """Repair-mode counterpart to the strict cycle raise.
+
+        Drops every ``depends_on`` edge whose source is in the
+        cyclic_ids set, so topo-sort succeeds on the re-call. Issues
+        entirely outside the cycle's reachability keep all their
+        edges.
+
+        Note: ``CyclicDependencyError.cyclic_ids`` from Kahn's
+        algorithm includes both items strictly IN the cycle AND
+        items merely blocked behind it. So a blocked-behind item C
+        that depends on a cycle member A also loses its edge — best-
+        effort repair trades C's ordering hint for "milestone keeps
+        moving." Greenfield ``plan_service`` keeps the strict raise
+        because cycles in a fresh plan usually mean the LLM
+        contradicted itself.
+        """
+        cyclic_set = {cid for cid in cycle_err.cyclic_ids}
+        self._log(
+            f"ServicePlanner.repair({service_name}): dependency cycle "
+            f"involving {sorted(cyclic_set)} — dropping inter-cycle dep "
+            f"edges and re-sorting"
+        )
+        repaired: List[Issue] = []
+        for issue in issues:
+            if issue.id in cyclic_set:
+                new_deps = [
+                    d for d in issue.depends_on if d not in cyclic_set
+                ]
+                issue = issue.model_copy(update={"depends_on": new_deps})
+            repaired.append(issue)
+        return repaired
 
     def _repair_dep_targets(
         self, issues: List[Issue], service_name: str,
