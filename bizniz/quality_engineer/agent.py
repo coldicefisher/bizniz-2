@@ -25,6 +25,7 @@ from bizniz.quality_engineer.prompts.enrich_prompt import (
     ENRICH_SCHEMA,
     ENRICH_SYSTEM_PROMPT,
     build_enrich_prompt,
+    build_reenrich_prompt,
 )
 from bizniz.quality_engineer.prompts.review_prompt import (
     REVIEW_SCHEMA,
@@ -125,6 +126,74 @@ class QualityEngineer:
         self._log(
             f"QualityEngineer (enrich): {len(spec.capabilities)} capabilities, "
             f"confidence={spec.confidence:.2f}"
+        )
+        return spec
+
+    def re_enrich(
+        self,
+        milestone: Milestone,
+        prior_spec: EnrichedSpec,
+        architecture: SystemArchitecture,
+        auth_contract: Optional[str] = None,
+        prior_specs: Optional[Iterable[EnrichedSpec]] = None,
+    ) -> EnrichedSpec:
+        """Second-pass enrich when the first pass returned low
+        confidence. The model sees its own prior output + an
+        explicit "name the ambiguities and either resolve them or
+        write TODOs" instruction. Returns a fresh EnrichedSpec;
+        caller picks whichever has higher confidence.
+
+        Threaded as part of the load-bearing confidence-signal work
+        (roadmap item 1). The prior single-pass behavior had QE
+        self-rate confidence as descriptive telemetry; this method
+        is the action the harness takes when confidence is in the
+        re-enrich band (default 0.4-0.6).
+        """
+        self._log(
+            f"QualityEngineer (re-enrich): {milestone.name} "
+            f"(prior confidence={prior_spec.confidence:.2f})"
+        )
+        prior_jsons = [s.model_dump_json(indent=2) for s in (prior_specs or [])]
+        user_prompt = build_reenrich_prompt(
+            milestone_name=milestone.name,
+            problem_slice=milestone.problem_slice,
+            use_cases=milestone.use_cases,
+            success_criteria=milestone.success_criteria,
+            architecture_summary=_summarize_architecture(architecture),
+            auth_contract=auth_contract,
+            prior_contracts=prior_jsons,
+            prior_low_confidence_spec_json=prior_spec.model_dump_json(indent=2),
+            prior_confidence=prior_spec.confidence,
+        )
+        raw = call_with_retry(
+            client=self._client,
+            messages=[
+                Message(role="system", content=ENRICH_SYSTEM_PROMPT),
+                Message(role="user", content=user_prompt),
+            ],
+            response_format=ResponseFormat.JSON_SCHEMA,
+            schema=ENRICH_SCHEMA,
+            max_attempts=self._max_retries,
+            on_status=self._on_status,
+            label="QualityEngineer.re_enrich",
+        )
+        raw["milestone_name"] = milestone.name
+        try:
+            spec = EnrichedSpec.model_validate(raw)
+        except Exception as e:
+            raise QualityEngineerError(
+                f"re_enrich: LLM output failed schema validation: {e}"
+            ) from e
+        if not spec.capabilities:
+            raise QualityEngineerError(
+                f"re_enrich: returned zero capabilities for milestone "
+                f"{milestone.name!r}."
+            )
+        self._log(
+            f"QualityEngineer (re-enrich): {len(spec.capabilities)} capabilities, "
+            f"confidence={spec.confidence:.2f} "
+            f"({'improved' if spec.confidence > prior_spec.confidence else 'unchanged'} "
+            f"vs prior {prior_spec.confidence:.2f})"
         )
         return spec
 

@@ -73,9 +73,18 @@ GUIDELINES
 5. The auth contract is authoritative. If it says role names are
    ``landlord`` and ``tenant``, do NOT use ``admin``/``user``.
 
-6. Confidence: rate yourself 0-1. Below 0.6 means there's enough
-   ambiguity in the milestone that the Engineer should treat the spec
-   as a draft and ask follow-up questions before implementing.
+6. Confidence: rate yourself 0-1. Score honestly — the harness
+   acts on this rating:
+   - >= 0.6: spec ships to the Engineer as-is.
+   - 0.4 - 0.6: harness triggers ONE re-enrich pass with an
+     augmented "name your ambiguities" prompt. If you genuinely
+     can't improve over your first pass, return the same
+     confidence — the harness detects the lack of improvement.
+   - < 0.4: harness fires a soft gate (halts in --interactive, warns
+     in --auto) so a human can review before the Engineer burns
+     cycles on an unreliable spec.
+   Under-rating wastes a re-enrich call; over-rating ships broken
+   specs downstream. Honest self-assessment is load-bearing.
 
 Output JSON ONLY, conforming to the provided schema. No prose.
 """
@@ -250,6 +259,76 @@ def build_enrich_prompt(
     )
 
     return "".join(parts)
+
+
+def build_reenrich_prompt(
+    *,
+    milestone_name: str,
+    problem_slice: str,
+    use_cases: Iterable[str],
+    success_criteria: Iterable[str],
+    architecture_summary: str,
+    auth_contract: Optional[str] = None,
+    prior_contracts: Optional[Iterable[str]] = None,
+    prior_low_confidence_spec_json: str = "",
+    prior_confidence: float = 0.0,
+) -> str:
+    """Build a user message for a SECOND enrich pass when the first
+    came back with confidence in the re-enrich band (default 0.4-0.6).
+
+    The model sees its own prior low-confidence output + an explicit
+    instruction to name what made it uncertain and either resolve the
+    ambiguities or surface them as TODOs in the spec's notes. Two
+    outcomes are valuable: (a) the second pass actually has clearer
+    grounding and produces a stronger spec, OR (b) the TODOs land in
+    the spec so the Engineer sees them and surfaces them in
+    follow-up work rather than silently coding around uncertainty.
+    """
+    base = build_enrich_prompt(
+        milestone_name=milestone_name,
+        problem_slice=problem_slice,
+        use_cases=use_cases,
+        success_criteria=success_criteria,
+        architecture_summary=architecture_summary,
+        auth_contract=auth_contract,
+        prior_contracts=prior_contracts,
+    )
+    addendum = (
+        "\n## RE-ENRICH PASS (confidence was low)\n"
+        f"Your prior enrichment of this milestone scored "
+        f"confidence={prior_confidence:.2f}, below the 0.6 threshold\n"
+        "that triggers this re-pass. The prior EnrichedSpec is below.\n"
+        "\n"
+        "Do BOTH of the following:\n"
+        "\n"
+        "1. **Name the ambiguities** explicitly. What about this\n"
+        "   milestone made you uncertain? List them as bullet points.\n"
+        "   Common causes: unclear scope boundaries, conflicting use\n"
+        "   cases, missing architectural decisions, ambiguous data\n"
+        "   shapes, role/permission unknowns.\n"
+        "\n"
+        "2. **Resolve or document each one.** For each ambiguity:\n"
+        "   - If you can resolve it by re-reading the architecture\n"
+        "     summary / prior specs / auth contract above, do so and\n"
+        "     write a sharper capability/scenario in the new spec.\n"
+        "   - If you cannot resolve from available context, add a TODO\n"
+        "     to the spec's ``notes`` field describing the unknown so\n"
+        "     the Engineer can surface it (e.g.\n"
+        "     ``TODO: clarify whether sales role can edit other users'\n"
+        "     deals or only their own``).\n"
+        "\n"
+        "Then return a fresh EnrichedSpec (same schema as before). If\n"
+        "you genuinely cannot improve over the prior pass, return a\n"
+        "spec with the same confidence — the harness will detect the\n"
+        "lack of improvement and decide whether to halt for human\n"
+        "review.\n"
+        "\n"
+        "PRIOR LOW-CONFIDENCE SPEC:\n"
+        "```json\n"
+        f"{prior_low_confidence_spec_json.strip()}\n"
+        "```\n"
+    )
+    return base + addendum
 
 
 def render_enriched_spec(spec) -> str:

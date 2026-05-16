@@ -98,6 +98,13 @@ class MilestoneLoop:
         refactor_phase: Optional[RefactorPhase] = None,
         total_milestones: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        # Confidence-signal thresholds (roadmap item 1). When
+        # QualityEngineer.enrich returns confidence < halt threshold,
+        # fire the ``enrich_low_confidence`` soft gate; when in the
+        # mid-band (halt <= conf < low), run one re-enrich pass and
+        # take whichever spec has higher confidence.
+        confidence_low_threshold: float = 0.6,
+        confidence_halt_threshold: float = 0.4,
     ):
         self._engineer = engineer
         self._qe = quality_engineer
@@ -105,6 +112,8 @@ class MilestoneLoop:
         self._integration = integration_phase
         self._smoke = smoke_phase
         self._smoke_recovery = smoke_recovery
+        self._confidence_low_threshold = confidence_low_threshold
+        self._confidence_halt_threshold = confidence_halt_threshold
         self._ux_phase = ux_phase
         self._refactor_phase = refactor_phase
         self._total_milestones = total_milestones
@@ -872,12 +881,91 @@ class MilestoneLoop:
     def _phase_enrich(
         self, milestone, architecture, auth_contract, prior_list,
     ) -> EnrichedSpec:
-        return self._qe.enrich(
+        spec = self._qe.enrich(
             milestone=milestone,
             architecture=architecture,
             auth_contract=auth_contract,
             prior_specs=prior_list,
         )
+        return self._maybe_re_enrich(
+            spec=spec,
+            milestone=milestone,
+            architecture=architecture,
+            auth_contract=auth_contract,
+            prior_list=prior_list,
+        )
+
+    def _maybe_re_enrich(
+        self,
+        spec: EnrichedSpec,
+        milestone,
+        architecture,
+        auth_contract,
+        prior_list,
+    ) -> EnrichedSpec:
+        """Confidence-signal load-bearing logic (roadmap item 1).
+
+        Three bands based on ``spec.confidence``:
+          - ``>= low_threshold`` (default 0.6): return as-is.
+          - ``halt_threshold <= conf < low_threshold`` (default
+            0.4-0.6): run ONE re-enrich pass with the augmented prompt,
+            return whichever has higher confidence.
+          - ``< halt_threshold`` (default < 0.4): fire the
+            ``enrich_low_confidence`` soft gate. In ``--auto`` /
+            ``strict`` mode this warns and returns the original spec;
+            in ``--interactive`` mode it halts for human review.
+        """
+        if spec.confidence >= self._confidence_low_threshold:
+            return spec
+        if spec.confidence < self._confidence_halt_threshold:
+            # Soft gate. ``--interactive`` halts; otherwise warns +
+            # returns the low-confidence spec so the build proceeds.
+            self._gates.soft(
+                "enrich_low_confidence",
+                f"enrich confidence {spec.confidence:.2f} < halt "
+                f"threshold {self._confidence_halt_threshold:.2f}; "
+                f"spec may be unreliable for milestone "
+                f"{milestone.name!r}",
+            )
+            return spec
+        # Mid-band: one re-enrich attempt with the augmented prompt.
+        if self._on_status:
+            try:
+                self._on_status(
+                    f"QualityEngineer: enrich confidence "
+                    f"{spec.confidence:.2f} in re-enrich band "
+                    f"[{self._confidence_halt_threshold:.2f}, "
+                    f"{self._confidence_low_threshold:.2f}); "
+                    f"running augmented pass..."
+                )
+            except Exception:
+                pass
+        try:
+            retry_spec = self._qe.re_enrich(
+                milestone=milestone,
+                prior_spec=spec,
+                architecture=architecture,
+                auth_contract=auth_contract,
+                prior_specs=prior_list,
+            )
+        except Exception as e:
+            # Re-enrich raising should never tank the pipeline — fall
+            # back to the original low-confidence spec. The Engineer
+            # sees it + the (potentially incomplete) notes; the soft
+            # gate's "may be unreliable" warning surfaces in logs.
+            if self._on_status:
+                try:
+                    self._on_status(
+                        f"QualityEngineer.re_enrich raised "
+                        f"{type(e).__name__}: {e}; sticking with "
+                        f"prior spec (confidence={spec.confidence:.2f})"
+                    )
+                except Exception:
+                    pass
+            return spec
+        if retry_spec.confidence > spec.confidence:
+            return retry_spec
+        return spec
 
     def _phase_implement(
         self, milestone, architecture, spec, auth_contract, prior_list,
