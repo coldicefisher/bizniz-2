@@ -214,7 +214,7 @@ class ServicePlanner:
                 ) from e
 
         self._validate_unique_ids(issues, service.name)
-        self._validate_dep_targets(issues, service.name)
+        issues = self._repair_dep_targets(issues, service.name)
         issues = self._validate_files_non_empty(issues, service.name)
 
         try:
@@ -262,6 +262,34 @@ class ServicePlanner:
                 f"ServicePlanner({service_name}): depends_on references "
                 f"unknown issue id(s): {bad}"
             )
+
+    def _repair_dep_targets(
+        self, issues: List[Issue], service_name: str,
+    ) -> List[Issue]:
+        """Repair-mode counterpart to ``_validate_dep_targets``.
+
+        Drops unknown dep edges with a warning instead of raising.
+        Repair iterations are a side-channel and losing a dep edge
+        (worst case: a fix-issue runs in a slightly suboptimal order)
+        is preferable to aborting the milestone. Live-surfaced
+        repair iter 1 on CRM v1 M5 where the LLM emitted
+        ``BA-fix1-3 depends_on=['BA-fix1-2']`` without emitting
+        ``BA-fix1-2`` itself.
+        """
+        ids = {i.id for i in issues}
+        repaired: List[Issue] = []
+        for i in issues:
+            bad = [d for d in i.depends_on if d not in ids]
+            if not bad:
+                repaired.append(i)
+                continue
+            good = [d for d in i.depends_on if d in ids]
+            self._log(
+                f"ServicePlanner.repair({service_name}): issue {i.id} cites "
+                f"unknown dep(s) {bad} — dropping those edges, continuing"
+            )
+            repaired.append(i.model_copy(update={"depends_on": good}))
+        return repaired
 
     def _validate_files_non_empty(
         self, issues: List[Issue], service_name: str,

@@ -330,3 +330,46 @@ class TestRepair:
         assert "BE-001" in user_msg
         # Iteration number present
         assert "iter" in user_msg.lower()
+
+    def test_repair_drops_unknown_dep_instead_of_raising(self):
+        # Live-surfaced on CRM v1 M5 repair iter 1: LLM emitted
+        # BA-fix1-3 with depends_on=['BA-fix1-2'] but never emitted
+        # BA-fix1-2 itself. Greenfield raises, repair drops the edge.
+        client = _client_returning({"issues": [
+            _issue_dict("BA-fix1-1"),
+            _issue_dict("BA-fix1-3", deps=["BA-fix1-2"]),  # bad dep
+        ]})
+        planner = ServicePlanner(client=client)
+        issues = planner.plan_repair(
+            architecture=_arch(), enriched_spec=_spec(),
+            service=_service(),
+            prior_issues=[_prior_issue("BE-001")],
+            prior_dispositions={"BE-001": "passed"},
+            coverage_report=_coverage(),
+            code_review_report=_code_review(),
+            repair_iteration=1,
+        )
+        assert {i.id for i in issues} == {"BA-fix1-1", "BA-fix1-3"}
+        # The bad dep was dropped, not preserved.
+        by_id = {i.id: i for i in issues}
+        assert by_id["BA-fix1-3"].depends_on == []
+
+    def test_repair_keeps_valid_dep_alongside_dropped_bad_one(self):
+        # Mix of valid + invalid deps on the same issue — keep valid,
+        # drop invalid.
+        client = _client_returning({"issues": [
+            _issue_dict("BA-fix1-1"),
+            _issue_dict("BA-fix1-2", deps=["BA-fix1-1", "BA-ghost"]),
+        ]})
+        planner = ServicePlanner(client=client)
+        issues = planner.plan_repair(
+            architecture=_arch(), enriched_spec=_spec(),
+            service=_service(),
+            prior_issues=[_prior_issue("BE-001")],
+            prior_dispositions={"BE-001": "passed"},
+            coverage_report=_coverage(),
+            code_review_report=_code_review(),
+            repair_iteration=1,
+        )
+        by_id = {i.id: i for i in issues}
+        assert by_id["BA-fix1-2"].depends_on == ["BA-fix1-1"]
