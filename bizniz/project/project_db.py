@@ -27,10 +27,32 @@ if TYPE_CHECKING:
     from bizniz.project.project import Project
 
 
+# Known transient ``OperationalError`` shapes. Lookup is by
+# case-insensitive substring on the message. Each entry maps to a
+# human-readable label used in the log line so operators can
+# distinguish causes when they recur.
+_TRANSIENT_PATTERNS: tuple = (
+    ("readonly", "readonly-database"),
+    ("database is locked", "database-locked"),
+    ("disk i/o error", "disk-io-error"),
+    ("unable to open database file", "unable-to-open"),
+)
+
+
+def _transient_shape(msg: str) -> "Optional[str]":
+    """Return the human-readable shape label if ``msg`` indicates a
+    transient OperationalError; ``None`` otherwise."""
+    lower = msg.lower()
+    for needle, label in _TRANSIENT_PATTERNS:
+        if needle in lower:
+            return label
+    return None
+
+
 class _RetryingConnection:
     """Thin wrapper around ``sqlite3.Connection`` that retries
-    ``OperationalError('attempt to write a readonly database')`` once
-    by closing + reopening the connection.
+    transient ``OperationalError`` shapes once by closing + reopening
+    the connection.
 
     Surfaced 2026-05-15 during crm_v1 M5: after hours of writes
     across many subprocess boundaries (Coder, MCP server, smoke
@@ -38,6 +60,11 @@ class _RetryingConnection:
     enters a state where SQLite returns "readonly" on UPDATEs even
     though the file is writable from a fresh process. Reconnecting
     clears whatever transient state caused it.
+
+    Roadmap item 5 audit (2026-05-16) extended the retry to cover
+    other transient shapes — see ``_TRANSIENT_PATTERNS``. Permanent
+    OperationalError shapes (schema mismatch, syntax errors,
+    constraint failures) still propagate immediately.
 
     Wrapper proxies everything to the underlying connection; only
     ``execute``, ``executemany``, ``executescript``, and ``commit``
@@ -74,17 +101,20 @@ class _RetryingConnection:
         # Preserve row_factory across reconnects.
         self._conn.row_factory = prev_row_factory
 
-    def _retry_on_readonly(self, fn, *args, **kwargs):
+    def _retry_on_transient(self, fn, *args, **kwargs):
         """Run ``fn(*args, **kwargs)``. If it raises
-        ``OperationalError`` with 'readonly' in the message,
-        reconnect and retry once. Other errors re-raise."""
+        ``OperationalError`` whose message matches a known transient
+        shape, reconnect and retry once. Permanent OperationalError
+        shapes (schema/syntax/constraint failures) re-raise immediately.
+        Non-OperationalError exceptions always re-raise."""
         try:
             return fn(*args, **kwargs)
         except sqlite3.OperationalError as e:
-            if "readonly" not in str(e).lower():
+            shape = _transient_shape(str(e))
+            if shape is None:
                 raise
             print(
-                f"  [ProjectDB] readonly-database OperationalError; "
+                f"  [ProjectDB] {shape} OperationalError; "
                 f"reconnecting and retrying once...",
                 file=sys.stderr, flush=True,
             )
@@ -94,22 +124,22 @@ class _RetryingConnection:
     # ── Wrapped methods ───────────────────────────────────────────────
 
     def execute(self, sql, *args, **kwargs):
-        return self._retry_on_readonly(
+        return self._retry_on_transient(
             lambda: self._conn.execute(sql, *args, **kwargs),
         )
 
     def executemany(self, sql, *args, **kwargs):
-        return self._retry_on_readonly(
+        return self._retry_on_transient(
             lambda: self._conn.executemany(sql, *args, **kwargs),
         )
 
     def executescript(self, sql, *args, **kwargs):
-        return self._retry_on_readonly(
+        return self._retry_on_transient(
             lambda: self._conn.executescript(sql, *args, **kwargs),
         )
 
     def commit(self):
-        return self._retry_on_readonly(lambda: self._conn.commit())
+        return self._retry_on_transient(lambda: self._conn.commit())
 
     # ── Pass-through ──────────────────────────────────────────────────
 

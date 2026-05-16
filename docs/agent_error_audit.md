@@ -1,6 +1,8 @@
 # Agent Error-Path Audit — Item 5
 
-**Status:** Roadmap item 5, in progress.
+**Status:** ✅ Roadmap item 5 **CLOSED** 2026-05-16. All 7
+follow-up tickets shipped or verified. Future agent additions
+should be audited against this same matrix before landing.
 
 **Goal:** Every `raise` in every agent classified, every lenient
 path pinned by a test. Triggered by three CRM v1 M5 crashes on
@@ -166,11 +168,26 @@ the dispatcher.
 
 ### MilestoneCodeDispatcher (`bizniz/driver/milestone_code_dispatcher.py`)
 
-Mixed. Some raises are legitimately fatal (state corruption,
-unrecoverable plan failures); others should soft-fail.
+**Status:** ✅ Audited 2026-05-16 — no patches needed.
 
-**Status:** Not yet deep-audited. Open follow-up:
-`milestone_code_dispatcher_raise_audit`.
+The dispatcher has exactly one `raise` site: line 427 raises
+`RuntimeError` if `repair()` is called without an `IssueStateStore`.
+That's a precondition check (like an assert) — fires only if the
+caller is buggy, never on runtime input. Correctly fatal.
+
+The interesting layer in this file is the **catch logic**, which is
+already comprehensive:
+
+- Line 223 — `except Exception` around `ServicePlanner.plan_service`.
+  Any planner-side failure skips the service (logs the exception
+  type + message), milestone continues with remaining services.
+- Line 371 — `except DecomposerError` followed by line 378
+  `except Exception`. Any Decomposer failure falls back to single-
+  unit dispatch (the issue runs as-is, no granularity loss matters).
+- Line 527 — defensive `except Exception: pass` around the status
+  callback so a buggy logger can't tank the dispatcher.
+
+This is the textbook lenient-side-channel pattern, already shipped.
 
 ### Gates (`bizniz/driver/gates.py`)
 
@@ -191,12 +208,19 @@ mechanism. Raises here are by design.
 
 ### ProjectDB (`bizniz/project/project_db.py`)
 
-**Status:** Partially patched. `_RetryingConnection` wraps sqlite
-ops and retries once on `OperationalError: readonly database`.
+**Status:** ✅ Fully patched. `_RetryingConnection` wraps sqlite
+ops and retries once on any of these transient
+`OperationalError` shapes:
 
-**Open follow-up:** audit other `OperationalError` shapes (database
-is locked, disk I/O error). All should follow the same retry-once-
-then-surface pattern.
+- `readonly` (the original 2026-05-15 catch)
+- `database is locked` (concurrent writer contention)
+- `disk I/O error` (filesystem hiccup)
+- `unable to open database file` (transient missing path)
+
+Permanent shapes (`no such table`, `syntax error`, constraint
+failures) still propagate immediately so real bugs surface.
+Module-level `_transient_shape(msg)` helper classifies — tests in
+`bizniz/project/tests/test_project_db_retry.py`.
 
 ### ProjectGit (`bizniz/driver/project_git.py`)
 
@@ -237,11 +261,10 @@ non-negotiable item 5 done-when.
 | `qe_reenrich_lenient_fallback` | quality_engineer/agent.py | 184, 188 | 1 hr + tests | ✅ SHIPPED |
 | `qe_review_lenient_fallback` | quality_engineer/agent.py | 252 | 1 hr + test | ✅ SHIPPED |
 | `code_reviewer_lenient_fallback` | code_reviewer/agent.py | 103 | 1 hr + test | ✅ SHIPPED |
-| `milestone_code_dispatcher_raise_audit` | driver/milestone_code_dispatcher.py | TBD | 2 hr (deep-audit) | open |
-| `projectdb_other_operational_errors` | project/project_db.py | TBD | 1 hr (mirror existing pattern) | open |
+| `milestone_code_dispatcher_raise_audit` | driver/milestone_code_dispatcher.py | 427 | 30 min audit | ✅ VERIFIED — no patches needed |
+| `projectdb_other_operational_errors` | project/project_db.py | _retry_on_transient | 1 hr | ✅ SHIPPED |
 
-**Remaining estimated effort:** ~3 hours of focused work across
-the 2 remaining open tickets.
+**Remaining estimated effort:** 0 hours — **item 5 closed**.
 
 ## What's already shipped under item 5
 

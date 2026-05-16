@@ -171,21 +171,78 @@ class TestRetryPath:
             with pytest.raises(sqlite3.OperationalError, match="readonly"):
                 rc.execute("INSERT INTO t VALUES (1)")
 
-    def test_non_readonly_operational_error_does_not_retry(self):
-        # "database is locked" is a different OperationalError. Don't
-        # retry — propagate immediately.
-        conn = _FakeConn(behaviors=[
+    def test_database_locked_retries(self):
+        # Item 5 audit extended the retry to cover "database is
+        # locked" (concurrent writer holding the lock too long). One
+        # reconnect + retry should resolve it once contention clears.
+        first = _FakeConn(behaviors=[
             sqlite3.OperationalError("database is locked"),
+        ])
+        second = _FakeConn(behaviors=["ok"])
+        with patch(
+            "bizniz.project.project_db.sqlite3.connect",
+            side_effect=[first, second],
+        ):
+            rc = _RetryingConnection("/x/db", "/x")
+            result = rc.execute("INSERT INTO t VALUES (1)")
+        assert result == "ok"
+        assert first.closed is True
+
+    def test_disk_io_error_retries(self):
+        # Filesystem hiccup — usually clears on retry.
+        first = _FakeConn(behaviors=[
+            sqlite3.OperationalError("disk I/O error"),
+        ])
+        second = _FakeConn(behaviors=["ok"])
+        with patch(
+            "bizniz.project.project_db.sqlite3.connect",
+            side_effect=[first, second],
+        ):
+            rc = _RetryingConnection("/x/db", "/x")
+            result = rc.execute("INSERT INTO t VALUES (1)")
+        assert result == "ok"
+
+    def test_unable_to_open_retries(self):
+        # File vanished briefly (backup, fsck).
+        first = _FakeConn(behaviors=[
+            sqlite3.OperationalError("unable to open database file"),
+        ])
+        second = _FakeConn(behaviors=["ok"])
+        with patch(
+            "bizniz.project.project_db.sqlite3.connect",
+            side_effect=[first, second],
+        ):
+            rc = _RetryingConnection("/x/db", "/x")
+            result = rc.execute("INSERT INTO t VALUES (1)")
+        assert result == "ok"
+
+    def test_permanent_operational_error_does_not_retry(self):
+        # Schema mismatch is a real bug, not transient — propagate.
+        conn = _FakeConn(behaviors=[
+            sqlite3.OperationalError("no such table: contacts"),
         ])
         with patch(
             "bizniz.project.project_db.sqlite3.connect",
             return_value=conn,
         ):
             rc = _RetryingConnection("/x/db", "/x")
-            with pytest.raises(sqlite3.OperationalError, match="locked"):
-                rc.execute("INSERT INTO t VALUES (1)")
+            with pytest.raises(sqlite3.OperationalError, match="no such table"):
+                rc.execute("SELECT * FROM contacts")
         # No reconnect → conn not closed.
         assert conn.closed is False
+
+    def test_syntax_error_does_not_retry(self):
+        # SQL syntax errors propagate immediately.
+        conn = _FakeConn(behaviors=[
+            sqlite3.OperationalError("near \"SELCT\": syntax error"),
+        ])
+        with patch(
+            "bizniz.project.project_db.sqlite3.connect",
+            return_value=conn,
+        ):
+            rc = _RetryingConnection("/x/db", "/x")
+            with pytest.raises(sqlite3.OperationalError, match="syntax"):
+                rc.execute("SELCT * FROM t")
 
     def test_other_exception_types_propagate(self):
         conn = _FakeConn(behaviors=[
