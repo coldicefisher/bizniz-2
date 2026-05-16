@@ -4,7 +4,7 @@ Locked in as of 2026-05-15 after the CRM v1 build surfaced enough
 gaps to warrant explicit sequencing. **Work the items in order** —
 each one's value compounds on the prior items.
 
-## The 9-item plan
+## The 10-item plan
 
 ### 1. Confidence signals — load-bearing or drop the pretense ✅ SHIPPED
 
@@ -59,7 +59,37 @@ Per-project git ops baked into the pipeline:
 **Why before refactorer:** the refactorer (item 4) MUST run on a
 commit-tracked codebase or we can't safely roll back a bad refactor.
 
-### 4. Refactorer agent — dedupe + move to shared core
+### 4. Granular issue decomposition
+
+CRM v1 timing data (2026-05-15): **Coder subprocess time
+dominated everything** — 545 min across 130 calls. Per-call median
+214s, p95 572s, **max 1072s (~18 min)**. The long tail is
+ServicePlanner emitting feature-sized issues that bundle multiple
+concerns (e.g. "create Modal component AND wire it into 4 pages
+that consume it"). A single Coder pass juggling that much
+produces:
+
+- Higher LLM cost variance (some calls 30s, some 18min)
+- Worse code quality on the long-tail calls (model under-attends)
+- Harder debugger diagnosis (one failure → blast radius of 3-5
+  files)
+- No parallelization possible (issues bundle dependencies)
+- Refactor extractions can't be atomic commits (one bundled issue
+  produces a multi-concern diff)
+
+**Done when:** ServicePlanner emits per-file or per-concern issues
+with a validator that flags issues estimated >300s or spanning
+>3 files. p95 Coder duration drops below 300s; p50 around 120s.
+Refactor extractions (item 5) consume 1 issue per commit
+cleanly. Issue-level parallelism (within a layer) becomes
+possible.
+
+**Why between version control and refactor:** smaller issues
+benefit every downstream Coder-driven step (refactorer, test/debug,
+perf-test runs). Putting it before refactor means item 5's
+extractions are well-shaped from the start, not retrofitted.
+
+### 5. Refactorer agent — dedupe + move to shared core
 
 We have a v1 Refactorer (single Claude CLI session at the project
 root). It works minimum-viable but doesn't:
@@ -71,11 +101,12 @@ root). It works minimum-viable but doesn't:
 
 **Done when:** a multi-service project's business logic lives in
 `shared/<lang>/` libraries, consumer services import them, tests
-pass, each extraction is its own commit.
+pass, each extraction is its own commit (cleanly granular thanks
+to item 4).
 
-### 5. Tests / debugging after refactoring
+### 6. Tests / debugging after refactoring
 
-Refactors can break things. After (4) runs, drive a focused
+Refactors can break things. After (5) runs, drive a focused
 test+repair loop:
 - Run every service's test suite
 - On failure, dispatch the AgenticDebugger
@@ -84,7 +115,7 @@ test+repair loop:
 **Done when:** refactorer-induced regressions are caught + fixed
 automatically, not by humans noticing later.
 
-### 6. Human documentation system
+### 7. Human documentation system
 
 Agents write semantic documentation for the generated project:
 - README.md per service (what it does, how to run it)
@@ -95,7 +126,7 @@ Agents write semantic documentation for the generated project:
 **Why this order:** the docs need to describe the *post-refactor*
 shape, not the pre-refactor shape. Documenting twice is waste.
 
-### 7. Detailed diagnostic + performance logging
+### 8. Detailed diagnostic + performance logging
 
 Wire structured logging across every agent:
 - Per-call timing (already partial via cost tracker)
@@ -112,10 +143,10 @@ Wire structured logging across every agent:
 performance.json` answers "where did this build spend time/tokens
 and what could be cheaper."
 
-### 8. Performance test on Claude
+### 9. Performance test on Claude
 
 Build 3-5 reference projects (CRM, blog, e-commerce mini, ...) on
-Claude with the full instrumentation from (7). Establish baselines:
+Claude with the full instrumentation from (8). Establish baselines:
 - Wall clock per milestone
 - Token cost per service per milestone
 - Repair iterations needed
@@ -125,9 +156,9 @@ Claude with the full instrumentation from (7). Establish baselines:
 **Why on Claude first:** $0 marginal on Max plan lets us iterate
 without budget pressure during baseline-finding.
 
-### 9. Baseline on Gemini
+### 10. Baseline on Gemini
 
-Run the same reference projects on Gemini, compare against (8)'s
+Run the same reference projects on Gemini, compare against (9)'s
 Claude baselines:
 - Where does Gemini close the gap?
 - Where does it widen?
@@ -143,12 +174,14 @@ where to invest next.
   and earns every downstream item more reliable inputs.
 - **2 next** because UX is the most user-visible quality bar — the
   thing buyers see — and Storybook is the right shape.
-- **3 → 4 → 5** is the refactor-safety stack. Can't do 4 without 3;
-  5 catches what 4 misses.
-- **6 after 4** so docs reflect the refactored shape, not the
+- **3 → 4 → 5 → 6** is the refactor-safety stack. Can't do refactor
+  (5) without version control (3); item 4 (granular issues) means
+  each refactor extraction is one atomic commit; item 6 catches
+  what 5 misses.
+- **7 after 5** so docs reflect the refactored shape, not the
   pre-refactor sprawl.
-- **7 before 8** so the baseline data exists in structured form.
-- **8 before 9** so we have Claude numbers to compare Gemini against.
+- **8 before 9** so the baseline data exists in structured form.
+- **9 before 10** so we have Claude numbers to compare Gemini against.
 
 ## What's NOT in this plan (deferred)
 
@@ -157,7 +190,7 @@ where to invest next.
 - Full escalation on smoke gate (replace hard-fail with cheap-tier
   AgenticDebugger one-shot) — ALREADY SHIPPED in commit `29e5ea9`
   via `SmokeRecovery`. Future work: extend to multi-tier escalation
-  inside roadmap item 5 if one-shot isn't enough on real failures.
+  inside roadmap item 6 if one-shot isn't enough on real failures.
 - Production-mode Dockerfile variants (no `--reload`, Alembic
   migrations) — deferred until the dev-mode loop is stable.
 
@@ -166,6 +199,10 @@ where to invest next.
 - On smoke failures, prefer full agent escalation (try to recover
   the container) rather than hard-halt at the gate. **Shipped
   2026-05-15 (`29e5ea9`)** — one-shot `SmokeRecovery` agent runs
-  before hard-halt. Multi-tier escalation deferred to item 5.
+  before hard-halt. Multi-tier escalation deferred to item 6.
 - Agent self-rated confidence fields should be load-bearing or
-  removed from prompts. **Now item 1** of this roadmap.
+  removed from prompts. **Now item 1** of this roadmap (shipped
+  2026-05-15, commit `5de1059`).
+- Coder p95 = 9.5 min, max = 18 min on crm_v1 build. Issues are
+  being emitted at feature-size granularity. **Now item 4** of
+  this roadmap.

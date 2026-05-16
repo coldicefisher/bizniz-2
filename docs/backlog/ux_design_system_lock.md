@@ -113,10 +113,14 @@ tokens to render stories).
 
 ## Cost-of-postponing
 
+**SHIPPED 2026-05-15 (commit `fd72c94`)** — saves ~48 min per
+multi-milestone build. Below was the original cost-of-postponing
+context in case the implementation needs revisiting:
+
 If item 2 stays open for a while, this is ~48 min per build of
 wasted time. The user's CRM build today exercises this 4 times
 (M2/M3/M4/M5). Multiply by every test project we build during
-roadmap item 8 (Claude perf test) and item 9 (Gemini baseline) —
+roadmap item 9 (Claude perf test) and item 10 (Gemini baseline) —
 the waste compounds.
 
 If we hit a bunch of test builds before item 2 ships, consider

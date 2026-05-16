@@ -9,33 +9,40 @@ first; it tells you what to load next.
 
 ## Current roadmap (2026-05-15)
 
-Locked-in order — work items 1 → 9 in sequence. Full text at
+Locked-in order — work items 1 → 10 in sequence. Full text at
 `docs/roadmap.md`. Honor this when prioritizing new work.
 
 1. ✅ **Confidence signals load-bearing** — SHIPPED 2026-05-15
    (commit `5de1059`). `QualityEngineer.enrich.confidence` now drives
    the harness: re-enrich at 0.4-0.6, soft gate at <0.4. Meta-pattern
    audit + retrofit for Architect/Planner/Coder/Tester moves to
-   item 7.
+   item 8.
 2. **Finish UX with Storybook** — make the interaction-test phase
-   the default UX gate (not screenshot-only loop).
+   the default UX gate (not screenshot-only loop). Two sub-tickets
+   already filed: design-system-lock (SHIPPED `fd72c94`) and
+   orphan-shot-fallback (open).
 3. **Add version control** — per-project git ops baked into the
    pipeline (commit per phase, branch per milestone, tag DONE).
-4. **Refactorer agent** — dedupe + move shared business logic to
-   `shared/<lang>/` core libs.
-5. **Tests / debugging after refactoring** — catch refactor-induced
+4. **Granular issue decomposition** — ServicePlanner currently
+   emits feature-sized issues (Coder p95 = 9.5 min, max = 18 min).
+   Force per-file / per-concern decomposition + a >300s validator.
+   Refactor extractions (item 5) become atomic commits as a
+   bonus.
+5. **Refactorer agent** — dedupe + move shared business logic to
+   `shared/<lang>/` core libs. Consumes item 4's atomic issues.
+6. **Tests / debugging after refactoring** — catch refactor-induced
    regressions automatically; also extend smoke-recovery (already
    shipped one-shot in `29e5ea9`) to multi-tier escalation here.
-6. **Human documentation system** — agents write semantic docs per
+7. **Human documentation system** — agents write semantic docs per
    service (README, API reference, architecture, how-to-extend).
-7. **Detailed diagnostic + performance logging** — structured
+8. **Detailed diagnostic + performance logging** — structured
    per-call timing/tokens/cache-hits → `performance.json`. Pipes
    the confidence-signal retrofit (Architect, Planner, Coder,
    Tester self-rating) onto the same instrumentation.
-8. **Performance test on Claude** — 3-5 reference projects, baseline
+9. **Performance test on Claude** — 3-5 reference projects, baseline
    established with $0 marginal cost.
-9. **Baseline on Gemini** — same projects, compare architecture
-   quality + cost vs Claude.
+10. **Baseline on Gemini** — same projects, compare architecture
+    quality + cost vs Claude.
 
 Deferred (do NOT pull forward unless explicitly asked):
 - Angular skeleton Storybook variants (until item 2 proves React
