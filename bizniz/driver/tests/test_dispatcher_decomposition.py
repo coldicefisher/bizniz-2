@@ -268,6 +268,109 @@ class TestDispatcherDecomposition:
         result = dispatcher.run(architecture=_arch(), enriched_spec=_spec())
         assert "BE-001" in result.completed_issue_ids
 
+    def test_auto_resume_skips_planner_and_decomposer(self):
+        """When the issue store has rows for this milestone+service,
+        the dispatcher should reuse them — NOT re-run ServicePlanner
+        or Decomposer. Filed 2026-05-16 mid-CRM-M5.
+
+        Key assertion: planner + decomposer NOT called. The
+        Orchestrator's per-issue skip-already-passed gate is its
+        own concern (covered elsewhere); here we mock the resume
+        decision so the test stays scoped to dispatcher behavior.
+        """
+        from bizniz.coder.types import CoderResult
+        from bizniz.orchestrator.types import IssueOutcome
+        from bizniz.state.issue_store import ResumeBehavior
+
+        # Mock issue_store: returns one prior row + tells orchestrator
+        # it's already done.
+        store = MagicMock()
+        store.all_rows.return_value = [
+            {  # shape returned by ProjectDB.list_coder_issues
+                "issue_id": "BE-001-U1", "title": "x",
+                "description": "y", "service": "backend",
+                "language": "python", "target_files": "[]",
+                "test_files": "[]", "success_criteria": "[]",
+                "spec_refs": "[]", "depends_on": "[]",
+                "status": "passed",
+            },
+        ]
+        store.resume_decision.return_value = ResumeBehavior.SKIP
+        store.previous_outcome.return_value = IssueOutcome(
+            issue_id="BE-001-U1",
+            disposition="passed",
+            tiers_used=["claude-cli"],
+            final_result=CoderResult(
+                issue_id="BE-001-U1", status="passed", summary="",
+            ),
+        )
+        store.record_planned = MagicMock()
+
+        # Set up planner that should NOT be called.
+        planner = MagicMock()
+
+        def planner_factory(_service):
+            return planner
+
+        decomposer = MagicMock()
+
+        def decomposer_factory(_service):
+            return decomposer
+
+        # Coder.code_issue should NOT be called (the only unit is
+        # already passed). Coder factory may be invoked for instance
+        # construction (orchestrator's optimization is shape-dependent),
+        # so use a MagicMock and assert on code_issue itself.
+        coder_mock = MagicMock()
+
+        def coder_factory(model, service):
+            return coder_mock
+
+        dispatcher = MilestoneCodeDispatcher(
+            service_planner_factory=planner_factory,
+            coder_factory=coder_factory,
+            progression_factory=_progression_factory(),
+            decomposer_factory=decomposer_factory,
+            issue_store=store,
+        )
+        dispatcher.run(architecture=_arch(), enriched_spec=_spec())
+        # Planner + decomposer NOT called (the key assertion).
+        planner.plan_service.assert_not_called()
+        decomposer.decompose.assert_not_called()
+        # Coder also didn't run any issue (already passed).
+        coder_mock.code_issue.assert_not_called()
+
+    def test_no_prior_rows_runs_planner_normally(self):
+        """When the store is empty (fresh build / new milestone), the
+        dispatcher should run ServicePlanner + Decomposer as usual.
+        Auto-resume only fires when prior rows exist."""
+        store = MagicMock()
+        store.all_rows.return_value = []  # empty store
+
+        coder_factory, _ = _coder_factory_passing("BE-001-U1")
+        decomposer = MagicMock()
+        decomposer.decompose.return_value = DecompositionResult(
+            issue_id="BE-001",
+            ordered_units=[_unit("BE-001-U1")],
+            confidence=0.9,
+        )
+
+        def decomposer_factory(_service):
+            return decomposer
+
+        dispatcher = MilestoneCodeDispatcher(
+            service_planner_factory=_planner_factory_returning({
+                "backend": [_issue("BE-001")],
+            }),
+            coder_factory=coder_factory,
+            progression_factory=_progression_factory(),
+            decomposer_factory=decomposer_factory,
+            issue_store=store,
+        )
+        dispatcher.run(architecture=_arch(), enriched_spec=_spec())
+        # Planner + decomposer DID run.
+        decomposer.decompose.assert_called_once()
+
     def test_unit_ordering_preserves_decomposer_output(self):
         # The flat list of unit-issues maintains the order the
         # Decomposer returned (dependency order).

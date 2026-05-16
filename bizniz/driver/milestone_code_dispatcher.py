@@ -160,6 +160,26 @@ class MilestoneCodeDispatcher:
                 )
                 # --retry-failed path: skip ServicePlanner LLM call;
                 # use existing rows from the store.
+                #
+                # Auto-resume path (added 2026-05-16): when the
+                # issue store ALREADY has rows for this
+                # milestone+service AND ``--skip-planning`` wasn't
+                # explicitly requested, reuse them. This catches the
+                # common "build crashed mid-milestone; resume re-plans
+                # everything from scratch" cost — ~3-5 min of
+                # ServicePlanner + Decomposer LLM time per service
+                # per resume. The Orchestrator below still correctly
+                # skips already-passed units, so this just avoids
+                # paying for redundant planning.
+                existing_rows = (
+                    active_store.all_rows(service=service.name)
+                    if active_store is not None else []
+                )
+                auto_resume = (
+                    not self._skip_planning
+                    and active_store is not None
+                    and bool(existing_rows)
+                )
                 if self._skip_planning and active_store is not None:
                     issues = self._load_issues_from_store(
                         active_store, service.name,
@@ -175,6 +195,16 @@ class MilestoneCodeDispatcher:
                         f"MilestoneCodeDispatcher: `{service.name}` "
                         f"reusing {len(issues)} issue(s) from store "
                         f"(--skip-planning)"
+                    )
+                elif auto_resume:
+                    issues = self._load_issues_from_store(
+                        active_store, service.name,
+                    )
+                    self._log(
+                        f"MilestoneCodeDispatcher: `{service.name}` "
+                        f"reusing {len(issues)} prior unit(s) from "
+                        f"store (auto-resume — skipping ServicePlanner "
+                        f"+ Decomposer)"
                     )
                 else:
                     self._log(
@@ -217,7 +247,13 @@ class MilestoneCodeDispatcher:
                 # to dispatching that issue as-is (single-unit
                 # semantics). The build still progresses; only the
                 # granularity drops back to pre-item-4 for that issue.
-                if self._decomposer_factory is not None:
+                #
+                # SKIP on auto-resume: the loaded rows ARE already the
+                # post-decomposition unit-shaped issues. Re-decomposing
+                # would produce a DIFFERENT split (Decomposer is
+                # non-deterministic) and lose the resume-skip benefit
+                # of matching prior unit ids.
+                if self._decomposer_factory is not None and not auto_resume:
                     issues = self._decompose_issues(
                         issues=issues,
                         service=service,
