@@ -4,7 +4,10 @@ Locked in as of 2026-05-15 after the CRM v1 build surfaced enough
 gaps to warrant explicit sequencing. **Work the items in order** —
 each one's value compounds on the prior items.
 
-## The 10-item plan
+Item 5 (agent error-path audit) inserted 2026-05-16 after CRM v1 M5
+crashed twice from defensive-handling gaps; items 6-11 renumbered.
+
+## The 11-item plan
 
 ### 1. Confidence signals — load-bearing or drop the pretense ✅ SHIPPED
 
@@ -156,7 +159,101 @@ every downstream Coder-driven step. Item 5's extractions become
 naturally atomic (one unit = one commit). Item 8's perf logging
 sees per-unit granularity, which makes baseline data actionable.
 
-### 5. Refactorer agent — dedupe + move to shared core
+### 5. Agent error-path audit — button up failure handling across all agents
+
+Two crashes in the same week exposed a class of bugs: an agent
+encounters or emits something unexpected, a strict validator
+catches it, the exception propagates up unhandled, and the entire
+pipeline halts mid-build. Both were single-line fixes once
+identified:
+
+- **CRM v1 M5 (commit `9258835`)** — `ProjectDB.mark_finished`
+  raised `OperationalError: readonly database` from a stale sqlite
+  connection. Fix: `_RetryingConnection` wrapper retries once with
+  a reconnect. Halted a 27h build twice before the fix.
+- **CRM v1 M5 repair iter 1 (commit `f24b5d7`)** —
+  `ServicePlanner.repair` LLM emitted `BA-fix1-3 depends_on=
+  ['BA-fix1-2']` without emitting `BA-fix1-2`. Fix:
+  `_repair_dep_targets` drops bad edges with a warning instead of
+  raising. Halted M5 just after frontend implement passed 44/44.
+
+**The philosophy already in the codebase** (see
+`_validate_files_non_empty` at `service_planner/agent.py:266`):
+
+> Repair iterations are a side-channel. Losing one fix-issue is
+> better than crashing the milestone.
+
+Same wisdom applies broadly. Greenfield primary-path agents
+(Planner, Architect, Provisioner, greenfield ServicePlanner) should
+stay strict — failures there indicate real defects worth surfacing.
+Side-channel agents (repair-mode ServicePlanner, integration
+debugger, UX fix dispatch, smoke recovery, anything that runs after
+the primary path has already succeeded once) should be lenient by
+default — drop bad inputs, log a warning, keep the milestone moving.
+
+**The audit:**
+
+Per agent, classify every `raise` in the call path:
+
+| Category | Action |
+|---|---|
+| Truly fatal (config invalid, contract violation in primary path) | Keep raising |
+| LLM-emitted bad data in side-channel (repair, integration) | Drop / repair / log + continue |
+| Transient infrastructure (rate limit, readonly DB, network) | Retry-with-backoff, then surface |
+| Empty/missing optional field | Auto-fill default + log |
+
+**Agents to walk:**
+
+- [ ] `ServicePlanner` — partial (just shipped `_repair_dep_targets`,
+      `_validate_files_non_empty`; still strict on cycles + duplicate
+      IDs + empty plans in repair mode — review whether cycles
+      should drop edges too)
+- [ ] `Decomposer` — shipped 2026-05-15, no live failure modes yet
+      but the same hallucination class applies (unit_id collisions,
+      unknown depends_on references)
+- [ ] `Coder` / `ClaudeCliCoder` — `TerminalActionRejected` already
+      stalls instead of erroring (good); audit the rest
+- [ ] `Tester` — same pattern as Coder
+- [ ] `QuickDebugger` / `AgenticDebugger` — these run after
+      something has already broken; their own crashes are the
+      worst-case escalation
+- [ ] `QualityEngineer.enrich` + `QualityEngineer.review` — both
+      now load-bearing for the confidence gate (item 1)
+- [ ] `CodeReviewer` — same
+- [ ] `ProUXDesigner` — UX fix dispatch is a side-channel by
+      definition; failures shouldn't tank the milestone
+- [ ] `HTTPApiTester` / `WebUITester` / `WorkerTester`
+- [ ] `SmokeRecovery` — partial (the try/except wrapper landed with
+      the milestone.name fix); audit complete coverage
+- [ ] `Refactorer` — audit at the same time it lands in item 6
+- [ ] `ProjectDB` — partial (readonly retry shipped); audit other
+      OperationalErrors
+- [ ] `ProjectGit` — already best-effort by design (item 3 ships
+      this); verify it really is no-throw
+
+**Tests required for each lenient path:**
+
+Mirror the `test_repair_drops_unknown_dep_instead_of_raising`
+pattern: deliberately inject the bad input, assert the agent
+returns sensibly with a warning logged. Lenient paths without
+tests rot — a future "make it strict again" refactor silently
+removes the leniency.
+
+**Done when:**
+
+1. Every `raise` in an agent has a known classification
+   (fatal/lenient/transient/auto-fill)
+2. Every lenient path has a regression test pinning the leniency
+3. A `docs/agent_error_audit.md` index lists each agent + its
+   error-path matrix (for future agents to follow the pattern)
+
+**Why before Refactorer (was item 5):** Auditing existing agents
+sets the pattern that Refactorer (and every future agent) inherits.
+Cheaper than auditing N+1 agents later. Also a prerequisite for
+items 10-11 (perf baselines on Claude + Gemini) — baseline numbers
+mean nothing if the pipeline halts mid-run on a hallucinated dep.
+
+### 6. Refactorer agent — dedupe + move to shared core
 
 We have a v1 Refactorer (single Claude CLI session at the project
 root). It works minimum-viable but doesn't:
@@ -171,7 +268,7 @@ root). It works minimum-viable but doesn't:
 pass, each extraction is its own commit (cleanly granular thanks
 to item 4).
 
-### 6. Tests / debugging after refactoring
+### 7. Tests / debugging after refactoring
 
 Refactors can break things. After (5) runs, drive a focused
 test+repair loop:
@@ -182,7 +279,7 @@ test+repair loop:
 **Done when:** refactorer-induced regressions are caught + fixed
 automatically, not by humans noticing later.
 
-### 7. Human documentation system
+### 8. Human documentation system
 
 Agents write semantic documentation for the generated project:
 - README.md per service (what it does, how to run it)
@@ -193,7 +290,7 @@ Agents write semantic documentation for the generated project:
 **Why this order:** the docs need to describe the *post-refactor*
 shape, not the pre-refactor shape. Documenting twice is waste.
 
-### 8. Detailed diagnostic + performance logging
+### 9. Detailed diagnostic + performance logging
 
 Wire structured logging across every agent:
 - Per-call timing (already partial via cost tracker)
@@ -210,7 +307,7 @@ Wire structured logging across every agent:
 performance.json` answers "where did this build spend time/tokens
 and what could be cheaper."
 
-### 9. Performance test on Claude
+### 10. Performance test on Claude
 
 Build 3-5 reference projects (CRM, blog, e-commerce mini, ...) on
 Claude with the full instrumentation from (8). Establish baselines:
@@ -223,7 +320,7 @@ Claude with the full instrumentation from (8). Establish baselines:
 **Why on Claude first:** $0 marginal on Max plan lets us iterate
 without budget pressure during baseline-finding.
 
-### 10. Baseline on Gemini
+### 11. Baseline on Gemini
 
 Run the same reference projects on Gemini, compare against (9)'s
 Claude baselines:
@@ -241,14 +338,15 @@ where to invest next.
   and earns every downstream item more reliable inputs.
 - **2 next** because UX is the most user-visible quality bar — the
   thing buyers see — and Storybook is the right shape.
-- **3 → 4 → 5 → 6** is the refactor-safety stack. Can't do refactor
-  (5) without version control (3); item 4 (granular issues) means
-  each refactor extraction is one atomic commit; item 6 catches
-  what 5 misses.
-- **7 after 5** so docs reflect the refactored shape, not the
+- **3 → 4 → 5 → 6 → 7** is the refactor-safety stack. Can't do
+  refactor (6) without version control (3); item 4 (granular issues)
+  means each refactor extraction is one atomic commit; item 5
+  (error-path audit) hardens every existing agent before adding
+  another one in item 6; item 7 catches what 6 misses.
+- **8 after 6** so docs reflect the refactored shape, not the
   pre-refactor sprawl.
-- **8 before 9** so the baseline data exists in structured form.
-- **9 before 10** so we have Claude numbers to compare Gemini against.
+- **9 before 10** so the baseline data exists in structured form.
+- **10 before 11** so we have Claude numbers to compare Gemini against.
 
 ## What's NOT in this plan (deferred)
 

@@ -7,16 +7,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This file orients a Claude session in the bizniz repo. Read this
 first; it tells you what to load next.
 
-## Current roadmap (2026-05-15)
+## Current roadmap (2026-05-16)
 
-Locked-in order — work items 1 → 10 in sequence. Full text at
-`docs/roadmap.md`. Honor this when prioritizing new work.
+Locked-in order — work items 1 → 11 in sequence. Full text at
+`docs/roadmap.md`. Honor this when prioritizing new work. Item 5
+inserted 2026-05-16 after CRM v1 M5 crashed twice on defensive-
+handling gaps; items 6-11 renumbered.
 
 1. ✅ **Confidence signals load-bearing** — SHIPPED 2026-05-15
    (commit `5de1059`). `QualityEngineer.enrich.confidence` now drives
    the harness: re-enrich at 0.4-0.6, soft gate at <0.4. Meta-pattern
    audit + retrofit for Architect/Planner/Coder/Tester moves to
-   item 8.
+   item 9.
 2. **Finish UX with Storybook** — make the interaction-test phase
    the default UX gate (not screenshot-only loop). Two sub-tickets
    already filed: design-system-lock (SHIPPED `fd72c94`) and
@@ -31,20 +33,32 @@ Locked-in order — work items 1 → 10 in sequence. Full text at
    breaks each issue into ordered `UnitOfWork`. **Always on by
    default**; opt-out via `v2_build --no-decompose` (escape hatch
    for A/B comparison runs). Live validation still pending.
-5. **Refactorer agent** — dedupe + move shared business logic to
+5. **Agent error-path audit** — every agent's `raise` paths
+   classified (fatal / lenient / transient / auto-fill), every
+   lenient path pinned by a test. Triggered by two CRM v1 M5
+   crashes (readonly DB `9258835`, ServicePlanner.repair dep
+   validation `f24b5d7`) where strict raises in side-channel code
+   halted the whole pipeline. Philosophy already encoded in
+   `_validate_files_non_empty` — extend to all agents. Output:
+   `docs/agent_error_audit.md` index.
+6. **Refactorer agent** — dedupe + move shared business logic to
    `shared/<lang>/` core libs. Consumes item 4's atomic issues.
-6. **Tests / debugging after refactoring** — catch refactor-induced
+7. **Tests / debugging after refactoring** — catch refactor-induced
    regressions automatically; also extend smoke-recovery (already
    shipped one-shot in `29e5ea9`) to multi-tier escalation here.
-7. **Human documentation system** — agents write semantic docs per
+8. **Human documentation system** — agents write semantic docs per
    service (README, API reference, architecture, how-to-extend).
-8. **Detailed diagnostic + performance logging** — structured
+9. **Detailed diagnostic + performance logging** — structured
    per-call timing/tokens/cache-hits → `performance.json`. Pipes
    the confidence-signal retrofit (Architect, Planner, Coder,
-   Tester self-rating) onto the same instrumentation.
-9. **Performance test on Claude** — 3-5 reference projects, baseline
-   established with $0 marginal cost.
-10. **Baseline on Gemini** — same projects, compare architecture
+   Tester self-rating) onto the same instrumentation. Phase 1
+   shipped 2026-05-16 (`bizniz/perf_log/` — regex log analyzer +
+   markdown/JSON formatters + comparison mode for A/B testing).
+   Phase 2 (structured emit at the source) lands with the rest of
+   item 9.
+10. **Performance test on Claude** — 3-5 reference projects, baseline
+    established with $0 marginal cost.
+11. **Baseline on Gemini** — same projects, compare architecture
     quality + cost vs Claude.
 
 Deferred (do NOT pull forward unless explicitly asked):
