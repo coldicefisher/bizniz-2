@@ -296,12 +296,19 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     def service_planner_factory(_service):
         return ServicePlanner(client=sp_client, on_status=on_status)
 
-    # Decomposer factory — roadmap item 4. Opt-in via ``--decompose``
-    # CLI flag. When enabled, each ServicePlanner-emitted issue is
-    # broken into ordered units of work; Coder runs per-unit instead
-    # of per-issue. Defaults off so legacy behavior is unchanged
-    # until the user explicitly switches paths.
-    if args.decompose:
+    # Decomposer factory — roadmap item 4. **Always on by default.**
+    # Each ServicePlanner-emitted issue is broken into ordered units;
+    # Coder runs per-unit instead of per-issue. Opt-out via
+    # ``--no-decompose`` (escape hatch for debugging / A/B comparison
+    # runs against the legacy issue-level path).
+    if args.no_decompose:
+        decomposer_factory = None
+        on_status(
+            "Decomposer: DISABLED (--no-decompose) — legacy "
+            "issue-level dispatch. Coder gets full feature-sized "
+            "issues."
+        )
+    else:
         from bizniz.decomposer.agent import Decomposer
         decomposer_client = config.make_client(
             model=getattr(config, "decomposer_model", config.engineer_model)
@@ -312,12 +319,9 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
                 client=decomposer_client, on_status=on_status,
             )
         on_status(
-            "Decomposer: ENABLED (--decompose) — per-unit dispatch "
-            "active. ServicePlanner issues will be expanded into "
-            "ordered units."
+            "Decomposer: enabled (default) — per-unit dispatch active. "
+            "ServicePlanner issues will be expanded into ordered units."
         )
-    else:
-        decomposer_factory = None
 
     coder_tiers = list(
         getattr(config, "coder_models", []) or [config.engineer_model]
@@ -716,12 +720,12 @@ def main():
     p.add_argument("--retry-service", default=None,
                    help="With --retry-failed, restrict the reset to one service")
     p.add_argument(
-        "--decompose", action="store_true",
+        "--no-decompose", action="store_true",
         help=(
-            "Roadmap item 4: enable Decomposer between ServicePlanner "
-            "and Coder. Each issue is broken into ordered ``UnitOfWork`` "
-            "and Coder runs per-unit. Off by default until v1 is "
-            "validated on a real build."
+            "Disable the Decomposer (roadmap item 4 default). Reverts "
+            "to legacy per-issue dispatch — Coder gets full "
+            "feature-sized issues. Escape hatch for debugging or "
+            "A/B comparison runs."
         ),
     )
     p.add_argument(

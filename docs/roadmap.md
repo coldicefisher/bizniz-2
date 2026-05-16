@@ -125,9 +125,11 @@ For each issue:
    ``decomposer_factory`` parameter, ``_decompose_issues`` helper,
    ``_unit_to_coder_issue`` shim. Defensive fallback when
    Decomposer fails — original issue dispatches as-is. 14 tests.
-3. ✅ (this commit) — v2_build.py ``--decompose`` CLI flag +
-   Decomposer factory wiring. Off by default; opt-in for the
-   first real-build validation.
+3. ✅ ``0e6fe0d`` — v2_build.py Decomposer factory wiring.
+   Initially opt-in via ``--decompose``; **flipped to always-on
+   default** same day per user direction (decomposition is the
+   right architecture, no reason to gate it). Opt-out via
+   ``v2_build --no-decompose`` for A/B comparison runs.
 
 **Still pending** (Done-when criteria 4-5):
 

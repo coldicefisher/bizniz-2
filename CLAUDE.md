@@ -27,11 +27,10 @@ Locked-in order — work items 1 → 10 in sequence. Full text at
    wired yet (milestone granularity is sufficient for refactor
    revert).
 4. ✅ **Granular issue decomposition** — v1 SHIPPED 2026-05-15
-   (commits `ae3883a`, `9f8a652`, this one). `Decomposer` agent
-   breaks each issue into ordered `UnitOfWork`. Wired into
-   `MilestoneCodeDispatcher` (opt-in via factory). v2_build
-   exposes `--decompose` flag. Live validation pending: run a
-   fresh build with --decompose to confirm p95 < 180s, p50 ~ 90s.
+   (commits `ae3883a`, `9f8a652`, `0e6fe0d`). `Decomposer` agent
+   breaks each issue into ordered `UnitOfWork`. **Always on by
+   default**; opt-out via `v2_build --no-decompose` (escape hatch
+   for A/B comparison runs). Live validation still pending.
 5. **Refactorer agent** — dedupe + move shared business logic to
    `shared/<lang>/` core libs. Consumes item 4's atomic issues.
 6. **Tests / debugging after refactoring** — catch refactor-induced
