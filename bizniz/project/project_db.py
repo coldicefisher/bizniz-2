@@ -16,13 +16,120 @@ drift_events            — file-drift detection events
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import datetime
+import sys
 from pathlib import Path
 from typing import Optional, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bizniz.project.project import Project
+
+
+class _RetryingConnection:
+    """Thin wrapper around ``sqlite3.Connection`` that retries
+    ``OperationalError('attempt to write a readonly database')`` once
+    by closing + reopening the connection.
+
+    Surfaced 2026-05-15 during crm_v1 M5: after hours of writes
+    across many subprocess boundaries (Coder, MCP server, smoke
+    recovery, git operations), the long-lived connection occasionally
+    enters a state where SQLite returns "readonly" on UPDATEs even
+    though the file is writable from a fresh process. Reconnecting
+    clears whatever transient state caused it.
+
+    Wrapper proxies everything to the underlying connection; only
+    ``execute``, ``executemany``, ``executescript``, and ``commit``
+    add retry. Other attribute access (``row_factory``, cursor
+    creation, etc.) passes through unchanged.
+    """
+
+    def __init__(self, db_path: str, db_dir: str, timeout: float = 30.0):
+        self._db_path = db_path
+        self._db_dir = db_dir
+        self._timeout = timeout
+        self._conn = self._open()
+
+    def _open(self) -> sqlite3.Connection:
+        return sqlite3.connect(
+            self._db_path, timeout=self._timeout,
+            check_same_thread=False,
+        )
+
+    def _reconnect(self) -> None:
+        """Close the broken connection and open a new one. Re-chmods
+        the file + dir defensively in case mode bits were flipped."""
+        prev_row_factory = self._conn.row_factory
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        try:
+            os.chmod(self._db_dir, 0o777)
+            os.chmod(self._db_path, 0o666)
+        except OSError:
+            pass
+        self._conn = self._open()
+        # Preserve row_factory across reconnects.
+        self._conn.row_factory = prev_row_factory
+
+    def _retry_on_readonly(self, fn, *args, **kwargs):
+        """Run ``fn(*args, **kwargs)``. If it raises
+        ``OperationalError`` with 'readonly' in the message,
+        reconnect and retry once. Other errors re-raise."""
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            if "readonly" not in str(e).lower():
+                raise
+            print(
+                f"  [ProjectDB] readonly-database OperationalError; "
+                f"reconnecting and retrying once...",
+                file=sys.stderr, flush=True,
+            )
+            self._reconnect()
+            return fn(*args, **kwargs)
+
+    # ── Wrapped methods ───────────────────────────────────────────────
+
+    def execute(self, sql, *args, **kwargs):
+        return self._retry_on_readonly(
+            lambda: self._conn.execute(sql, *args, **kwargs),
+        )
+
+    def executemany(self, sql, *args, **kwargs):
+        return self._retry_on_readonly(
+            lambda: self._conn.executemany(sql, *args, **kwargs),
+        )
+
+    def executescript(self, sql, *args, **kwargs):
+        return self._retry_on_readonly(
+            lambda: self._conn.executescript(sql, *args, **kwargs),
+        )
+
+    def commit(self):
+        return self._retry_on_readonly(lambda: self._conn.commit())
+
+    # ── Pass-through ──────────────────────────────────────────────────
+
+    @property
+    def row_factory(self):
+        return self._conn.row_factory
+
+    @row_factory.setter
+    def row_factory(self, value):
+        self._conn.row_factory = value
+
+    def close(self):
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        # Forward unknown attribute access to the underlying connection.
+        return getattr(self._conn, name)
 
 
 class ProjectDB:
@@ -32,7 +139,9 @@ class ProjectDB:
         db_dir.mkdir(parents=True, exist_ok=True)
         self._db_path = db_dir / "project.db"
         self._db_dir = db_dir
-        self._conn = sqlite3.connect(str(self._db_path), timeout=30, check_same_thread=False)
+        self._conn = _RetryingConnection(
+            str(self._db_path), str(self._db_dir), timeout=30,
+        )
         self._conn.row_factory = sqlite3.Row
         self._create_tables()
         self._ensure_writable()
@@ -40,7 +149,6 @@ class ProjectDB:
     def _ensure_writable(self):
         """Ensure DB file and directory are writable (Docker may change permissions)."""
         try:
-            import os
             os.chmod(str(self._db_dir), 0o777)
             os.chmod(str(self._db_path), 0o666)
             for suffix in ["-journal", "-wal", "-shm"]:
