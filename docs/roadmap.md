@@ -66,7 +66,7 @@ integration) NOT wired yet — milestone DONE checkpoints are
 sufficient for refactor revert. If finer granularity is needed
 later, add per-phase commits to `MilestoneLoop` callsites.
 
-### 4. Granular issue decomposition via Decomposer agent
+### 4. Granular issue decomposition via Decomposer agent ✅ v1 SHIPPED
 
 CRM v1 timing data (2026-05-15): Coder subprocess time dominated
 (545 min across 130 calls, p95 572s, max 1072s ≈ 18 min). Root
@@ -117,21 +117,27 @@ For each issue:
 - Naturally pluggable across LLM backends — same as our other
   single-call agents
 
-**Done when:**
+**v1 shipped 2026-05-15** across three commits:
 
-1. `bizniz/decomposer/` package: `Decomposer` agent + types +
-   prompts. Single-call (`claude --print --output-format=json`)
-   pattern matching our other agents.
-2. `MilestoneCodeDispatcher` calls Decomposer for each issue
-   before dispatching units to Coder.
-3. Coder loop runs per-unit (not per-issue); test failure halts at
-   the broken unit.
-4. p95 Coder-per-unit drops below 180s; p50 around 90s. Total
-   Coder time roughly flat — split into more, smaller pieces.
+1. ✅ ``ae3883a`` — `bizniz/decomposer/` package (Decomposer agent
+   + UnitOfWork/DecompositionResult types + prompts + 15 tests).
+2. ✅ ``9f8a652`` — MilestoneCodeDispatcher wiring: optional
+   ``decomposer_factory`` parameter, ``_decompose_issues`` helper,
+   ``_unit_to_coder_issue`` shim. Defensive fallback when
+   Decomposer fails — original issue dispatches as-is. 14 tests.
+3. ✅ (this commit) — v2_build.py ``--decompose`` CLI flag +
+   Decomposer factory wiring. Off by default; opt-in for the
+   first real-build validation.
+
+**Still pending** (Done-when criteria 4-5):
+
+4. **Validation against live data**: run a fresh CRM-class build
+   with ``--decompose`` and confirm p95 Coder-per-unit < 180s,
+   p50 ~ 90s.
 5. Refactor extractions (item 5) consume one unit per commit
-   cleanly.
+   cleanly — pending item 5 implementation.
 
-**v1 scope cuts (defer to follow-ups):**
+**v1 scope cuts (still deferred to follow-ups):**
 
 - Per-unit Tester separation (today's Coder writes code+test
   inline; that stays for v1). Splitting Tester out is its own

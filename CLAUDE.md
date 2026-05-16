@@ -26,11 +26,12 @@ Locked-in order — work items 1 → 10 in sequence. Full text at
    `m<N>-done` tags after each milestone. Phase-level commits not
    wired yet (milestone granularity is sufficient for refactor
    revert).
-4. **Granular issue decomposition** — ServicePlanner currently
-   emits feature-sized issues (Coder p95 = 9.5 min, max = 18 min).
-   Force per-file / per-concern decomposition + a >300s validator.
-   Refactor extractions (item 5) become atomic commits as a
-   bonus.
+4. ✅ **Granular issue decomposition** — v1 SHIPPED 2026-05-15
+   (commits `ae3883a`, `9f8a652`, this one). `Decomposer` agent
+   breaks each issue into ordered `UnitOfWork`. Wired into
+   `MilestoneCodeDispatcher` (opt-in via factory). v2_build
+   exposes `--decompose` flag. Live validation pending: run a
+   fresh build with --decompose to confirm p95 < 180s, p50 ~ 90s.
 5. **Refactorer agent** — dedupe + move shared business logic to
    `shared/<lang>/` core libs. Consumes item 4's atomic issues.
 6. **Tests / debugging after refactoring** — catch refactor-induced
