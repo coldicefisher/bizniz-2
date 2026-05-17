@@ -649,6 +649,12 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         ux_phase=ux_phase,
         refactor_phase=refactor_phase,
         final_tester=final_tester,
+        smoke_recovery_stall_threshold=getattr(
+            config, "debugger_stall_threshold", 5,
+        ),
+        repair_stall_threshold=getattr(
+            config, "debugger_stall_threshold", 5,
+        ),
         on_status=on_status,
     )
 

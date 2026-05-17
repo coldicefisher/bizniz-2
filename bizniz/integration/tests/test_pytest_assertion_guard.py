@@ -99,6 +99,25 @@ class TestActuallyRanTests:
         # the pass/fail decision.
         assert ran is True
 
+    def test_no_header_inline_collected_line(self):
+        # Regression: pytest invoked with --no-header prints
+        # "collecting ... collected N items" on a single line (not on
+        # its own line). The original ``^collected`` line-anchored
+        # regex false-negative'd this and the gate fired
+        # ``integration_api_failed`` despite 13/13 PASSED (recipe_v2
+        # M1 2026-05-17). The runner.run_cmd uses --no-header.
+        out = (
+            "collecting ... collected 13 items\n"
+            "\n"
+            "tests/integration/test_api.py::test_a PASSED                  [  7%]\n"
+            "tests/integration/test_api.py::test_b PASSED                  [ 15%]\n"
+            "\n"
+            "============================== 13 passed in 0.79s ==============================\n"
+        )
+        ran, reason = _assert_pytest_actually_ran_tests(out)
+        assert ran is True
+        assert "collected=13" in reason
+
     def test_warnings_only_in_summary(self):
         # Pytest summary with warning markers — still considered ran
         # as long as there's a pass.

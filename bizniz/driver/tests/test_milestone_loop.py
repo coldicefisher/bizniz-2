@@ -103,7 +103,7 @@ def _build_loop(
     *,
     engineer=None, qe=None, cr=None, integration=None,
     workspace=None, gates=None, factory=None, tracker=None,
-    code_dispatcher=None,
+    code_dispatcher=None, repair_stall_threshold=5,
 ):
     eng = engineer or MagicMock()
     qe_m = qe or MagicMock()
@@ -128,10 +128,10 @@ def _build_loop(
         primary_workspace=ws,
         compose_path="/p/c.yml",
         project_root=Path("/p"),
-        repair_budget=3,
         repair_engineer_factory=factory,
         code_dispatcher=code_dispatcher,
         cost_tracker=tracker,
+        repair_stall_threshold=repair_stall_threshold,
     )
 
 
@@ -202,18 +202,25 @@ class TestRepairLoop:
         eng.repair.assert_called_once()
 
     def test_repair_budget_exhausted_halts(self, tmp_path):
+        # Post-D5 (2026-05-17): repair iterates via ProgressTracker.
+        # Always-failing review with no defect-count change is "stalled"
+        # every iter; loop halts when stall threshold is reached.
         eng = MagicMock()
         eng.implement.return_value = _engineer_result()
         eng.repair.return_value = _engineer_result()
         qe = MagicMock()
         qe.enrich.return_value = _spec()
-        # Always fails — should consume entire budget then halt.
+        # Always fails with constant defect count → stalled each iter.
         qe.review.return_value = _coverage(approved=False)
         cr = MagicMock()
         cr.review.return_value = _code_review(approved=False, critical=True)
         ip = MagicMock()
 
-        loop = _build_loop(engineer=eng, qe=qe, cr=cr, integration=ip)
+        # Threshold=3 → 3 stalled iters before the gate fires.
+        loop = _build_loop(
+            engineer=eng, qe=qe, cr=cr, integration=ip,
+            repair_stall_threshold=3,
+        )
         state = MilestoneState(tmp_path / "m1", 1)
 
         with pytest.raises(GateViolation) as exc:
@@ -222,9 +229,7 @@ class TestRepairLoop:
                 prior_specs=[], auth_contract=None, state=state,
             )
         assert exc.value.gate_name == "milestone_unapproved"
-        # Budget = 3, so engineer.repair called 3 times.
         assert eng.repair.call_count == 3
-        # Integration should NOT have run.
         ip.run_api.assert_not_called()
 
     def test_factory_used_when_provided(self, tmp_path):
@@ -445,7 +450,9 @@ class TestCostTagging:
         phases_set = [c.args[0] for c in tracker.set_phase.call_args_list]
         assert "enrich" in phases_set
         assert "implement" in phases_set
-        assert "review_initial" in phases_set
+        # Post-D5: review_initial/repair_iter_*/review_final collapsed
+        # into the single review_repair phase.
+        assert "review_repair" in phases_set
         assert "integration_api" in phases_set
         assert "integration_web" in phases_set
 
@@ -473,8 +480,9 @@ class TestCostTagging:
             prior_specs=[], auth_contract=None, state=state,
         )
         phases_set = [c.args[0] for c in tracker.set_phase.call_args_list]
-        # Repair phase 0 was tagged.
-        assert "repair_iter_0" in phases_set
+        # Post-D5: single review_repair phase covers the iterative
+        # review+repair loop (no more per-iter REPAIR_ITER_N phases).
+        assert "review_repair" in phases_set
 
     def test_tracker_exception_does_not_break_run(self, tmp_path):
         # Tracker raising on set_phase should NOT break the milestone.

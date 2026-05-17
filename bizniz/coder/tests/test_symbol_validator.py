@@ -304,6 +304,95 @@ class TestAttributeAccess:
         report = validate_files([bad], ws)
         assert not report.unresolved_attributes
 
+    def test_flags_class_level_attribute_on_sqlalchemy_model(self, tmp_path):
+        """The 2026-05-17 recipe_v2 incident: ``User.user_id`` referenced
+        but the User model has ``id`` as PK. Class-level attribute
+        access (no instance involved) must be caught."""
+        ws = _ws(tmp_path)
+        (ws / "app").mkdir()
+        (ws / "app" / "__init__.py").write_text("")
+        (ws / "app" / "db").mkdir()
+        (ws / "app" / "db" / "__init__.py").write_text("")
+        (ws / "app" / "db" / "base.py").write_text(
+            "class Base: pass\n"
+        )
+        (ws / "app" / "models").mkdir()
+        (ws / "app" / "models" / "__init__.py").write_text("")
+        (ws / "app" / "models" / "user.py").write_text(
+            "from sqlalchemy.orm import Mapped, mapped_column\n"
+            "from sqlalchemy import String\n"
+            "from app.db.base import Base\n"
+            "class User(Base):\n"
+            "    __tablename__ = 'users'\n"
+            "    id: Mapped[str] = mapped_column(String, primary_key=True)\n"
+            "    email: Mapped[str] = mapped_column(String)\n"
+            "    role: Mapped[str] = mapped_column(String)\n"
+        )
+        (ws / "app" / "core").mkdir()
+        (ws / "app" / "core" / "__init__.py").write_text("")
+        bad = ws / "app" / "core" / "auth.py"
+        bad.write_text(
+            "from sqlalchemy import select\n"
+            "from app.models.user import User\n"
+            "async def get_current_user(db, fa_user_id):\n"
+            "    result = await db.execute(\n"
+            "        select(User).where(User.user_id == fa_user_id)\n"
+            "    )\n"
+            "    return result.scalar_one_or_none()\n"
+        )
+        report = validate_files([bad], ws)
+        assert not report.passed, (
+            "Expected User.user_id reference to be flagged"
+        )
+        # The new class-level check should catch this exact pattern.
+        flagged = [
+            a for a in report.unresolved_attributes
+            if a.attribute == "user_id" and a.class_name == "User"
+        ]
+        assert len(flagged) == 1
+        assert "id" in flagged[0].available
+
+    def test_class_level_attribute_with_real_field_passes(self, tmp_path):
+        """Sanity: when the class access uses a real column, the
+        attribute-level check produces no flag (other validator
+        layers may flag missing requirements, but that's separate)."""
+        ws = _ws(tmp_path)
+        (ws / "app").mkdir()
+        (ws / "app" / "__init__.py").write_text("")
+        (ws / "app" / "db").mkdir()
+        (ws / "app" / "db" / "__init__.py").write_text("")
+        (ws / "app" / "db" / "base.py").write_text(
+            "class Base: pass\n"
+        )
+        (ws / "app" / "models").mkdir()
+        (ws / "app" / "models" / "__init__.py").write_text("")
+        (ws / "app" / "models" / "user.py").write_text(
+            "from app.db.base import Base\n"
+            "class User(Base):\n"
+            "    __tablename__ = 'users'\n"
+            "    id: str = ''\n"
+        )
+        (ws / "app" / "core").mkdir()
+        (ws / "app" / "core" / "__init__.py").write_text("")
+        ok = ws / "app" / "core" / "auth.py"
+        ok.write_text(
+            "from app.models.user import User\n"
+            "def lookup(x):\n"
+            "    return User.id == x\n"
+        )
+        report = validate_files([ok], ws)
+        # We only care that the attribute check didn't flag User.id.
+        # Other validators (third-party imports, etc.) aren't relevant
+        # here — this test is specifically about the new
+        # class-level attribute logic.
+        user_id_flags = [
+            a for a in report.unresolved_attributes
+            if a.class_name == "User"
+        ]
+        assert user_id_flags == [], (
+            f"Expected no User.* attribute flags, got: {user_id_flags}"
+        )
+
     def test_inherited_fields_resolve(self, tmp_path):
         ws = _ws(tmp_path)
         (ws / "models.py").write_text(

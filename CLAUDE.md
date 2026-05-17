@@ -35,14 +35,16 @@ deferred 2026-05-16; remaining items renumbered to 11+12.
    breaks each issue into ordered `UnitOfWork`. **Always on by
    default**; opt-out via `v2_build --no-decompose` (escape hatch
    for A/B comparison runs). Live validation still pending.
-5. **Agent error-path audit** — every agent's `raise` paths
-   classified (fatal / lenient / transient / auto-fill), every
-   lenient path pinned by a test. Triggered by two CRM v1 M5
-   crashes (readonly DB `9258835`, ServicePlanner.repair dep
-   validation `f24b5d7`) where strict raises in side-channel code
-   halted the whole pipeline. Philosophy already encoded in
-   `_validate_files_non_empty` — extend to all agents. Output:
-   `docs/agent_error_audit.md` index.
+5. ✅ **Agent error-path audit** — SHIPPED 2026-05-16, extension
+   sweep 2026-05-17. Every agent's `raise` paths classified
+   (fatal / lenient / transient / auto-fill) in
+   `docs/agent_error_audit.md`. 7 lenient-path fixes shipped under
+   the original sweep; 2026-05-17 follow-up sweep verified 12
+   additional raise sites are correctly absorbed by their callers
+   (Engineer via tool_loop, Provisioner AI fallback/recovery via
+   `_build_ai_fallback_template`/`_try_ai_recovery_for_build`,
+   WebUITester via `integration_phase`, refactorer tokenizers are
+   defensive/unreachable). No outstanding fixes.
 6. **Refactorer agent** — dedupe + move shared business logic to
    `shared/<lang>/` core libs. Consumes item 4's atomic issues.
 7. **Tests / debugging after refactoring** — catch refactor-induced

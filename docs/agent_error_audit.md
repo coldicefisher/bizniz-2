@@ -196,6 +196,61 @@ mechanism. Raises here are by design.
 
 **Status:** No action — gates are the intentional strict layer.
 
+## Audit results — additional absorption layers (2026-05-17 sweep)
+
+A second pass on 2026-05-17 found four more agent surfaces that
+raise but are absorbed by their caller — same "lenient via caller"
+pattern as Coder via dispatcher. Documenting them here so the
+absorption isn't accidentally removed.
+
+### Engineer `_parse_plan` (`bizniz/engineer/agent.py:333-366`)
+
+| Line | Exception | Trigger | Absorbed by |
+|---|---|---|---|
+| 336 | `EngineerError` | Empty `approach` from LLM | `tool_loop_agent.py:348-350` catches and feeds back as tool result; LLM revises |
+| 339 | `EngineerError` | Empty `issues` list | Same |
+| 346 | `EngineerError` | `Issue.model_validate` failure | Same |
+| 348 | `EngineerError` | Duplicate issue ids | Same |
+| 354 | `EngineerError` | Missing `spec_refs` in implement mode | Same |
+| 363 | `EngineerError` | Unknown `depends_on` target | Same |
+
+**Why absorption is correct:** Engineer is a tool-loop agent. Plan
+submission goes through `_handle_submit_plan` (a tool handler). The
+tool_loop catches any handler exception, formats `ERROR: tool
+'submit_plan' raised <type>: <msg>` as the tool result, and feeds
+back. The LLM then revises and re-submits. No pipeline-level halt.
+
+**Test guarding the absorption:** `tool_loop_agent.py:348-350`
+catches `except Exception` — broad enough that any new
+`_handle_submit_plan` raise is auto-absorbed. Tested at the
+tool_loop layer; agent-specific tests not required.
+
+### Provisioner AI fallback (`bizniz/provisioner/ai_fallback.py`)
+
+| Line | Exception | Trigger | Absorbed by |
+|---|---|---|---|
+| 213 | `ValueError` | Empty AI response | `Provisioner._build_ai_fallback_template:805-811` catches; returns `None`; caller (`_resolve_infra_template`) logs and emits service with no compose entry |
+| 220 | `ValueError` | Response sets neither dockerfile nor upstream_image | Same path |
+
+### Provisioner AI recovery (`bizniz/provisioner/ai_recovery.py`)
+
+| Line | Exception | Trigger | Absorbed by |
+|---|---|---|---|
+| 96 | `ValueError` | Empty AI response | `try_ai_recovery` wraps the call; failures return `False` to the rebuild caller; build continues without AI assist |
+
+### WebUITester (`bizniz/integration/web_ui_tester.py:80`)
+
+| Line | Exception | Trigger | Absorbed by |
+|---|---|---|---|
+| 80 | `ValueError` | Contract validation failed after one corrective retry | `integration_phase.py:340-346` catches; marks frontend as failed result; continues with remaining frontends |
+
+### Refactorer tokenizers (`bizniz/refactorer/tokenizers.py:210, 257`)
+
+| Line | Exception | Trigger | Class | Status |
+|---|---|---|---|---|
+| 210 | `ValueError` | Unknown language passed to `tokenize_text` | **fatal-impossible** | Unreachable from the real caller `cpd.py:210` because it pre-filters with `detect_language` (skips on None). Defensive raise for direct callers; OK as-is. |
+| 257 | `ValueError` | `detect_language` failed and no `language` arg | **fatal-impossible** | Same path — pre-filter blocks this from firing. |
+
 ## Audit results — auth path
 
 ### AuthPlanner (`bizniz/auth_planner/agent.py`)

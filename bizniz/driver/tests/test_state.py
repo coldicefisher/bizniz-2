@@ -13,13 +13,15 @@ class TestNextSubphase:
         assert next_subphase(None) == SubPhase.ENRICH
 
     def test_progression(self):
+        # Canonical phase chain post-2026-05-17: review+repair collapsed
+        # into REVIEW_REPAIR (single progress-based loop). Legacy
+        # phase identifiers (REVIEW_INITIAL, REPAIR_ITER_*, REVIEW_FINAL)
+        # remain in the enum for backward-compat state-file parsing
+        # but are NOT in next_subphase's progression.
         assert next_subphase(SubPhase.ENRICH) == SubPhase.IMPLEMENT
         assert next_subphase(SubPhase.IMPLEMENT) == SubPhase.SMOKE
-        assert next_subphase(SubPhase.SMOKE) == SubPhase.REVIEW_INITIAL
-        assert next_subphase(SubPhase.REVIEW_INITIAL) == SubPhase.REPAIR_ITER_0
-        assert next_subphase(SubPhase.REPAIR_ITER_0) == SubPhase.REPAIR_ITER_1
-        assert next_subphase(SubPhase.REPAIR_ITER_2) == SubPhase.REVIEW_FINAL
-        assert next_subphase(SubPhase.REVIEW_FINAL) == SubPhase.INTEGRATION_API
+        assert next_subphase(SubPhase.SMOKE) == SubPhase.REVIEW_REPAIR
+        assert next_subphase(SubPhase.REVIEW_REPAIR) == SubPhase.INTEGRATION_API
         assert next_subphase(SubPhase.INTEGRATION_API) == SubPhase.INTEGRATION_WORKER
         assert next_subphase(SubPhase.INTEGRATION_WORKER) == SubPhase.INTEGRATION_WEB
         assert next_subphase(SubPhase.INTEGRATION_WEB) == SubPhase.UX_REVIEW

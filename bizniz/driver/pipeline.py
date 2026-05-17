@@ -33,10 +33,14 @@ from bizniz.driver.project_git import ProjectGit
 from bizniz.driver.state import RunState, SubPhase, TopPhase
 
 # Friendly --phase aliases for the CLI; expand to canonical SubPhase values.
+# Post-2026-05-17 the review/repair phases collapsed into REVIEW_REPAIR;
+# the legacy "review_final" / "repair" / "review" aliases all point at
+# the new phase so old tooling/scripts keep working.
 PHASE_ALIASES: dict = {
-    "review": SubPhase.REVIEW_INITIAL,
-    "review_final": SubPhase.REVIEW_FINAL,
-    "repair": SubPhase.REPAIR_ITER_0,
+    "review": SubPhase.REVIEW_REPAIR,
+    "review_final": SubPhase.REVIEW_REPAIR,
+    "review_repair": SubPhase.REVIEW_REPAIR,
+    "repair": SubPhase.REVIEW_REPAIR,
 }
 from bizniz.planner.planner import Planner
 from bizniz.planner.types import Milestone, ProjectPlan

@@ -84,6 +84,16 @@ class BiznizConfig(BaseModel):
     # so a top-tier model is justified for hallucination resistance.
     integration_tester_model: str = "gemini-pro"
     debugger_max_iterations: int = 12
+    # Progress-based stopping (2026-05-17, D2). Replaces hard
+    # iteration caps in the debug loop. The agentic debugger keeps
+    # running as long as failures are decreasing; stops only after
+    # this many consecutive no-progress iterations (stalled OR
+    # regression). Default 5 — gives the agent runway to diagnose
+    # without burning forever on genuinely stuck cases. Applies to
+    # integration debug + smoke recovery + post-refactor test repair
+    # + final-test recovery (one source of truth across all live-
+    # stack debugging surfaces).
+    debugger_stall_threshold: int = 5
     # Escalation thresholds (consecutive failures before escalating model)
     stall_threshold: int = 3
     agentic_debug_threshold: int = 5

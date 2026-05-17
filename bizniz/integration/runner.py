@@ -172,7 +172,15 @@ PYTEST_SIDECAR_IMAGE = "bizniz-test-pytest:latest"
 PLAYWRIGHT_SIDECAR_IMAGE = "bizniz-test-playwright:latest"
 
 
-_COLLECTED_RE = re.compile(r"^collected (\d+) items?", re.MULTILINE)
+# pytest emits "collected N items" inline with "collecting ... " when
+# --no-header is set (the form we run integration tests with). Drop the
+# line-start anchor so the count is found whether pytest prints it
+# inline or as its own line. The previous ``^collected`` anchor
+# false-negative'd 100% of clean runs of test_api.py and burned the
+# AgenticDebugger on tests that had already passed (recipe_v2 M1
+# 2026-05-17: 13/13 PASSED but gate fired ``integration_api_failed``
+# because the regex missed the count).
+_COLLECTED_RE = re.compile(r"collected (\d+) items?")
 # Match the final summary: "5 passed in 12.34s", "3 failed, 2 passed in 8s",
 # "1 passed, 1 warning in 3.4s", etc. We just need to confirm the counts
 # add up to non-zero AND no failures.

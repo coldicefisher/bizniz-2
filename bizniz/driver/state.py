@@ -13,14 +13,22 @@ Phases per milestone (in order):
 
   enrich           QualityEngineer.enrich → EnrichedSpec
   implement        Engineer.implement → EngineerResult
-  review_initial   QE.review + CodeReviewer.review (parallel call ok)
-  repair_iter_0    Engineer.repair after first review (if needed)
-  repair_iter_1    Engineer.repair after iter_0 review
-  repair_iter_2    Engineer.repair after iter_1 review
-  review_final     terminal review (after last repair, if any)
+  smoke            SmokePhase + iterative SmokeRecovery on failure
+  review_repair    QE.review + CR.review + Engineer.repair loop
+                   (driven by ProgressTracker — converges on
+                   approval or stops after N no-progress iters)
   integration_api  API integration tests for backend services
   integration_web  Web integration tests for frontend services
+  ux_review        UX vision eval + fix loop (frontends only)
+  refactor         Refactorer extracts duplicated logic
+  document         Human-readable docs generation
+  final_test       Last shippable-stack gate
   done             milestone fully complete
+
+Legacy phase identifiers (review_initial, repair_iter_0/1/2,
+review_final) remain in the SubPhase enum so old state files
+parse; they are not in the canonical run order. The 2026-05-17
+review/repair collapse merged them into ``review_repair``.
 
 Top-level (pre-milestone) phases:
 
@@ -45,12 +53,29 @@ from typing import Any, Dict, List, Optional
 class SubPhase(str, Enum):
     """Per-milestone sub-phase identifiers.
 
-    Order of declaration is also the canonical run order. ``DONE`` is
-    terminal. The order is consulted by ``next_phase()`` for resume.
+    ``_SUBPHASE_ORDER`` (defined below) is the canonical run order;
+    declaration order is not. ``DONE`` is terminal.
+
+    Legacy values (REVIEW_INITIAL, REPAIR_ITER_*, REVIEW_FINAL) remain
+    in the enum for backward-compat parsing of existing state files
+    written before the 2026-05-17 review/repair collapse. They are
+    NOT in ``_SUBPHASE_ORDER``; new code uses ``REVIEW_REPAIR`` only.
+    See ``MilestoneLoop._review_repair_done`` for the resume-time
+    legacy translation.
     """
     ENRICH = "enrich"
     IMPLEMENT = "implement"
     SMOKE = "smoke"
+    # 2026-05-17: REVIEW_REPAIR is a single progress-based loop that
+    # replaces the legacy REVIEW_INITIAL → REPAIR_ITER_0/1/2 →
+    # REVIEW_FINAL chain. The loop runs QE.review + CodeReviewer.review,
+    # dispatches Engineer.repair on rejection, and re-reviews — iterating
+    # via ``ProgressTracker``. Stops on approval (convergence) or after
+    # N consecutive no-progress iterations (default 5 via
+    # ``BiznizConfig.debugger_stall_threshold``).
+    REVIEW_REPAIR = "review_repair"
+    # Legacy phase identifiers. Kept so existing state files round-trip
+    # through ``SubPhase(value)``; not part of the canonical run order.
     REVIEW_INITIAL = "review_initial"
     REPAIR_ITER_0 = "repair_iter_0"
     REPAIR_ITER_1 = "repair_iter_1"
@@ -89,7 +114,15 @@ class TopPhase(str, Enum):
     AUTH = "auth"
 
 
-_SUBPHASE_ORDER = list(SubPhase)
+_LEGACY_SUBPHASES = frozenset({
+    SubPhase.REVIEW_INITIAL,
+    SubPhase.REPAIR_ITER_0,
+    SubPhase.REPAIR_ITER_1,
+    SubPhase.REPAIR_ITER_2,
+    SubPhase.REVIEW_FINAL,
+})
+
+_SUBPHASE_ORDER = [p for p in SubPhase if p not in _LEGACY_SUBPHASES]
 
 
 def next_subphase(current: Optional[SubPhase]) -> SubPhase:

@@ -30,6 +30,7 @@ from bizniz.driver.integration_phase import IntegrationPhase, IntegrationPhaseRe
 from bizniz.driver.final_tester import FinalTester
 from bizniz.driver.smoke_phase import SmokePhase, SmokePhaseResult
 from bizniz.driver.smoke_recovery import SmokeRecovery
+from bizniz.lib.progress_tracker import ProgressTracker
 from bizniz.driver.ux_phase import UXPhase
 from bizniz.driver.refactor_phase import RefactorPhase
 from bizniz.driver.milestone_code_dispatcher import MilestoneCodeDispatcher
@@ -112,6 +113,26 @@ class MilestoneLoop:
         # take whichever spec has higher confidence.
         confidence_low_threshold: float = 0.6,
         confidence_halt_threshold: float = 0.4,
+        # Progress-based stop threshold for the iterative smoke-recovery
+        # loop (D3, 2026-05-17). When the recovery agent makes progress
+        # (failures decrease) we keep going; we only stop after this many
+        # consecutive no-progress iterations (stalled OR regression).
+        # Default 5 matches BiznizConfig.debugger_stall_threshold. Set to
+        # 1 to recover legacy single-shot behavior.
+        smoke_recovery_stall_threshold: int = 5,
+        # Progress-based stop threshold for the review/repair loop
+        # (D5, 2026-05-17). Replaces the legacy ``repair_budget`` hard
+        # cap. The loop iterates as long as defect count (missing
+        # scenarios + critical findings) keeps decreasing; halts after
+        # this many consecutive no-progress iterations. Default 5,
+        # same shared knob as smoke recovery.
+        repair_stall_threshold: int = 5,
+        # Safety net: hard upper bound on review/repair iterations.
+        # The progress-based stop is the primary mechanism; this is
+        # belt-and-suspenders to prevent a pathological
+        # "always-progresses-by-one" loop from running forever.
+        # Default 20 — well beyond what any realistic milestone needs.
+        repair_max_iterations: int = 20,
     ):
         self._engineer = engineer
         self._qe = quality_engineer
@@ -119,6 +140,9 @@ class MilestoneLoop:
         self._integration = integration_phase
         self._smoke = smoke_phase
         self._smoke_recovery = smoke_recovery
+        self._smoke_recovery_stall_threshold = max(1, int(smoke_recovery_stall_threshold))
+        self._repair_stall_threshold = max(1, int(repair_stall_threshold))
+        self._repair_max_iterations = max(1, int(repair_max_iterations))
         self._confidence_low_threshold = confidence_low_threshold
         self._confidence_halt_threshold = confidence_halt_threshold
         self._ux_phase = ux_phase
@@ -173,93 +197,157 @@ class MilestoneLoop:
         auth_contract: Optional[str],
         state,
     ) -> SmokePhaseResult:
-        """One-shot agent recovery for a failing smoke phase. Returns
-        either the (possibly-passing) re-run result or the original
-        failure if recovery wasn't attempted or didn't take.
+        """Iterative agent recovery for a failing smoke phase (D3,
+        2026-05-17). Returns the latest smoke result (passing on
+        success; the last failing one when the loop stops without
+        converging).
 
-        Behavior is a no-op when ``smoke_recovery`` wasn't injected —
-        preserves prior pipelines that don't opt in.
+        Loop rules (per user direction):
+        - One iteration = one SmokeRecovery dispatch + one SmokePhase
+          re-run. The re-run is the source of truth, not the agent's
+          self-report.
+        - ``ProgressTracker`` decides when to stop: as long as the
+          critical-failure count keeps going DOWN, we keep going. Stop
+          only after ``smoke_recovery_stall_threshold`` consecutive
+          no-progress iterations (stalled OR regression) — default 5
+          via ``BiznizConfig.debugger_stall_threshold``.
+        - Hard short-circuit at convergence (0 critical failures).
+        - No-op when ``smoke_recovery`` wasn't injected.
         """
         if self._smoke_recovery is None:
             return smoke_result
+        if smoke_result.passed:
+            return smoke_result
+
+        service_names = [s.name for s in architecture.services]
+        current = smoke_result
+        tracker = ProgressTracker(
+            initial_failure_count=len(current.critical_failures),
+            stall_threshold=self._smoke_recovery_stall_threshold,
+        )
+        recovery_history: List[dict] = []
+
         if self._on_status:
             try:
                 self._on_status(
-                    f"SmokePhase: {len(smoke_result.critical_failures)} "
-                    f"critical failure(s); attempting one-shot recovery "
-                    f"before halting..."
+                    f"SmokePhase: {len(current.critical_failures)} "
+                    f"critical failure(s); entering iterative recovery "
+                    f"(stall threshold={self._smoke_recovery_stall_threshold})..."
                 )
             except Exception:
                 pass
-        service_names = [s.name for s in architecture.services]
-        # Defensive: if SmokeRecovery itself raises (a bug in the
-        # recovery code, an unexpected Milestone field, etc.), don't
-        # bring down the whole pipeline — fall back to the existing
-        # hard-halt path. A 'recovery did not run' is strictly no worse
-        # than the pre-recovery world.
-        try:
-            recovery_result = self._smoke_recovery.recover(
-                critical_failures=smoke_result.critical_failures,
-                service_names=service_names,
-                milestone_title=milestone.name,
-            )
-        except Exception as e:
+
+        iteration = 0
+        while True:
+            iteration += 1
+            # Defensive: any agent crash → bail out of the loop with
+            # whatever the latest verified result is. Don't bring the
+            # pipeline down on a recovery-code bug.
+            try:
+                recovery_result = self._smoke_recovery.recover(
+                    critical_failures=current.critical_failures,
+                    service_names=service_names,
+                    milestone_title=milestone.name,
+                )
+            except Exception as e:
+                if self._on_status:
+                    try:
+                        self._on_status(
+                            f"SmokeRecovery iter {iteration}: dispatch raised "
+                            f"{type(e).__name__}: {e} — stopping recovery loop"
+                        )
+                    except Exception:
+                        pass
+                break
+
+            recovery_history.append(recovery_result.model_dump())
+
+            if not recovery_result.attempted:
+                # Agent declined to act (e.g. claude binary missing at
+                # runtime). No point looping — return current state.
+                state.mark_phase(
+                    SubPhase.SMOKE,
+                    {
+                        **current.model_dump(),
+                        "recovery_history": recovery_history,
+                        "recovery_iterations": iteration,
+                    },
+                )
+                return current
+
             if self._on_status:
                 try:
                     self._on_status(
-                        f"SmokeRecovery: dispatch raised "
-                        f"{type(e).__name__}: {e} — falling back to "
-                        f"original hard-halt"
+                        f"SmokeRecovery iter {iteration}: attempted; "
+                        f"{len(recovery_result.actions_taken)} action(s), "
+                        f"self_reported_ok={recovery_result.succeeded} — "
+                        f"re-running smoke for verification..."
                     )
                 except Exception:
                     pass
-            return smoke_result
-        state.mark_phase(
-            SubPhase.SMOKE,
-            {
-                **smoke_result.model_dump(),
-                "recovery": recovery_result.model_dump(),
-            },
-        )
-        if not recovery_result.attempted:
-            return smoke_result
-        if self._on_status:
-            try:
-                self._on_status(
-                    f"SmokeRecovery: attempted={recovery_result.attempted}, "
-                    f"self_reported_ok={recovery_result.succeeded}, "
-                    f"{len(recovery_result.actions_taken)} action(s) — "
-                    f"re-running smoke for verification..."
-                )
-            except Exception:
-                pass
-        # Re-run smoke independently of the agent's self-report. The
-        # external check is the source of truth.
-        verify_result = self._smoke.run(
-            milestone=milestone,
-            architecture=architecture,
-            project_root=self._project_root,
-            auth_contract=auth_contract,
-        )
-        state.mark_phase(
-            SubPhase.SMOKE,
-            {
-                **verify_result.model_dump(),
-                "recovery": recovery_result.model_dump(),
-                "after_recovery": True,
-            },
-        )
-        if self._on_status:
-            try:
-                self._on_status(
-                    f"SmokePhase (after recovery): "
-                    f"{'PASSED' if verify_result.passed else 'STILL FAILING'} "
-                    f"— {len(verify_result.critical_failures)} "
-                    f"critical failure(s)"
-                )
-            except Exception:
-                pass
-        return verify_result
+
+            current = self._smoke.run(
+                milestone=milestone,
+                architecture=architecture,
+                project_root=self._project_root,
+                auth_contract=auth_contract,
+            )
+            verdict = tracker.update(len(current.critical_failures))
+
+            if self._on_status:
+                try:
+                    self._on_status(
+                        f"SmokePhase (after recovery iter {iteration}): "
+                        f"{'PASSED' if current.passed else 'still failing'} "
+                        f"— {len(current.critical_failures)} critical "
+                        f"failure(s); verdict={verdict}, "
+                        f"stall_counter={tracker.consecutive_no_progress}/"
+                        f"{self._smoke_recovery_stall_threshold}"
+                    )
+                except Exception:
+                    pass
+
+            state.mark_phase(
+                SubPhase.SMOKE,
+                {
+                    **current.model_dump(),
+                    "recovery_history": recovery_history,
+                    "recovery_iterations": iteration,
+                    "progress_history": tracker.render_history(),
+                    "after_recovery": True,
+                },
+            )
+
+            if tracker.has_converged() or current.passed:
+                if self._on_status:
+                    try:
+                        self._on_status(
+                            f"SmokeRecovery: converged after {iteration} "
+                            f"iteration(s)"
+                        )
+                    except Exception:
+                        pass
+                return current
+
+            if tracker.should_stop():
+                if self._on_status:
+                    try:
+                        self._on_status(
+                            f"SmokeRecovery: stall threshold "
+                            f"({self._smoke_recovery_stall_threshold}) reached "
+                            f"after {iteration} iteration(s); halting recovery "
+                            f"loop with {len(current.critical_failures)} "
+                            f"critical failure(s) remaining"
+                        )
+                    except Exception:
+                        pass
+                return current
+
+        # Loop exited via ``break`` (recovery dispatch raised). Return
+        # whatever the latest verified result was — the original smoke
+        # failure when the very first dispatch crashed, or the most
+        # recent re-run result on a later-iteration crash.
+        return current
 
     # ── Public ─────────────────────────────────────────────────────────
 
@@ -403,116 +491,40 @@ class MilestoneLoop:
                     ),
                 )
 
-        # Reviews + repairs.
-        repair_phases = (
-            SubPhase.REVIEW_INITIAL,
-            SubPhase.REPAIR_ITER_0,
-            SubPhase.REPAIR_ITER_1,
-            SubPhase.REPAIR_ITER_2,
-            SubPhase.REVIEW_FINAL,
-        )
-        # Determine where to start in the repair sequence.
-        for idx, phase in enumerate(repair_phases):
-            if _has(state, phase):
-                continue
-            if phase == SubPhase.REVIEW_INITIAL:
-                self._tag(state.milestone_index, phase)
-                coverage, code_review = self._phase_review(
-                    milestone, architecture, spec, result, auth_contract, prior_list,
-                )
-                state.mark_phase(phase, {
-                    "coverage": coverage.model_dump(),
-                    "code_review": code_review.model_dump(),
-                })
-                if self._approved(coverage, code_review):
-                    # Skip ahead — mark final review as done with same artifact.
-                    state.mark_phase(SubPhase.REVIEW_FINAL, {
-                        "coverage": coverage.model_dump(),
-                        "code_review": code_review.model_dump(),
-                    })
-                    break
-                continue
-
-            if phase == SubPhase.REVIEW_FINAL:
-                # Reached terminal review with no remaining repairs (budget
-                # depleted or exited early). Last-known coverage/review
-                # decide approval.
-                if not self._approved(coverage, code_review):
-                    self._gates.hard(
-                        "milestone_unapproved",
-                        f"M{state.milestone_index} '{milestone.name}' not "
-                        f"approved after {repair_iterations} repair iteration(s). "
-                        f"coverage.approved={coverage and coverage.approved}, "
-                        f"code_review.approved={code_review and code_review.approved}",
-                    )
-                state.mark_phase(phase, {
-                    "coverage": coverage.model_dump() if coverage else {},
-                    "code_review": code_review.model_dump() if code_review else {},
-                })
-                break
-
-            # Repair iteration phase.
-            iter_idx = idx - 1  # REPAIR_ITER_0 is at idx=1, etc.
-            if iter_idx >= self._repair_budget:
-                # Budget exhausted; jump to final review/halt.
-                continue
-            if self._approved(coverage, code_review):
-                # Already passed; skip remaining repair phases.
-                continue
-            self._log(
-                f"MilestoneLoop: repair iteration {iter_idx} "
-                f"(model escalation tier {iter_idx})"
-            )
-            self._tag(state.milestone_index, phase)
-
-            # v2.5 path: dispatch fix-issues through ServicePlanner +
-            # Orchestrator + Coder. The store grows with `*-fix1`,
-            # `*-fix2` rows alongside the originals; assemble_engineer_
-            # result reads the union. v2 fallback is unchanged.
-            if self._code_dispatcher is not None:
-                store = (
-                    self._issue_store_factory(state.milestone_index)
-                    if self._issue_store_factory is not None else None
-                )
-                result = self._code_dispatcher.repair(
-                    architecture=architecture,
-                    enriched_spec=spec,
-                    coverage_report=coverage,
-                    code_review_report=code_review,
-                    repair_iteration=iter_idx + 1,  # 1-indexed for prompt clarity
-                    auth_contract=auth_contract,
-                    workspace_summary=self._workspace_summary,
-                    issue_store=store,
-                )
-            else:
-                engineer_for_repair = self._engineer_for_repair(iter_idx)
-                report_for_repair = _merge_to_repair_report(
-                    milestone.name, coverage, code_review,
-                )
-                result = engineer_for_repair.repair(
+        # Review + repair: a single progress-based loop (2026-05-17,
+        # D5). Runs QE + CR review; if either un-approves, dispatch
+        # Engineer.repair and re-review. Loop iterates as long as the
+        # defect count (missing scenarios + critical findings) keeps
+        # decreasing; stops on approval (convergence) or after
+        # ``repair_stall_threshold`` consecutive no-progress iterations.
+        # No hard iteration cap — ProgressTracker is the safety mechanism.
+        if not self._review_repair_done(state):
+            coverage, code_review, result, repair_iterations, history = (
+                self._phase_review_repair_loop(
+                    state=state,
                     milestone=milestone,
                     architecture=architecture,
-                    code_review_report=report_for_repair,
-                    enriched_spec=spec,
+                    spec=spec,
+                    initial_result=result,
                     auth_contract=auth_contract,
-                    prior_specs=prior_list,
+                    prior_list=prior_list,
                 )
-            repair_iterations += 1
-            coverage, code_review = self._phase_review(
-                milestone, architecture, spec, result, auth_contract, prior_list,
             )
-            state.mark_phase(phase, {
-                "engineer_result": result.model_dump(),
-                "coverage": coverage.model_dump(),
-                "code_review": code_review.model_dump(),
+            state.mark_phase(SubPhase.REVIEW_REPAIR, {
+                "coverage": coverage.model_dump() if coverage else None,
+                "code_review": code_review.model_dump() if code_review else None,
+                "repair_iterations": repair_iterations,
+                "progress_history": history,
             })
-            if self._approved(coverage, code_review):
-                # Skip remaining repair phases; mark REVIEW_FINAL.
-                state.mark_phase(SubPhase.REVIEW_FINAL, {
-                    "coverage": coverage.model_dump(),
-                    "code_review": code_review.model_dump(),
-                })
-                break
+            if not self._approved(coverage, code_review):
+                self._gates.hard(
+                    "milestone_unapproved",
+                    f"M{state.milestone_index} '{milestone.name}' not "
+                    f"approved after {repair_iterations} repair "
+                    f"iteration(s). "
+                    f"coverage.approved={coverage and coverage.approved}, "
+                    f"code_review.approved={code_review and code_review.approved}",
+                )
 
         # Integration phases (api → worker → web).
         if not _has(state, SubPhase.INTEGRATION_API):
@@ -791,7 +803,8 @@ class MilestoneLoop:
         spec = self._reload_required(state, SubPhase.ENRICH, EnrichedSpec) \
             if target != SubPhase.ENRICH else None
         result = None
-        if target in (SubPhase.SMOKE, SubPhase.REVIEW_INITIAL,
+        if target in (SubPhase.SMOKE, SubPhase.REVIEW_REPAIR,
+                      SubPhase.REVIEW_INITIAL,
                       SubPhase.REPAIR_ITER_0,
                       SubPhase.REPAIR_ITER_1, SubPhase.REPAIR_ITER_2,
                       SubPhase.REVIEW_FINAL,
@@ -859,7 +872,32 @@ class MilestoneLoop:
                     f"{'; '.join(smoke_result.critical_failures[:3])}",
                 )
 
+        elif target == SubPhase.REVIEW_REPAIR:
+            # Re-run the entire iterative review/repair loop from
+            # scratch. Useful after a prompt/model change to verify
+            # the milestone re-converges with the new agent.
+            coverage, code_review, result, repair_iterations, history = (
+                self._phase_review_repair_loop(
+                    state=state,
+                    milestone=milestone,
+                    architecture=architecture,
+                    spec=spec,
+                    initial_result=result,
+                    auth_contract=auth_contract,
+                    prior_list=prior_list,
+                )
+            )
+            state.mark_phase(target, {
+                "coverage": coverage.model_dump() if coverage else None,
+                "code_review": code_review.model_dump() if code_review else None,
+                "repair_iterations": repair_iterations,
+                "progress_history": history,
+            })
+
         elif target in (SubPhase.REVIEW_INITIAL, SubPhase.REVIEW_FINAL):
+            # Legacy single-review re-entry: just run a review, no
+            # repair loop. Kept for tooling that targets the old
+            # phase names; new code should use REVIEW_REPAIR.
             coverage, code_review = self._phase_review(
                 milestone, architecture, spec, result, auth_contract, prior_list,
             )
@@ -1210,6 +1248,9 @@ class MilestoneLoop:
 
         If a ``repair_engineer_factory`` was injected (model escalation
         configured), call it. Otherwise reuse the default Engineer.
+        With progress-based iteration (D5), ``iteration`` may exceed
+        the configured escalation tier count — the factory itself is
+        expected to clamp to its highest tier.
         """
         if self._repair_engineer_factory is not None:
             try:
@@ -1220,6 +1261,181 @@ class MilestoneLoop:
                     f"{type(e).__name__}: {e} — falling back to default engineer"
                 )
         return self._engineer
+
+    def _review_repair_done(self, state: MilestoneState) -> bool:
+        """True when review+repair is complete for this milestone.
+
+        Backward-compat: a pre-2026-05-17 state file has ``review_final``
+        (legacy terminal review) instead of ``review_repair``. Treat
+        either as "review/repair done" so resume on existing builds
+        doesn't redo work.
+        """
+        return _has(state, SubPhase.REVIEW_REPAIR) or _has(
+            state, SubPhase.REVIEW_FINAL,
+        )
+
+    @staticmethod
+    def _defect_count(
+        coverage: Optional[CoverageReport],
+        code_review: Optional[CodeReviewReport],
+    ) -> int:
+        """Combined defect signal that the repair loop is trying to
+        drive to zero.
+
+        - ``coverage.missing_scenarios`` — capabilities not yet tested
+        - ``code_review.critical_findings`` — bugs the reviewer flagged
+          as blocking
+
+        Non-critical CR findings (style, recommendations) don't gate
+        the milestone and are excluded from the signal so the loop
+        doesn't churn on noise. Lower is better; 0 means both
+        reviewers approved.
+        """
+        if coverage is None or code_review is None:
+            return 0
+        return (
+            len(coverage.missing_scenarios)
+            + len(code_review.critical_findings)
+        )
+
+    def _phase_review_repair_loop(
+        self,
+        *,
+        state: MilestoneState,
+        milestone: Milestone,
+        architecture: SystemArchitecture,
+        spec: EnrichedSpec,
+        initial_result: EngineerResult,
+        auth_contract: Optional[str],
+        prior_list: List[EnrichedSpec],
+    ):
+        """Run the iterative review/repair loop and return the final
+        ``(coverage, code_review, result, iteration_count, history_str)``.
+
+        Iteration 0 = the initial review (no repair). Each subsequent
+        iteration dispatches Engineer.repair + a fresh review. The
+        loop exits on approval (success) or after
+        ``self._repair_stall_threshold`` consecutive no-progress
+        iterations (failure — caller fires the milestone_unapproved
+        gate). Hard cap also via ``_repair_max_iterations`` so a
+        pathological "always-progresses-by-one" agent can't loop
+        forever.
+        """
+        from bizniz.lib.progress_tracker import ProgressTracker
+
+        self._tag(state.milestone_index, SubPhase.REVIEW_REPAIR)
+
+        # Initial review (counts as iteration 0; no repair yet).
+        coverage, code_review = self._phase_review(
+            milestone, architecture, spec, initial_result,
+            auth_contract, prior_list,
+        )
+        result = initial_result
+        if self._approved(coverage, code_review):
+            self._log(
+                f"MilestoneLoop: review/repair approved on initial "
+                f"review (0 repair iterations)"
+            )
+            return coverage, code_review, result, 0, ""
+
+        tracker = ProgressTracker(
+            initial_failure_count=self._defect_count(coverage, code_review),
+            stall_threshold=self._repair_stall_threshold,
+        )
+        self._log(
+            f"MilestoneLoop: entering review/repair loop "
+            f"(initial defects={tracker.current_failure_count}, "
+            f"stall threshold={self._repair_stall_threshold}, "
+            f"hard cap={self._repair_max_iterations})"
+        )
+
+        repair_iterations = 0
+        while True:
+            repair_iterations += 1
+            iter_idx = repair_iterations - 1  # 0-based for engineer factory
+            self._log(
+                f"MilestoneLoop: repair iteration {repair_iterations} "
+                f"(escalation tier {iter_idx}, defects "
+                f"{tracker.current_failure_count})"
+            )
+
+            # Dispatch repair — v2.5 dispatcher when wired, v2 Engineer
+            # otherwise. Same shape as the legacy loop.
+            if self._code_dispatcher is not None:
+                store = (
+                    self._issue_store_factory(state.milestone_index)
+                    if self._issue_store_factory is not None else None
+                )
+                result = self._code_dispatcher.repair(
+                    architecture=architecture,
+                    enriched_spec=spec,
+                    coverage_report=coverage,
+                    code_review_report=code_review,
+                    repair_iteration=repair_iterations,
+                    auth_contract=auth_contract,
+                    workspace_summary=self._workspace_summary,
+                    issue_store=store,
+                )
+            else:
+                engineer_for_repair = self._engineer_for_repair(iter_idx)
+                report_for_repair = _merge_to_repair_report(
+                    milestone.name, coverage, code_review,
+                )
+                result = engineer_for_repair.repair(
+                    milestone=milestone,
+                    architecture=architecture,
+                    code_review_report=report_for_repair,
+                    enriched_spec=spec,
+                    auth_contract=auth_contract,
+                    prior_specs=prior_list,
+                )
+
+            # Re-review with the updated result.
+            coverage, code_review = self._phase_review(
+                milestone, architecture, spec, result,
+                auth_contract, prior_list,
+            )
+
+            if self._approved(coverage, code_review):
+                self._log(
+                    f"MilestoneLoop: review/repair approved after "
+                    f"{repair_iterations} repair iteration(s)"
+                )
+                return (
+                    coverage, code_review, result,
+                    repair_iterations, tracker.render_history(),
+                )
+
+            verdict = tracker.update(self._defect_count(coverage, code_review))
+            self._log(
+                f"MilestoneLoop: review/repair iter {repair_iterations}: "
+                f"verdict={verdict}, defects={tracker.current_failure_count}, "
+                f"stall_counter={tracker.consecutive_no_progress}/"
+                f"{self._repair_stall_threshold}"
+            )
+
+            if tracker.should_stop():
+                self._log(
+                    f"MilestoneLoop: review/repair stall threshold "
+                    f"reached after {repair_iterations} iteration(s) — "
+                    f"halting loop with {tracker.current_failure_count} "
+                    f"defect(s) remaining"
+                )
+                return (
+                    coverage, code_review, result,
+                    repair_iterations, tracker.render_history(),
+                )
+
+            if repair_iterations >= self._repair_max_iterations:
+                self._log(
+                    f"MilestoneLoop: review/repair hard cap "
+                    f"({self._repair_max_iterations}) reached — "
+                    f"halting loop"
+                )
+                return (
+                    coverage, code_review, result,
+                    repair_iterations, tracker.render_history(),
+                )
 
     # ── Helpers ────────────────────────────────────────────────────────
 
@@ -1249,11 +1465,21 @@ class MilestoneLoop:
             return None
         return self._reload_required(state, SubPhase.IMPLEMENT, EngineerResult)
 
+    # Lookback chain for finding the latest review artifact across the
+    # 2026-05-17 phase rename. New runs write to REVIEW_REPAIR; legacy
+    # runs wrote to REVIEW_FINAL → REPAIR_ITER_2 → ... → REVIEW_INITIAL
+    # in priority order (latest first).
+    _REVIEW_LOOKBACK_PHASES = (
+        SubPhase.REVIEW_REPAIR,
+        SubPhase.REVIEW_FINAL,
+        SubPhase.REPAIR_ITER_2,
+        SubPhase.REPAIR_ITER_1,
+        SubPhase.REPAIR_ITER_0,
+        SubPhase.REVIEW_INITIAL,
+    )
+
     def _load_coverage_if_done(self, state: MilestoneState) -> Optional[CoverageReport]:
-        # Look for the most recent review artifact (final → repair → initial)
-        for phase in (SubPhase.REVIEW_FINAL, SubPhase.REPAIR_ITER_2,
-                      SubPhase.REPAIR_ITER_1, SubPhase.REPAIR_ITER_0,
-                      SubPhase.REVIEW_INITIAL):
+        for phase in self._REVIEW_LOOKBACK_PHASES:
             if _has(state, phase):
                 art = state.read_artifact(phase) or {}
                 cov = art.get("coverage")
@@ -1265,9 +1491,7 @@ class MilestoneLoop:
         return None
 
     def _load_review_if_done(self, state: MilestoneState) -> Optional[CodeReviewReport]:
-        for phase in (SubPhase.REVIEW_FINAL, SubPhase.REPAIR_ITER_2,
-                      SubPhase.REPAIR_ITER_1, SubPhase.REPAIR_ITER_0,
-                      SubPhase.REVIEW_INITIAL):
+        for phase in self._REVIEW_LOOKBACK_PHASES:
             if _has(state, phase):
                 art = state.read_artifact(phase) or {}
                 cr = art.get("code_review")

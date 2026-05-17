@@ -436,6 +436,11 @@ the prompt/config change.
 This is the SAFE form of "self-building bizniz." Open-ended self-
 prompt-modification is explicitly out of scope — too risky.
 
+
+### 13. Add Serving to documentation.
+
+React / Angular libraries added to serve the markdown in docs/ directory. (Added by Jamey)
+
 ## Order rationale
 
 - **1 first** because it's the cheapest quality lever — preventing

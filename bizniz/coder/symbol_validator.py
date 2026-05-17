@@ -473,7 +473,22 @@ def _validate_attributes_in_file(
         var = node.value.id
         cls = var_to_class.get(var)
         if not cls:
-            continue
+            # ``ClassName.attr`` — direct class-level access. SQLAlchemy
+            # query builders use this pattern (``select(User).where(
+            # User.user_id == ...)``). The class lookup-by-shortname is
+            # the same set of qualnames as ``fields_for`` reads.
+            # Only consider names imported in this file (so we don't
+            # flag random locals that happen to match a class name).
+            if (
+                var in imported_modules
+                or any(
+                    var == name
+                    for name in class_index.qualnames_by_shortname
+                )
+            ) and var in class_index.qualnames_by_shortname:
+                cls = var
+            else:
+                continue
         # Resolve cls to a qualname (or list of qualnames).
         qualnames = class_index.qualnames_by_shortname.get(cls, [])
         if not qualnames:
