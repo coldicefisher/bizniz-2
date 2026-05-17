@@ -110,6 +110,13 @@ def call_with_retry(
     on_status: Optional[Callable[[str], None]] = None,
     sleep: Callable[[float], None] = time.sleep,
     label: str = "LLM",
+    # Roadmap item 9 Phase 2: structured perf emitter. When wired,
+    # every retry emits an ``agent_retry`` event and the final
+    # result emits an ``agent_call`` event with timing + token
+    # counts + retry budget breakdown. ``None`` → no events emitted
+    # (default for callers that haven't been wired yet).
+    perf_emitter: Optional["PerfEmitter"] = None,
+    target: Optional[str] = None,    # passed through to events
 ) -> dict:
     """Call the LLM, retry on transient failures, parse JSON output.
 
@@ -138,6 +145,8 @@ def call_with_retry(
     last_error: Any = None
     transient_count = 0
     permanent_count = 0
+    call_start = time.time()
+    last_response_chars = 0
 
     while True:
         attempt = transient_count + permanent_count + 1
@@ -155,27 +164,56 @@ def call_with_retry(
                 kwargs["schema"] = schema
             text, _job_id, _output_messages = client.get_text(**kwargs)
             elapsed = time.time() - t0
+            last_response_chars = len(text or "")
             if on_status:
                 on_status(
                     f"{label}: AI responded in {elapsed:.1f}s "
-                    f"({len(text or '')} chars)"
+                    f"({last_response_chars} chars)"
                 )
 
             if not text or not text.strip():
                 last_error = "Empty response from AI"
                 permanent_count += 1
+                if perf_emitter is not None:
+                    perf_emitter.agent_retry(
+                        agent=label, target=target,
+                        attempt_index=attempt,
+                        classification="permanent",
+                        error="Empty response from AI",
+                    )
                 if permanent_count >= max_attempts:
                     break
                 continue
 
             text = clean_llm_json(text)
-            return json.loads(text)
+            parsed = json.loads(text)
+            if perf_emitter is not None:
+                perf_emitter.agent_call(
+                    agent=label, target=target,
+                    duration_s=time.time() - call_start,
+                    succeeded=True,
+                    response_chars=last_response_chars,
+                    permanent_attempts=permanent_count,
+                    transient_attempts=transient_count,
+                )
+            return parsed
         except AIInsufficientFunds:
             raise
         except Exception as e:
             last_error = e
             if _is_transient(e):
                 transient_count += 1
+                idx = min(transient_count - 1, len(transient_backoff_s) - 1)
+                wait_s = transient_backoff_s[idx]
+                if perf_emitter is not None:
+                    perf_emitter.agent_retry(
+                        agent=label, target=target,
+                        attempt_index=attempt,
+                        classification="transient",
+                        wait_s=(0.0 if transient_count >= max_transient_attempts
+                                else wait_s),
+                        error=f"{type(e).__name__}: {e}",
+                    )
                 if transient_count >= max_transient_attempts:
                     if on_status:
                         on_status(
@@ -183,8 +221,6 @@ def call_with_retry(
                             f"{type(e).__name__}: {e}"
                         )
                     break
-                idx = min(transient_count - 1, len(transient_backoff_s) - 1)
-                wait_s = transient_backoff_s[idx]
                 if on_status:
                     on_status(
                         f"{label}: attempt {attempt} transient (upstream "
@@ -195,6 +231,13 @@ def call_with_retry(
                 continue
             else:
                 permanent_count += 1
+                if perf_emitter is not None:
+                    perf_emitter.agent_retry(
+                        agent=label, target=target,
+                        attempt_index=attempt,
+                        classification="permanent",
+                        error=f"{type(e).__name__}: {e}",
+                    )
                 if on_status:
                     on_status(
                         f"{label}: attempt {attempt} failed — "
@@ -204,6 +247,17 @@ def call_with_retry(
                     break
                 continue
 
+    # Emit a final failure event before raising so the analyzer sees
+    # the exhausted budget alongside the retries.
+    if perf_emitter is not None:
+        perf_emitter.agent_call(
+            agent=label, target=target,
+            duration_s=time.time() - call_start,
+            succeeded=False,
+            response_chars=last_response_chars,
+            permanent_attempts=permanent_count,
+            transient_attempts=transient_count,
+        )
     raise LLMCallError(
         f"{label} failed after {transient_count + permanent_count} "
         f"attempts ({transient_count} transient, {permanent_count} "

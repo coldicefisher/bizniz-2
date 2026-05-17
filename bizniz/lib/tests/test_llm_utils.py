@@ -277,3 +277,104 @@ class TestEnvVarOverride:
         assert _resolve_transient_backoff() == (
             30.0, 90.0, 300.0, 600.0, 1800.0, 3600.0,
         )
+
+
+# ── Perf emitter integration (roadmap item 9 Phase 2B) ───────────
+
+
+class TestPerfEmitterIntegration:
+    def test_successful_call_emits_agent_call(self):
+        from bizniz.perf_log.emitter import PerfEmitter, AgentCallEvent
+        client = _client_returning({"ok": 1})
+        em = PerfEmitter(in_memory=True)
+        result = call_with_retry(
+            client=client, messages=[],
+            label="Planner", target="m1", perf_emitter=em,
+        )
+        assert result == {"ok": 1}
+        calls = [
+            ev for ev in em.collected if isinstance(ev, AgentCallEvent)
+        ]
+        assert len(calls) == 1
+        assert calls[0].agent == "Planner"
+        assert calls[0].target == "m1"
+        assert calls[0].succeeded is True
+        assert calls[0].permanent_attempts == 0
+        assert calls[0].transient_attempts == 0
+
+    def test_permanent_retry_emits_agent_retry(self):
+        from bizniz.perf_log.emitter import (
+            PerfEmitter, AgentCallEvent, AgentRetryEvent,
+        )
+        client = _client_sequence([
+            ValueError("not valid JSON"),
+            {"ok": 1},
+        ])
+        em = PerfEmitter(in_memory=True)
+        call_with_retry(
+            client=client, messages=[],
+            label="Architect", perf_emitter=em,
+        )
+        retries = [ev for ev in em.collected if isinstance(ev, AgentRetryEvent)]
+        assert len(retries) == 1
+        assert retries[0].classification == "permanent"
+        assert "not valid JSON" in retries[0].error
+        # Final agent_call event has permanent_attempts=1.
+        final = [ev for ev in em.collected if isinstance(ev, AgentCallEvent)]
+        assert final[0].permanent_attempts == 1
+
+    def test_transient_retry_emits_with_wait_s(self):
+        from bizniz.perf_log.emitter import (
+            PerfEmitter, AgentRetryEvent,
+        )
+        client = _client_sequence([
+            Exception("API Error: 500"),
+            {"ok": 1},
+        ])
+        em = PerfEmitter(in_memory=True)
+        call_with_retry(
+            client=client, messages=[],
+            label="Planner",
+            transient_backoff_s=(0.001,),
+            sleep=lambda _: None,
+            perf_emitter=em,
+        )
+        retries = [ev for ev in em.collected if isinstance(ev, AgentRetryEvent)]
+        assert len(retries) == 1
+        assert retries[0].classification == "transient"
+        assert retries[0].wait_s > 0
+
+    def test_exhausted_budget_emits_failure_agent_call(self):
+        from bizniz.perf_log.emitter import (
+            PerfEmitter, AgentCallEvent, AgentRetryEvent,
+        )
+        client = _client_sequence([
+            ValueError("bad JSON") for _ in range(5)
+        ])
+        em = PerfEmitter(in_memory=True)
+        with pytest.raises(LLMCallError):
+            call_with_retry(
+                client=client, messages=[],
+                label="Planner", perf_emitter=em,
+            )
+        # Final agent_call event has succeeded=False.
+        finals = [
+            ev for ev in em.collected if isinstance(ev, AgentCallEvent)
+        ]
+        assert len(finals) == 1
+        assert finals[0].succeeded is False
+        # All 3 permanent attempts emitted retries.
+        retries = [
+            ev for ev in em.collected if isinstance(ev, AgentRetryEvent)
+        ]
+        assert len(retries) == 3
+
+    def test_no_emitter_does_not_crash(self):
+        # Defaults to None — proves backward compat.
+        client = _client_returning({"ok": 1})
+        result = call_with_retry(
+            client=client, messages=[],
+            label="Planner",
+            # perf_emitter omitted — should still work
+        )
+        assert result == {"ok": 1}
