@@ -1,6 +1,10 @@
 """Per-run / per-milestone state with sub-phase tracking.
 
-State lives at ``<project_root>/docs/runs/<job_id>/`` as JSON. Sub-phase
+State lives at ``<project_root>/.bizniz/runs/<job_id>/`` as JSON
+(was ``<project_root>/docs/runs/<job_id>/`` before 2026-05-16; the
+new path keeps ``docs/`` reserved for human-readable engineering
+docs). Readers fall back to the legacy path for existing projects
+via ``bizniz/driver/runs_paths.resolve_runs_root``. Sub-phase
 granularity means resume can pick up at the exact point a prior run
 exited — e.g. if M1 finished `implement` but `review_initial` didn't
 write, resume runs `review_initial` for M1 next, not the whole M1.

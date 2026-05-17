@@ -111,10 +111,14 @@ def parse_costs_md(path: Path) -> List[TrackerEntry]:
 
 
 def parse_project_runs(project_root: Path) -> List[TrackerEntry]:
-    """Scan ``<project>/docs/runs/*/costs.md`` and aggregate all
+    """Scan ``<project>/<runs_root>/*/costs.md`` and aggregate all
     tracker entries across every recorded run.
+
+    Honors the 2026-05-16 migration (item 8A): new runs live at
+    ``.bizniz/runs/``; legacy ones at ``docs/runs/``.
     """
-    runs_root = project_root / "docs" / "runs"
+    from bizniz.driver.runs_paths import resolve_runs_root
+    runs_root = resolve_runs_root(project_root)
     if not runs_root.exists():
         return []
     out: List[TrackerEntry] = []

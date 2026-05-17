@@ -145,11 +145,21 @@ class ProjectGit:
         message: str,
         tag: Optional[str] = None,
         allow_empty: bool = False,
+        body: Optional[str] = None,
     ) -> bool:
         """``git add -A`` then ``git commit -m <message>``; optionally
         create ``tag``. Returns True if a commit was made (and tag
         applied if requested), False on any failure or when there
         was nothing to commit (and ``allow_empty`` is False).
+
+        ``body``, if provided, becomes a second ``-m`` argument and
+        lands as the commit body. Callers pass a one-line
+        ``[bizniz pipeline run <job_id>]`` so generated commits are
+        grep-able without polluting the ``Co-Authored-By`` metadata
+        field GitHub uses for contributor stats. Project commits do
+        NOT carry ``Co-Authored-By: Claude`` by design — the
+        generated project is the USER's product, not a bizniz/Claude
+        contribution.
 
         Tag creation force-overwrites if the same tag already exists
         — supports re-running a phase + replacing its prior commit
@@ -173,6 +183,8 @@ class ProjectGit:
                 self._run(["tag", "-f", tag])
             return False
         commit_args = ["commit", "-q", "-m", message]
+        if body:
+            commit_args.extend(["-m", body])
         if allow_empty:
             commit_args.append("--allow-empty")
         ok = self._run(commit_args)

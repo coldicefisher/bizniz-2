@@ -57,7 +57,11 @@ def _project_root() -> Path:
 
 
 def _runs_root(project_root: Path) -> Path:
-    return project_root / "docs" / "runs"
+    """Resolve where per-run state lives. Honors the 2026-05-16
+    migration (item 8A): new state at ``.bizniz/runs/``; legacy at
+    ``docs/runs/`` for existing projects."""
+    from bizniz.driver.runs_paths import resolve_runs_root
+    return resolve_runs_root(project_root)
 
 
 def _resolve_run_dir(project_root: Path) -> Optional[Path]:

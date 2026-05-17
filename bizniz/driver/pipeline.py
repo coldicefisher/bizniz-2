@@ -128,11 +128,22 @@ class V2Pipeline:
     def _git_commit(self, message: str, tag: Optional[str] = None) -> None:
         """Best-effort commit helper used at phase boundaries. Never
         raises out to the pipeline — git failures degrade silently to
-        the pre-item-3 (no-tracking) behavior."""
+        the pre-item-3 (no-tracking) behavior.
+
+        Attaches a one-line ``[bizniz pipeline run <job_id>]`` body
+        so generated-project commits are grep-able by run without
+        polluting GitHub's ``Co-Authored-By`` contributor metadata.
+        The generated project is the user's product — bizniz does
+        not claim co-authorship by default."""
         if self._project_git is None:
             return
+        # job_id is the trailing dir name of the run state root.
+        job_id = self._state.root.name if self._state is not None else "unknown"
+        body = f"[bizniz pipeline run {job_id}]"
         try:
-            self._project_git.commit_all(message=message, tag=tag)
+            self._project_git.commit_all(
+                message=message, tag=tag, body=body,
+            )
         except Exception as e:
             if self._on_status:
                 try:

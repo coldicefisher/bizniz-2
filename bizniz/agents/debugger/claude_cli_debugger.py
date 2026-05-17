@@ -281,7 +281,8 @@ class ClaudeCliDebugger:
         return self._resolve_workspace_root().parent
 
     def _infer_job_id(self) -> Optional[str]:
-        runs = self._project_root_for_mcp() / "docs" / "runs"
+        from bizniz.driver.runs_paths import resolve_runs_root
+        runs = resolve_runs_root(self._project_root_for_mcp())
         if not runs.exists():
             return None
         dirs = sorted(

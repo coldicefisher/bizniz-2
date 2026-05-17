@@ -370,12 +370,14 @@ class ClaudeCliCoder:
         return ws.parent
 
     def _infer_job_id(self) -> Optional[str]:
-        """Best-effort: find the newest job dir under
-        ``docs/runs/`` so the MCP server can locate the right
+        """Best-effort: find the newest job dir under the project's
+        runs root (``.bizniz/runs/`` as of 2026-05-16; ``docs/runs/``
+        for legacy projects) so the MCP server can locate the right
         review artifact. Returns None if no runs exist yet (first
         invocation in a fresh project).
         """
-        runs = self._project_root_for_mcp() / "docs" / "runs"
+        from bizniz.driver.runs_paths import resolve_runs_root
+        runs = resolve_runs_root(self._project_root_for_mcp())
         if not runs.exists():
             return None
         dirs = sorted(

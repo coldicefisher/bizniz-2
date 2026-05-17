@@ -172,10 +172,20 @@ def _seed_fa_env_from_project(project_root: Path) -> None:
             os.environ.setdefault(k, v.strip())
 
 
-def _resolve_runs_root(project_slug: str) -> Path:
+def _project_root(project_slug: str) -> Path:
+    """Resolve ``<projects_root>/<slug>/``."""
     base = Path(os.environ.get("BIZNIZ_PROJECTS_ROOT") or
                 str(Path.home() / "bizniz_projects"))
-    return base / project_slug / "docs" / "runs"
+    return base / project_slug
+
+
+def _resolve_runs_root(project_slug: str) -> Path:
+    """Resolve where per-run state lives. As of 2026-05-16 (item 8A),
+    new state goes to ``<project>/.bizniz/runs/``; existing projects
+    with state still at ``<project>/docs/runs/`` keep working via the
+    ``runs_paths.resolve_runs_root`` fallback."""
+    from bizniz.driver.runs_paths import resolve_runs_root
+    return resolve_runs_root(_project_root(project_slug))
 
 
 def _runner_for_service(service) -> str:
