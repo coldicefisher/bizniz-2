@@ -94,7 +94,14 @@ class TestCaptureMismatchShortCircuit:
         assert out["captured_correctly"] is True
         assert out["final_score"] == 8
 
-    def test_empty_screenshots_returns_no_screenshots(self):
+    def test_empty_screenshots_marks_not_reviewable(self):
+        """D12 (2026-05-17): when ``_take_view_screenshots`` returns
+        empty (route was not captured by the Playwright script),
+        the iteration must mark the view ``not_reviewable=True`` so
+        APP SCORE excludes it — symmetric with the capture-mismatch
+        path. Previous behavior treated "no PNG" as a hard fail
+        WITHOUT not_reviewable, which let the view silently inflate
+        the failure rate."""
         d = _designer()
         d._take_view_screenshots = MagicMock(return_value=[])
         d._evaluate_view = MagicMock()
@@ -107,7 +114,7 @@ class TestCaptureMismatchShortCircuit:
         )
         d._evaluate_view.assert_not_called()
         assert out["stop"] is True
-        assert "no screenshots" in out["stop_reason"]
-        # Not_reviewable isn't set here — different signal. Caller
-        # treats "no screenshots" as a hard failure, not "wrong page".
-        assert out.get("not_reviewable") is not True
+        assert out["not_reviewable"] is True
+        assert out["captured_correctly"] is False
+        assert "no screenshot captured" in out["capture_mismatch_reason"]
+        assert "no screenshot captured" in out["stop_reason"]

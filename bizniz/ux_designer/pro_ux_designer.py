@@ -1110,6 +1110,14 @@ class ProUXDesigner(ClaudeUXDesigner):
         )
 
         if not screenshots:
+            # D12 (2026-05-17): Mark the iteration not_reviewable so
+            # the outer view_result aggregation excludes this route
+            # from APP SCORE. Without this flag the view would simply
+            # have empty iterations + no eval, but still count toward
+            # the app-level scoring as a phantom failure. The
+            # not_reviewable path is the same one capture-mismatch
+            # (Ticket 2) uses; treat "no PNG captured for this route"
+            # symmetrically with "PNG captured but for the wrong URL".
             return {
                 "iteration": iteration,
                 "screenshots": [],
@@ -1117,8 +1125,11 @@ class ProUXDesigner(ClaudeUXDesigner):
                 "fix_result": None,
                 "initial_score": None,
                 "final_score": None,
+                "captured_correctly": False,
+                "capture_mismatch_reason": "no screenshot captured",
+                "not_reviewable": True,
                 "stop": True,
-                "stop_reason": "no screenshots captured",
+                "stop_reason": "no screenshot captured",
             }
 
         # Sentinel check: did Playwright actually land on the route
@@ -1432,18 +1443,26 @@ class ProUXDesigner(ClaudeUXDesigner):
                 f"returned {len(all_shots)} shots; "
                 f"{len(shots)} match route={route}"
             )
-            if not shots and all_shots:
-                # Fallback: model didn't emit a test with the right
-                # requested_route metadata. Take the shots with no
-                # meta (older capture path) or accept all — better
-                # than nothing.
-                shots = [
-                    s for s in all_shots
-                    if not Path(s["path"]).with_suffix(".meta.json").exists()
-                ] or all_shots
+            # Orphan-shot fallback REMOVED (D12, 2026-05-17). The
+            # original behavior was: when no shot matched ``route``,
+            # substitute any orphan (no-meta) PNGs from ``all_shots``.
+            # In practice those orphans came from DIFFERENT routes the
+            # Playwright script captured opportunistically. The vision
+            # model then evaluated unrelated screenshots against this
+            # route's design spec, scored low, and dispatched code
+            # fixes that mangled the wrong page.
+            #
+            # New behavior: return empty list. The caller
+            # (_view_iteration) detects no screenshots and marks the
+            # view ``not_reviewable``, same as the Ticket 2 capture-
+            # mismatch path. The view is excluded from APP SCORE; no
+            # fix is dispatched. The operator sees a clean
+            # ``not_reviewable: <route> — no screenshot captured``.
+            if not shots:
                 self._log_debug(
-                    f"{view_label} iter{iteration}: no route-matched "
-                    f"shots; using {len(shots)} unmatched as fallback"
+                    f"{view_label} iter{iteration}: zero shots match "
+                    f"route={route}; returning empty so caller marks "
+                    f"view not_reviewable (no orphan substitution)"
                 )
         if not shots:
             return shots
