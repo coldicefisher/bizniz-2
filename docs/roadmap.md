@@ -7,7 +7,11 @@ each one's value compounds on the prior items.
 Item 5 (agent error-path audit) inserted 2026-05-16 after CRM v1 M5
 crashed twice from defensive-handling gaps; items 6-11 renumbered.
 
-## The 11-item plan
+Items 12-13 (Immune system + Brain) appended 2026-05-16 to close the
+roadmap: after the build-completion cycle is wired (12), bizniz can
+evolve itself via bounded A/B testing (13).
+
+## The 13-item plan
 
 ### 1. Confidence signals — load-bearing or drop the pretense ✅ SHIPPED
 
@@ -331,6 +335,116 @@ Claude baselines:
 **Goal:** durable architecture comparison, not a one-off run. Drives
 where to invest next.
 
+### 12. Immune system — the build-completion cycle
+
+After items 6 (Refactorer), 7 (post-refactor tests/debug), and 8
+(docs) ship individually, wire them into a single canonical
+"build-completion" sequence at the end of every milestone and at
+the end of the project:
+
+```
+Refactor → Full suite (unit + integration + e2e) → Document
+```
+
+Each step is a gate. Refactor produces clean code; the full test
+suite catches refactor-induced regressions; docs reflect the final
+post-refactor shape. **A milestone isn't DONE until all three pass.**
+
+**Why an explicit item separate from 6/7/8:** Items 6-8 individually
+ship the *components*. Item 12 ships the *cycle* — the wiring that
+guarantees they always run together in order, with hard gates
+between them, so we can't ship "refactored but undocumented" or
+"refactored but tests didn't run."
+
+**Evolve mode** — same components, different order:
+
+```
+Write tests → Refactor → Document → Work tickets/bugs (regular cycle)
+```
+
+For maintenance on an existing project: tests come first (write the
+test that pins the desired behavior, THEN refactor to satisfy it,
+THEN document). Tickets/bugs run through the standard pipeline as
+today.
+
+**Done when:** Both orderings selectable via a flag (e.g.,
+``v2_build --mode build`` vs ``--mode evolve``). Each gates the
+milestone; failure halts cleanly with structured ``RefactorReport``
+/ ``TestReport`` / ``DocReport`` artifacts so the operator (or the
+brain in item 13) can act on them.
+
+### 13. Brain — self-evolving A/B testing
+
+Once item 12 ships, bizniz has the *immune system* (refactor +
+test + document) keeping it healthy. Item 13 adds the *brain* —
+bizniz evolving itself against a reference problem until it stops
+improving.
+
+**The loop:**
+
+1. Pick a **reference problem** (small, fast — Recipe Box or a
+   subset of CRM). One that runs in well under an hour.
+2. Establish a **baseline** via `perf_log` against the reference.
+3. Pick a **knob to tweak**: which agent's prompt, which confidence
+   threshold, which iteration cap, which model tier. The tweaks
+   start small + bounded.
+4. Build a **variant** with the tweak applied (in a sandbox branch).
+5. Run the reference problem on the variant. Compare via
+   ``perf_log --compare baseline.log variant.log``.
+6. **Promote** the variant if it's better on a defined metric set
+   (faster wall-clock + same-or-better confidence + same-or-better
+   pass rate); revert if not.
+7. **Loop** until ``N`` consecutive iterations produced no
+   improvement (default ``N=3``). Then stop, surface the change
+   set, and let the operator decide whether to merge into main.
+
+**Critical safety properties:**
+
+- Operator NEVER auto-merges to main. Brain produces PR-ready
+  branches with measurements; humans review and approve.
+- Brain operates in a sandboxed clone of the project root so
+  experiments can't corrupt production state.
+- Stop condition (``N`` iterations no improvement) is mandatory —
+  open-ended loops are forbidden. If improvement plateaus, the
+  brain STOPS and writes a summary, doesn't keep trying.
+- Brain's tweaks come from a **bounded knob set** declared in
+  config — not arbitrary code edits. Knobs are things like:
+  - prompt-template versions (each agent ships ``v1``, ``v2``, ...
+    prompts; brain picks one)
+  - confidence band thresholds (item 1's 0.4/0.6 boundaries)
+  - iteration caps (max_repair_iters, max_ux_iters)
+  - model tier for a given agent
+  - decomposer on/off, unit-of-work sizing
+
+**The metric set** (defines "better"):
+
+- Wall-clock per milestone (lower is better)
+- Total tokens / API cost per milestone
+- First-try pass rate (issues passing without repair iter)
+- UX score (mean across views)
+- Final test pass rate
+- Confidence score across enrich + review
+
+A variant wins only if it improves at least one metric without
+regressing any other by more than 5%.
+
+**Done when:** Running ``bizniz evolve --target recipe_box
+--knob ux.fix_iteration_cap --max-iters 10`` produces a structured
+``EvolveReport`` showing the tested values, the metrics per
+iteration, and the recommended winner. Operator reviews + merges
+the prompt/config change.
+
+**Why this is the right shape (vs continuous self-modification):**
+
+- Bounded knob set = can't break the agent that's modifying
+- Reference problem = fast feedback (vs full-build evolution)
+- Stop-after-N-without-improvement = avoid infinite loops
+- Human-merge gate = catches regressions an automated metric set
+  doesn't measure (e.g., code quality the metric set can't see)
+
+This is the SAFE form of "self-building bizniz." Open-ended self-
+prompt-modification is explicitly out of scope — too risky.
+
 ## Order rationale
 
 - **1 first** because it's the cheapest quality lever — preventing
@@ -347,6 +461,12 @@ where to invest next.
   pre-refactor sprawl.
 - **9 before 10** so the baseline data exists in structured form.
 - **10 before 11** so we have Claude numbers to compare Gemini against.
+- **12 after 6-7-8** — items 6/7/8 ship the *components*; item 12
+  wires them into a single canonical cycle with hard gates between.
+  The cycle can't exist before the components do.
+- **13 last** — the brain needs the immune system (item 12) to
+  catch regressions AND structured metrics from item 9 to know
+  what "better" means. Both must ship first.
 
 ## What's NOT in this plan (deferred)
 
