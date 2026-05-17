@@ -772,6 +772,18 @@ class V2Pipeline:
             )
             return
 
+        # Defensive guard against MagicMock-rooted Path coercion
+        # (2026-05-17). See AuthAgent._emit_contract_tests for the
+        # incident note. Refuse to mkdir if project_root looks fake.
+        from bizniz.lib.path_guard import is_real_filesystem_path
+        if not is_real_filesystem_path(self._project_root):
+            self._log(
+                f"V2Pipeline: project_root {self._project_root!r} looks "
+                f"fake (non-existent or non-absolute) — skipping contract "
+                f"test emit"
+            )
+            return
+
         for service in architecture.services:
             if (service.language or "").lower() != "python":
                 continue

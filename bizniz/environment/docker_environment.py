@@ -27,7 +27,18 @@ class DockerExecutionEnvironment(BaseExecutionEnvironment):
 
     name: str = "docker-python-environment"
 
-    EXEC_ROOT = Path.cwd() / ".bizniz" / "exec"
+    # Resolved lazily from ``bizniz.lib.ephemeral.get_exec_root()`` —
+    # see that module for the rationale. Was ``Path.cwd() / ".bizniz"
+    # / "exec"`` before 2026-05-17; the cwd-rooted default accumulated
+    # 774 root-owned ``run_*`` dirs in the bizniz repo because docker
+    # created __pycache__ subdirs as root and the host user couldn't
+    # delete them. The new location is under
+    # ``$XDG_RUNTIME_DIR/bizniz/exec/`` so the OS auto-cleans at
+    # logout and ``python -m bizniz.cleanup`` can prune mid-session.
+    @classmethod
+    def _resolve_exec_root(cls) -> Path:
+        from bizniz.lib.ephemeral import get_exec_root
+        return get_exec_root()
 
     def __init__(
         self,
@@ -44,8 +55,9 @@ class DockerExecutionEnvironment(BaseExecutionEnvironment):
         self.cpus = cpus
         self._additional_packages: List[str] = list(additional_packages or [])
 
-        # Ensure execution directory exists
-        self.EXEC_ROOT.mkdir(parents=True, exist_ok=True)
+        # Per-instance EXEC_ROOT — supports test overrides via env var
+        # without mutating the class attribute.
+        self.EXEC_ROOT = self._resolve_exec_root()
 
         # Ensure base image exists (build if needed)
         self._ensure_base_image()

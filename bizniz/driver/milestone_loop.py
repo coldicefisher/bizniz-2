@@ -764,6 +764,27 @@ class MilestoneLoop:
             f"({repair_iterations} repair iterations)"
         )
 
+        # Ephemeral hygiene (item D11, 2026-05-17). Best-effort prune
+        # of stale docker-pytest exec dirs + old build logs after a
+        # successful milestone. Project ``runs/`` state is NOT touched
+        # — that's needed for resume across milestones. Failures are
+        # logged but never halt the milestone.
+        try:
+            from bizniz.lib.ephemeral import cleanup_stale
+            summary = cleanup_stale(max_age_hours=24.0)
+            removed = summary["exec_removed"] + summary["logs_removed"]
+            if removed:
+                self._log(
+                    f"MilestoneLoop: ephemeral cleanup pruned "
+                    f"{summary['exec_removed']} exec + "
+                    f"{summary['logs_removed']} log entries"
+                )
+        except Exception as e:
+            self._log(
+                f"MilestoneLoop: ephemeral cleanup raised "
+                f"{type(e).__name__}: {e} (ignored)"
+            )
+
         return MilestoneOutcome(
             milestone_name=milestone.name,
             final_subphase=SubPhase.DONE,

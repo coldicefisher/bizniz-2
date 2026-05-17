@@ -54,3 +54,10 @@ Thumbs.db
 # Bizniz workspaces (auto-generated at runtime)
 .bizniz/
 **/cached/
+
+# Defensive — MagicMock/ leaks from broken test fixtures coercing a
+# mocked workspace root into a real Path. The 2026-05-17 incident
+# wrote real files into "MagicMock/mock.root/<id>/...". The
+# bizniz/lib/path_guard.py now blocks this in production; this
+# .gitignore entry keeps any future regression silent in git.
+MagicMock/

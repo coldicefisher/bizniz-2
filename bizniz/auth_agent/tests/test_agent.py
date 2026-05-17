@@ -76,8 +76,21 @@ def mock_orch():
 
 
 @pytest.fixture
-def mock_workspace():
-    return MagicMock(spec=BaseWorkspace)
+def mock_workspace(tmp_path):
+    """Mocked workspace whose `.root` is a real tmp_path.
+
+    Critical: never let `.root` default to MagicMock auto-spec. The
+    AuthAgent's contract-test emit calls ``Path(workspace.root)`` +
+    ``mkdir(parents=True)``. With auto-spec'd `.root`, that creates
+    a real "MagicMock/mock.root/<id>" tree in CWD (incident
+    2026-05-17 — bizniz/lib/path_guard.py now also blocks this in
+    production). Setting `.root = tmp_path` keeps the mock surface
+    everywhere else while pointing real filesystem writes at the
+    per-test tmp dir.
+    """
+    ws = MagicMock(spec=BaseWorkspace)
+    ws.root = tmp_path
+    return ws
 
 
 # ── Mode-specific tool surface ───────────────────────────────────────────

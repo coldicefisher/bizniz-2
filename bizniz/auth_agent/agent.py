@@ -340,6 +340,17 @@ class AuthAgent(ToolLoopAgent):
             )
             return
 
+        # Defensive guard against MagicMock-rooted Path coercion
+        # (2026-05-17). See bizniz/lib/path_guard.py for the incident
+        # note; the helper rejects fake roots before any mkdir/write.
+        from bizniz.lib.path_guard import is_real_filesystem_path
+        if not is_real_filesystem_path(ws_root):
+            self._log(
+                f"AuthAgent: workspace root {ws_root!r} looks fake — "
+                f"skipping contract test emit"
+            )
+            return
+
         from pathlib import Path
         emitted: list[str] = []
         for service in architecture.services:
