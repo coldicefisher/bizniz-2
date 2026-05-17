@@ -9,12 +9,12 @@ first; it tells you what to load next.
 
 ## Current roadmap (2026-05-16)
 
-Locked-in order — work items 1 → 13 in sequence. Full text at
+Locked-in order — work items 1 → 12 in sequence. Full text at
 `docs/roadmap.md`. Honor this when prioritizing new work. Item 5
 inserted 2026-05-16 after CRM v1 M5 crashed twice on defensive-
-handling gaps; items 6-11 renumbered. Items 12-13 appended
-2026-05-16: immune system (build-completion cycle) + brain
-(bounded self-evolving A/B).
+handling gaps; items 6-11 renumbered. Items 12-13 appended same
+day (immune system + brain). Gemini baseline (was item 11)
+deferred 2026-05-16; remaining items renumbered to 11+12.
 
 1. ✅ **Confidence signals load-bearing** — SHIPPED 2026-05-15
    (commit `5de1059`). `QualityEngineer.enrich.confidence` now drives
@@ -60,19 +60,21 @@ handling gaps; items 6-11 renumbered. Items 12-13 appended
    item 9.
 10. **Performance test on Claude** — 3-5 reference projects, baseline
     established with $0 marginal cost.
-11. **Baseline on Gemini** — same projects, compare architecture
-    quality + cost vs Claude.
-12. **Immune system** — wire 6+7+8 into a canonical
+11. **Immune system** — wire 6+7+8 into a canonical
     `Refactor → Full test suite → Document` cycle that gates every
     milestone DONE. Evolve mode reorders: `Write tests → Refactor →
     Document → Work tickets`. Each step is a hard gate.
-13. **Brain** — bounded self-evolving A/B testing against a
+12. **Brain** — bounded self-evolving A/B testing against a
     reference problem. Picks a knob (prompt version, confidence
     threshold, iteration cap, model tier), runs the reference,
     compares via `perf_log`, promotes if better, stops after N
     iterations without improvement. Operator reviews + merges
     final change. Open-ended self-modification is explicitly out
     of scope.
+
+**Deferred 2026-05-16**: Gemini baseline (was item 11). Claude
+pipeline is the primary investment ($0 marginal on Max plan);
+Gemini benchmarking can wait until items 10-12 ship.
 
 Deferred (do NOT pull forward unless explicitly asked):
 - Angular skeleton Storybook variants (until item 2 proves React

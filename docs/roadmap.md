@@ -8,10 +8,12 @@ Item 5 (agent error-path audit) inserted 2026-05-16 after CRM v1 M5
 crashed twice from defensive-handling gaps; items 6-11 renumbered.
 
 Items 12-13 (Immune system + Brain) appended 2026-05-16 to close the
-roadmap: after the build-completion cycle is wired (12), bizniz can
-evolve itself via bounded A/B testing (13).
+roadmap. Gemini baseline (was item 11) deferred 2026-05-16 — see
+"What's NOT in this plan" below; renumbered remaining items 12+13
+to 11+12. After the build-completion cycle is wired (11), bizniz
+can evolve itself via bounded A/B testing (12).
 
-## The 13-item plan
+## The 12-item plan
 
 ### 1. Confidence signals — load-bearing or drop the pretense ✅ SHIPPED
 
@@ -324,18 +326,7 @@ Claude with the full instrumentation from (8). Establish baselines:
 **Why on Claude first:** $0 marginal on Max plan lets us iterate
 without budget pressure during baseline-finding.
 
-### 11. Baseline on Gemini
-
-Run the same reference projects on Gemini, compare against (9)'s
-Claude baselines:
-- Where does Gemini close the gap?
-- Where does it widen?
-- What prompt / agent tweaks move the needle?
-
-**Goal:** durable architecture comparison, not a one-off run. Drives
-where to invest next.
-
-### 12. Immune system — the build-completion cycle
+### 11. Immune system — the build-completion cycle
 
 After items 6 (Refactorer), 7 (post-refactor tests/debug), and 8
 (docs) ship individually, wire them into a single canonical
@@ -373,7 +364,7 @@ milestone; failure halts cleanly with structured ``RefactorReport``
 / ``TestReport`` / ``DocReport`` artifacts so the operator (or the
 brain in item 13) can act on them.
 
-### 13. Brain — self-evolving A/B testing
+### 12. Brain — self-evolving A/B testing
 
 Once item 12 ships, bizniz has the *immune system* (refactor +
 test + document) keeping it healthy. Item 13 adds the *brain* —
@@ -460,16 +451,24 @@ prompt-modification is explicitly out of scope — too risky.
 - **8 after 6** so docs reflect the refactored shape, not the
   pre-refactor sprawl.
 - **9 before 10** so the baseline data exists in structured form.
-- **10 before 11** so we have Claude numbers to compare Gemini against.
-- **12 after 6-7-8** — items 6/7/8 ship the *components*; item 12
+- **11 after 6-7-8** — items 6/7/8 ship the *components*; item 11
   wires them into a single canonical cycle with hard gates between.
   The cycle can't exist before the components do.
-- **13 last** — the brain needs the immune system (item 12) to
+- **12 last** — the brain needs the immune system (item 11) to
   catch regressions AND structured metrics from item 9 to know
   what "better" means. Both must ship first.
 
 ## What's NOT in this plan (deferred)
 
+- **Gemini baseline (was item 11)** — comparison of Claude vs
+  Gemini on the same reference projects. Deferred 2026-05-16:
+  Claude pipeline is the primary investment (Max plan = $0
+  marginal); Gemini benchmarking is research-mode work that can
+  wait until items 10-12 ship and we have a stable Claude
+  baseline to compare against. The infrastructure is already
+  multi-backend (per item 0's pluggable LLM work), so when this
+  comes back, it's just "run the same script with a different
+  config."
 - Angular skeletons (skeleton-angular, teams, saas) get Storybook
   scaffolding only AFTER item 2 proves the React loop end-to-end.
 - Full escalation on smoke gate (replace hard-fail with cheap-tier
