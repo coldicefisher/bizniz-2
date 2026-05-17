@@ -98,6 +98,11 @@ class MilestoneLoop:
         ux_phase: Optional[UXPhase] = None,
         refactor_phase: Optional[RefactorPhase] = None,
         final_tester: Optional["FinalTester"] = None,
+        # ``human_docs_generator_factory`` builds a HumanDocsGenerator
+        # per milestone (so each gets the right inputs — milestone-
+        # scoped capabilities summary, latest compose YAML, latest
+        # OpenAPI per service). Wiring lives in v2_build.py.
+        human_docs_generator_factory: Optional[Callable] = None,
         total_milestones: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         # Confidence-signal thresholds (roadmap item 1). When
@@ -119,6 +124,7 @@ class MilestoneLoop:
         self._ux_phase = ux_phase
         self._refactor_phase = refactor_phase
         self._final_tester = final_tester
+        self._human_docs_generator_factory = human_docs_generator_factory
         self._total_milestones = total_milestones
         self._gates = gates
         self._workspace_for_service = workspace_for_service
@@ -665,6 +671,46 @@ class MilestoneLoop:
                     ),
                 },
             )
+
+        # ── DOCUMENT ────────────────────────────────────────────────────
+        # Generate human-readable docs (README, architecture, api/,
+        # services/, milestones/) into <project>/docs/. Hybrid:
+        # deterministic for structured data, LLM for narrative.
+        # Failure is RECORDED but doesn't gate the milestone — docs
+        # are best-effort, and the operator can re-run later.
+        if not _has(state, SubPhase.DOCUMENT):
+            self._tag(state.milestone_index, SubPhase.DOCUMENT)
+            if self._human_docs_generator_factory is not None:
+                try:
+                    generator = self._human_docs_generator_factory(
+                        milestone=milestone,
+                        architecture=architecture,
+                        auth_contract=auth_contract,
+                    )
+                    docs_result = generator.run()
+                    state.mark_phase(
+                        SubPhase.DOCUMENT, docs_result.model_dump(),
+                    )
+                    self._log(
+                        f"MilestoneLoop: docs generated — "
+                        f"{docs_result.succeeded_count()}/"
+                        f"{len(docs_result.docs)} file(s) succeeded"
+                    )
+                except Exception as e:
+                    state.mark_phase(SubPhase.DOCUMENT, {
+                        "skipped_reason": (
+                            f"docs generator raised "
+                            f"{type(e).__name__}: {e}"
+                        ),
+                    })
+                    self._log(
+                        f"MilestoneLoop: docs phase raised "
+                        f"{type(e).__name__}: {e} — continuing"
+                    )
+            else:
+                state.mark_phase(SubPhase.DOCUMENT, {
+                    "skipped_reason": "no human_docs_generator_factory wired",
+                })
 
         # ── FINAL_TEST ──────────────────────────────────────────────────
         # End-of-milestone e2e canary — the LAST gate before DONE.

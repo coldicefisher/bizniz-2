@@ -24,7 +24,8 @@ class TestNextSubphase:
         assert next_subphase(SubPhase.INTEGRATION_WORKER) == SubPhase.INTEGRATION_WEB
         assert next_subphase(SubPhase.INTEGRATION_WEB) == SubPhase.UX_REVIEW
         assert next_subphase(SubPhase.UX_REVIEW) == SubPhase.REFACTOR
-        assert next_subphase(SubPhase.REFACTOR) == SubPhase.FINAL_TEST
+        assert next_subphase(SubPhase.REFACTOR) == SubPhase.DOCUMENT
+        assert next_subphase(SubPhase.DOCUMENT) == SubPhase.FINAL_TEST
         assert next_subphase(SubPhase.FINAL_TEST) == SubPhase.DONE
 
     def test_done_is_terminal(self):

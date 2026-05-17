@@ -64,6 +64,14 @@ class SubPhase(str, Enum):
     # has ``refactor_after=True`` or is the final milestone.
     UX_REVIEW = "ux_review"
     REFACTOR = "refactor"
+    # DOCUMENT writes human-readable docs (README, architecture,
+    # infrastructure, api/<svc>, services/<svc>, milestones/m<N>)
+    # to <project>/docs/. Hybrid: deterministic where the data is
+    # structured (architecture, API ref); LLM-driven for narrative.
+    # Runs after REFACTOR + before FINAL_TEST. Doc-generation
+    # failures are recorded but don't gate the milestone — they're
+    # best-effort.
+    DOCUMENT = "document"
     # FINAL_TEST is the last gate before DONE — verifies the stack
     # is end-to-end shippable (no fixtures, no test data, just real
     # HTTP probes against the running services). Catches stack
