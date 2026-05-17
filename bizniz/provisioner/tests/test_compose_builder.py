@@ -87,6 +87,71 @@ def test_typescript_app_service_preserves_node_modules_with_anon_volume():
     assert "/app/node_modules" in frontend["volumes"]
 
 
+# ── core/ shared-library mounts (Refactorer item 6 contract) ─────
+
+
+def test_python_service_mounts_core_python_and_sets_pythonpath():
+    """Every Python service mounts ``core/python`` at ``/python_core``
+    and gets ``PYTHONPATH`` pointing to it. Refactorer extractions
+    drop code into ``core/python``; consumer services pick it up via
+    ``from python_core.<feature> import ...``."""
+    arch = _arch(_svc("backend", "backend", "fastapi", "python",
+                      port=8001, skeleton="fastapi"))
+    yml = build_compose(arch, template_outputs={}, project_slug="x")
+    parsed = yaml.safe_load(yml)
+    backend = parsed["services"]["backend"]
+    assert "../../core/python:/python_core" in backend["volumes"]
+    # PYTHONPATH prefers /python_core so shared imports win over any
+    # same-named app-local module.
+    env = backend.get("environment", {})
+    assert env.get("PYTHONPATH") == "/python_core:/app"
+
+
+def test_typescript_service_mounts_core_typescript_and_sets_node_path():
+    arch = _arch(_svc("frontend", "frontend", "react", "typescript",
+                      port=5173, skeleton="react"))
+    yml = build_compose(arch, template_outputs={}, project_slug="x")
+    parsed = yaml.safe_load(yml)
+    frontend = parsed["services"]["frontend"]
+    assert "../../core/typescript:/ts_core" in frontend["volumes"]
+    env = frontend.get("environment", {})
+    assert env.get("NODE_PATH") == "/ts_core"
+
+
+def test_javascript_service_treated_like_typescript():
+    # Workers + small services sometimes use plain JS — same mount.
+    arch = _arch(_svc("worker", "worker", "node", "javascript",
+                      port=None, skeleton="none"))
+    yml = build_compose(arch, template_outputs={}, project_slug="x")
+    parsed = yaml.safe_load(yml)
+    worker = parsed["services"]["worker"]
+    assert "../../core/typescript:/ts_core" in worker["volumes"]
+
+
+def test_non_python_non_ts_service_does_not_get_core_mount():
+    # Database / cache services don't need the shared core mounted —
+    # they're not running app code that would import from it.
+    # build_compose only emits app-service entries for _APP_SERVICE_TYPES,
+    # so we test that infrastructure services (template-provided) skip
+    # the core mount.
+    arch = _arch(_svc("db", "database", "postgres", "sql", port=5432))
+    out = TemplateOutput(
+        compose_service={
+            "image": "postgres:16-alpine",
+            "ports": ["5432:5432"],
+            "volumes": [],
+        },
+    )
+    yml = build_compose(
+        arch, template_outputs={"db": out}, project_slug="x",
+    )
+    parsed = yaml.safe_load(yml)
+    db = parsed["services"]["db"]
+    # Template-provided service has only the volumes the template
+    # declared — no core mount injected.
+    assert all("core/" not in v for v in db.get("volumes", []))
+
+
 def test_template_provided_compose_used_when_present():
     arch = _arch(_svc("redis", "cache", "redis", "yaml", port=6380))
     out = TemplateOutput(

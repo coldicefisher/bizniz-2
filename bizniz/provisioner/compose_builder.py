@@ -107,6 +107,16 @@ def _build_app_service_entry(
     volumes = [f"../../{ws}:/app"]
     if service.language in ("typescript", "javascript"):
         volumes.append("/app/node_modules")
+    # Mount the shared ``core/`` library (Refactorer's output) into
+    # every app service. Per-language to keep Python and TS isolated
+    # — mounting the wrong-language tree just adds clutter to PATH.
+    # The mount path matches the import convention documented in
+    # ``core/README.md``: ``python_core.*`` and ``ts_core/*``.
+    lang_lower = (service.language or "").lower()
+    if lang_lower == "python":
+        volumes.append("../../core/python:/python_core")
+    elif lang_lower in ("typescript", "javascript"):
+        volumes.append("../../core/typescript:/ts_core")
 
     entry: dict = {
         "image": f"{project_slug}-{service.name}:dev",
@@ -118,6 +128,24 @@ def _build_app_service_entry(
         "volumes": volumes,
         "networks": ["app-network"],
     }
+
+    # Per-language environment so the shared ``core/`` mount resolves
+    # at import time without skeleton-level Dockerfile changes.
+    if lang_lower == "python":
+        # PYTHONPATH is prepended so ``python_core`` import resolves
+        # before any same-named app-local package. The trailing /app
+        # keeps the app's own imports working.
+        entry["environment"] = {
+            "PYTHONPATH": "/python_core:/app",
+        }
+    elif lang_lower in ("typescript", "javascript"):
+        # Node resolves modules from NODE_PATH if the import isn't a
+        # relative path. Mounting at /ts_core + setting NODE_PATH lets
+        # ``import { TimeInstant } from "ts_core/data_types/time_instant"``
+        # work without a separate tsconfig path alias.
+        entry["environment"] = {
+            "NODE_PATH": "/ts_core",
+        }
 
     if service.port:
         # Container port comes from the service's framework defaults if not

@@ -40,6 +40,50 @@ def test_create_structure(project):
     assert project.dev_root.is_dir()
 
 
+# ── core/ scaffold (Refactorer item 6 contract) ──────────────────
+
+
+def test_create_structure_seeds_core_python(project):
+    project.create_structure()
+    py_dir = project.core_root / "python"
+    assert py_dir.is_dir()
+    assert (py_dir / "__init__.py").is_file()
+    assert (py_dir / "data_types" / "__init__.py").is_file()
+
+
+def test_create_structure_seeds_core_typescript(project):
+    project.create_structure()
+    ts_dir = project.core_root / "typescript"
+    assert ts_dir.is_dir()
+    assert (ts_dir / "index.ts").is_file()
+
+
+def test_create_structure_writes_core_readme(project):
+    project.create_structure()
+    readme = project.core_root / "README.md"
+    assert readme.is_file()
+    text = readme.read_text(encoding="utf-8")
+    assert "Refactorer" in text
+    assert "python_core" in text
+    assert "ts_core" in text
+
+
+def test_create_structure_idempotent(project):
+    project.create_structure()
+    # Add a user-edited file to verify second run doesn't clobber it.
+    custom = project.core_root / "python" / "data_types" / "user_added.py"
+    custom.write_text("# user content\n", encoding="utf-8")
+    project.create_structure()  # second invocation
+    assert custom.is_file()
+    assert "user content" in custom.read_text(encoding="utf-8")
+
+
+def test_core_root_path_is_sibling_to_services(project):
+    # ``core/`` sits next to service workspace dirs, not under any of them.
+    assert project.core_root.parent == project.root
+    assert project.core_root.name == "core"
+
+
 # ── get_service_workspace ────────────────────────────────────────────────────────
 
 def test_get_service_workspace(project):
