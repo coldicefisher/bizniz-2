@@ -1,0 +1,28 @@
+Build a Recipe Box — a personal recipe-management web app where home cooks
+save, organize, and search recipes they want to make.
+
+Users sign up, log in, and manage their own recipe collection. Each recipe
+has a title, description, ingredients list, step-by-step instructions,
+prep time, cook time, servings, and optional tags. Users can search their
+collection by title, ingredient, or tag, and mark recipes as favorites
+for quick access from a dashboard.
+
+Two roles: ``user`` (the home cook — owns their recipes) and ``admin``
+(can see all recipes for moderation, but cannot edit them).
+
+Tech stack: a FastAPI backend with FusionAuth for identity, Postgres for
+storage, and a React frontend.
+
+Scope by milestone:
+
+M1 — Auth and authenticated shell. Sign-up / login flows, JWT validation,
+the empty "My Recipes" shell behind auth.
+
+M2 — Recipe CRUD. Create, list, view, edit, delete recipes. List view
+with sort by recently-added.
+
+M3 — Search and tags. Add tags to recipes; search across title /
+ingredient / tag; filter list by tag.
+
+M4 — Favorites and dashboard. Mark/unmark recipes as favorites;
+dashboard shows favorite recipes + recent activity (created/edited).
