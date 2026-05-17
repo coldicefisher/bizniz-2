@@ -133,8 +133,15 @@ class MilestoneCodeDispatcher:
 
         layers = topological_layers(list(architecture.services))
         all_issues: List[EngineerIssue] = []
-        completed_ids: List[str] = []
-        deferred_ids: List[str] = []
+        # Per-unit pass/fail (every dispatched CoderIssue, including
+        # decomposer units). Rolled up to parent issues at end of run
+        # — see ``_rollup_parent_ids`` below.
+        completed_units: List[str] = []
+        deferred_units: List[str] = []
+        # Map every dispatched unit_id → its parent_issue_id (or its
+        # own id when the issue wasn't decomposed). The rollup at the
+        # end uses this to attribute unit outcomes back to features.
+        unit_to_parent: Dict[str, str] = {}
         per_service: List[OrchestratorResult] = []
 
         for layer in layers:
@@ -301,25 +308,45 @@ class MilestoneCodeDispatcher:
                     )
                     eng_issue = _to_engineer_issue(coder_issue, matching)
                     all_issues.append(eng_issue)
+                    parent_id = (
+                        coder_issue.parent_issue_id
+                        or coder_issue.id
+                    )
+                    unit_to_parent[coder_issue.id] = parent_id
                     if matching and matching.passed:
-                        completed_ids.append(eng_issue.id)
+                        completed_units.append(coder_issue.id)
                     else:
-                        deferred_ids.append(eng_issue.id)
+                        deferred_units.append(coder_issue.id)
 
         approach = self._build_approach(per_service)
         final_status = _final_test_status(per_service)
 
+        # D13 rollup: a parent issue is completed iff ALL its units
+        # passed; deferred otherwise. Lists are deduped and preserve
+        # parent first-seen ordering for stable logs/reports.
+        completed_parents, deferred_parents = _rollup_parent_ids(
+            unit_to_parent=unit_to_parent,
+            completed_units=completed_units,
+            deferred_units=deferred_units,
+        )
+
         self._log(
-            f"MilestoneCodeDispatcher: done — {len(completed_ids)} completed, "
-            f"{len(deferred_ids)} deferred, final={final_status}"
+            f"MilestoneCodeDispatcher: done — "
+            f"{len(completed_parents)} issue(s) completed "
+            f"({len(completed_units)} unit(s)), "
+            f"{len(deferred_parents)} issue(s) deferred "
+            f"({len(deferred_units)} unit(s)), "
+            f"final={final_status}"
         )
 
         return EngineerResult(
             plan=EngineerPlan(approach=approach, issues=all_issues),
             summary=_build_summary(per_service),
             final_test_status=final_status,
-            completed_issue_ids=completed_ids,
-            deferred_issue_ids=deferred_ids,
+            completed_issue_ids=completed_parents,
+            deferred_issue_ids=deferred_parents,
+            completed_units=completed_units,
+            deferred_units=deferred_units,
             notes=_collect_notes(per_service),
         )
 
@@ -637,6 +664,48 @@ def _collect_notes(per_service: List[OrchestratorResult]) -> List[str]:
     return notes
 
 
+def _rollup_parent_ids(
+    *,
+    unit_to_parent: Dict[str, str],
+    completed_units: List[str],
+    deferred_units: List[str],
+) -> tuple[List[str], List[str]]:
+    """Group unit pass/fail by parent issue.
+
+    Returns ``(completed_parents, deferred_parents)``:
+
+    - A parent is **completed** iff ALL its known units appear in
+      ``completed_units``.
+    - A parent is **deferred** otherwise (any unit failed or missing).
+
+    Both lists preserve parent first-seen ordering for stable logs,
+    and never contain duplicates.
+
+    Non-decomposed issues are their own parent (the dispatcher's
+    fallback when ``parent_issue_id`` is None — see the caller).
+    """
+    completed_set = set(completed_units)
+    # Parent → set of its unit ids (preserves first-seen ordering
+    # via a parallel list of parents-in-encounter-order).
+    parents_in_order: List[str] = []
+    units_by_parent: Dict[str, List[str]] = {}
+    for unit_id, parent_id in unit_to_parent.items():
+        if parent_id not in units_by_parent:
+            parents_in_order.append(parent_id)
+            units_by_parent[parent_id] = []
+        units_by_parent[parent_id].append(unit_id)
+
+    completed: List[str] = []
+    deferred: List[str] = []
+    for parent_id in parents_in_order:
+        units = units_by_parent[parent_id]
+        if all(u in completed_set for u in units):
+            completed.append(parent_id)
+        else:
+            deferred.append(parent_id)
+    return completed, deferred
+
+
 def _unit_to_coder_issue(
     unit: UnitOfWork, parent: CoderIssue,
 ) -> CoderIssue:
@@ -672,4 +741,7 @@ def _unit_to_coder_issue(
         success_criteria=success,
         spec_refs=list(parent.spec_refs),
         depends_on=list(unit.depends_on),
+        # Reporting-layer linkage (D13). Lets MilestoneCodeDispatcher
+        # roll unit outcomes up to the parent issue at end-of-run.
+        parent_issue_id=parent.id,
     )

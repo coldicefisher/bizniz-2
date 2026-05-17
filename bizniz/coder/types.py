@@ -45,6 +45,20 @@ class Issue(BaseModel):
     success_criteria: List[str] = Field(default_factory=list)
     spec_refs: List[str] = Field(default_factory=list)
     depends_on: List[str] = Field(default_factory=list)
+    # Decomposer-aware parent linkage (D13, 2026-05-17). When the
+    # Decomposer breaks one issue into multiple units of work, each
+    # unit's wrapped Issue gets parent_issue_id = the original issue.
+    # Unset (None) when the issue wasn't decomposed — that case is
+    # its own parent. Reporting-layer code (rollup in
+    # MilestoneCodeDispatcher) reads this to attribute unit outcomes
+    # back to the feature.
+    parent_issue_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Original (pre-decomposition) Issue.id this unit belongs "
+            "to. None when the issue was not decomposed."
+        ),
+    )
 
 
 class CoderResult(BaseModel):

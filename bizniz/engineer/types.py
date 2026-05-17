@@ -69,7 +69,19 @@ class EngineerPlan(BaseModel):
 
 
 class EngineerResult(BaseModel):
-    """Terminal payload from ``submit_implementation``."""
+    """Terminal payload from ``submit_implementation``.
+
+    **Reporting-layer rollup (D13, 2026-05-17).** When the Decomposer
+    breaks issues into units, ``completed_issue_ids`` /
+    ``deferred_issue_ids`` lists PARENT issue ids (the pre-
+    decomposition feature ids — ``BE-009``, not ``BE-009-U3``). A
+    parent is "completed" only when ALL its units passed.
+    ``completed_units`` / ``deferred_units`` carry the per-unit
+    detail for callers that need it (perf logging, debug output).
+
+    For non-decomposed flows (legacy or one-issue-one-unit), the
+    unit lists mirror the parent lists.
+    """
     plan: EngineerPlan
     summary: str = ""
     final_test_status: Literal[
@@ -77,4 +89,6 @@ class EngineerResult(BaseModel):
     ] = "not_run"
     completed_issue_ids: List[str] = PydField(default_factory=list)
     deferred_issue_ids: List[str] = PydField(default_factory=list)
+    completed_units: List[str] = PydField(default_factory=list)
+    deferred_units: List[str] = PydField(default_factory=list)
     notes: List[str] = PydField(default_factory=list)

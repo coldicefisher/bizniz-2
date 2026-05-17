@@ -213,11 +213,13 @@ class TestDispatcherDecomposition:
             decomposer_factory=decomposer_factory,
         )
         result = dispatcher.run(architecture=_arch(), enriched_spec=_spec())
-        # Both units completed.
-        assert "BE-001-u1" in result.completed_issue_ids
-        assert "BE-001-u2" in result.completed_issue_ids
-        # Original issue id is NOT in completed (it was replaced).
-        assert "BE-001" not in result.completed_issue_ids
+        # D13 rollup (2026-05-17): completed_issue_ids reports the
+        # PARENT issue id, NOT the unit ids. Per-unit detail lives on
+        # the new completed_units / deferred_units fields.
+        assert result.completed_issue_ids == ["BE-001"]
+        assert result.deferred_issue_ids == []
+        assert set(result.completed_units) == {"BE-001-u1", "BE-001-u2"}
+        assert result.deferred_units == []
         # Decomposer was called once.
         decomposer.decompose.assert_called_once()
         # Coder was called twice — once per unit.
