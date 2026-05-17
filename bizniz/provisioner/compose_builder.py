@@ -117,6 +117,14 @@ def _build_app_service_entry(
         volumes.append("../../core/python:/python_core")
     elif lang_lower in ("typescript", "javascript"):
         volumes.append("../../core/typescript:/ts_core")
+    # Mount the project-root ``docs/`` directory into every app
+    # service at ``/app/docs`` (read-only). HumanDocsGenerator writes
+    # markdown here after each milestone; the fastapi skeleton's
+    # ``/api/v1/docs/*`` routes serve it via DocsLoader. React/Angular
+    # skeletons' viewer routes consume those routes — no direct
+    # filesystem read from the frontend. Read-only because docs are
+    # content, not application state.
+    volumes.append("../../docs:/app/docs:ro")
 
     entry: dict = {
         "image": f"{project_slug}-{service.name}:dev",

@@ -201,6 +201,69 @@ class TestGenerator:
         det = [d for d in result.docs if d.method == "deterministic"]
         assert all(d.succeeded for d in det)
 
+    def test_emits_docs_manifest_for_viewer(self, tmp_path):
+        # Item 13 (2026-05-17): generator writes manifest.json so the
+        # fastapi skeleton's /api/v1/docs/* routes serve a coherent
+        # navigation tree regardless of filesystem ordering.
+        import json
+        gen = HumanDocsGenerator(
+            project_root=tmp_path,
+            architecture=_arch(),
+            narrative_writer=_fake_writer(),
+            openapi_per_service={
+                "backend": {"info": {"title": "X", "version": "0.1"}, "paths": {}},
+            },
+            problem_statement="Build a CRM",
+            milestones=[MilestoneDocInput(index=1, name="Auth")],
+        )
+        result = gen.run()
+        rels = {d.rel_path for d in result.docs}
+        assert "manifest.json" in rels
+
+        manifest_path = tmp_path / "docs" / "manifest.json"
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text())
+        assert manifest["version"] == 1
+        assert "generated_at" in manifest
+        slugs = [e["slug"] for e in manifest["tree"]]
+        # README + quickstart should sort first (root section).
+        assert slugs.index("README") < slugs.index("architecture")
+        # api/backend should be in api section.
+        api_entry = next(e for e in manifest["tree"] if e["slug"] == "api/backend")
+        assert api_entry["section"] == "api"
+        # milestones/m1 should be in milestones section.
+        m1 = next(e for e in manifest["tree"] if e["slug"] == "milestones/m1")
+        assert m1["section"] == "milestones"
+
+    def test_manifest_excludes_failed_docs(self, tmp_path):
+        # If an LLM-driven doc fails, it shouldn't show in the manifest
+        # so the viewer never 404s on a broken entry.
+        class BrokenReadmeWriter(NarrativeWriter):
+            def __init__(self):
+                pass
+            def write_readme(self, *a, **kw):
+                return NarrativeResult(content="", succeeded=False, error="fake fail")
+            def write_quickstart(self, *a, **kw):
+                return NarrativeResult(content="ok\n", succeeded=True)
+            def write_service(self, *a, **kw):
+                return NarrativeResult(content="ok\n", succeeded=True)
+            def write_milestone(self, *a, **kw):
+                return NarrativeResult(content="ok\n", succeeded=True)
+
+        import json
+        gen = HumanDocsGenerator(
+            project_root=tmp_path,
+            architecture=_arch(),
+            narrative_writer=BrokenReadmeWriter(),
+            problem_statement="x",
+            milestones=[],
+        )
+        result = gen.run()
+        manifest = json.loads((tmp_path / "docs" / "manifest.json").read_text())
+        slugs = {e["slug"] for e in manifest["tree"]}
+        assert "README" not in slugs   # the failed one
+        assert "quickstart" in slugs   # successful ones still listed
+
     def test_status_callback_emits_progress(self, tmp_path):
         statuses: List[str] = []
         gen = HumanDocsGenerator(

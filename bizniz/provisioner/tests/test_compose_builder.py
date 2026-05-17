@@ -107,6 +107,27 @@ def test_python_service_mounts_core_python_and_sets_pythonpath():
     assert env.get("PYTHONPATH") == "/python_core:/app"
 
 
+def test_app_services_mount_project_docs_readonly():
+    """Every app service (Python and TS) mounts the project-root
+    ``docs/`` directory at ``/app/docs`` read-only (item 13,
+    2026-05-17). HumanDocsGenerator writes markdown there after each
+    milestone; the fastapi skeleton's ``/api/v1/docs/*`` routes serve
+    it via DocsLoader. Read-only because docs are content, not state."""
+    arch = _arch(
+        _svc("backend", "backend", "fastapi", "python",
+             port=8001, skeleton="fastapi"),
+        _svc("frontend", "frontend", "react", "typescript",
+             port=5173, skeleton="react"),
+    )
+    yml = build_compose(arch, template_outputs={}, project_slug="x")
+    parsed = yaml.safe_load(yml)
+    for svc_name in ("backend", "frontend"):
+        vols = parsed["services"][svc_name]["volumes"]
+        assert "../../docs:/app/docs:ro" in vols, (
+            f"{svc_name} missing docs mount: {vols}"
+        )
+
+
 def test_typescript_service_mounts_core_typescript_and_sets_node_path():
     arch = _arch(_svc("frontend", "frontend", "react", "typescript",
                       port=5173, skeleton="react"))

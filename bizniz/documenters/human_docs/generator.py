@@ -22,7 +22,9 @@ operator added by hand) are untouched.
 """
 from __future__ import annotations
 
+import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -235,9 +237,95 @@ class HumanDocsGenerator:
                 error=ms_doc.error,
             ))
 
+        # ── Manifest for the docs viewer (item 13, 2026-05-17) ───
+        # Emit a stable navigation manifest so the skeleton's
+        # ``/api/v1/docs/*`` routes serve a coherent tree regardless
+        # of on-disk ordering quirks. The fastapi DocsLoader prefers
+        # this manifest over filesystem scanning when present.
+        manifest_doc = self._emit_manifest(result.docs)
+        if manifest_doc is not None:
+            result.docs.append(manifest_doc)
+
         result.duration_s = time.time() - t0
         self._log(
             f"HumanDocsGenerator: done in {result.duration_s:.1f}s — "
             f"{result.succeeded_count()}/{len(result.docs)} succeeded"
         )
         return result
+
+    def _emit_manifest(
+        self,
+        docs: List[GeneratedDoc],
+    ) -> Optional[GeneratedDoc]:
+        """Write ``docs/manifest.json`` describing the doc tree.
+
+        Entries are ordered (Overview → Reference → API → Services →
+        Milestones) so the viewer's sidebar groups make sense without
+        the viewer having to second-guess the file system. Only
+        docs that succeeded get into the manifest — broken docs are
+        invisible to the viewer rather than 404'ing it later.
+
+        Slugs are the rel_path minus ``.md`` (matches DocsLoader's
+        slug convention). Skipped: ``manifest.json`` itself.
+        """
+        entries: List[dict] = []
+        for d in docs:
+            if not d.succeeded or not d.rel_path.endswith(".md"):
+                continue
+            slug = d.rel_path[:-3]
+            section, title = _classify_doc(slug)
+            entries.append({
+                "slug": slug,
+                "title": title,
+                "path": d.rel_path,
+                "section": section,
+                "method": d.method,
+            })
+        entries.sort(key=lambda e: (
+            _SECTION_ORDER.get(e["section"] or "_root", 99),
+            e["slug"],
+        ))
+        manifest = {
+            "version": 1,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "tree": entries,
+        }
+        return self._write(
+            "manifest.json",
+            json.dumps(manifest, indent=2),
+            method="deterministic",
+        )
+
+
+_SECTION_ORDER: Dict[str, int] = {
+    "_root": 0,        # README, quickstart at the top
+    "reference": 1,    # architecture, infrastructure, auth
+    "api": 2,
+    "services": 3,
+    "milestones": 4,
+}
+
+
+def _classify_doc(slug: str) -> tuple[Optional[str], str]:
+    """Return (section, default-title) for a slug.
+
+    Section comes from the first path segment when nested; root
+    files like ``README`` / ``architecture`` / ``infrastructure`` /
+    ``auth`` / ``quickstart`` are grouped synthetically by intent
+    so the viewer can render "Overview" + "Reference" buckets at
+    the top.
+    """
+    if "/" in slug:
+        head, _ = slug.split("/", 1)
+        return head, slug.split("/")[-1].replace("-", " ").replace("_", " ").title()
+    # Root-level synthetic grouping.
+    root_titles = {
+        "README": ("_root", "Overview"),
+        "quickstart": ("_root", "Quickstart"),
+        "architecture": ("reference", "Architecture"),
+        "infrastructure": ("reference", "Infrastructure"),
+        "auth": ("reference", "Authentication"),
+    }
+    if slug in root_titles:
+        return root_titles[slug]
+    return None, slug.replace("-", " ").replace("_", " ").title()
