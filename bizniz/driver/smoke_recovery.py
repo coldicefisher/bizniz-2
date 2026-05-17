@@ -1,5 +1,13 @@
-"""SmokeRecovery — single-shot agent that attempts to fix a failing
-smoke phase before the pipeline hard-halts.
+"""SmokeRecovery + MultiTierSmokeRecovery — agents that attempt to
+fix a failing smoke phase before the pipeline hard-halts.
+
+The single-shot ``SmokeRecovery`` runs ONE Claude CLI session and
+returns. Roadmap item 7C adds ``MultiTierSmokeRecovery`` —
+an escalation wrapper that walks a tier list (cheap → mid →
+expensive), running each tier's SmokeRecovery + re-verifying smoke
+between attempts. Use multi-tier when project complexity warrants
+multiple shots before halting; use single-shot when keeping
+recovery cheap matters more.
 
 When ``SmokePhase`` finds a critical failure (route 5xx, /health
 down, /api/login broken), the pipeline currently halts at the
@@ -324,3 +332,115 @@ reversible action (container restart > config edit > rebuild).
 Return the final summary lines (ACTION / RECOVERY SUCCESS /
 RECOVERY FAILED) when done.
 """
+
+
+# ── Multi-tier wrapper (item 7C) ─────────────────────────────────
+
+
+from bizniz.lib.tier_escalation import (  # noqa: E402
+    AttemptOutcome, EscalationResult, TierSpec, escalate,
+)
+
+
+class MultiTierSmokeRecovery:
+    """Walks a tier list (cheap → mid → expensive), running each
+    tier's ``SmokeRecovery`` and re-verifying smoke between attempts.
+
+    Each tier's ``factory`` returns a fresh ``SmokeRecovery`` bound
+    to the tier's model. The escalation primitive handles the
+    loop — this class is the glue.
+
+    Compared to single-shot ``SmokeRecovery``: heavier (more API
+    calls if early tiers fail), but recovers from harder problems
+    that one cheap-model attempt can't handle.
+    """
+
+    def __init__(
+        self,
+        tiers: List[TierSpec["SmokeRecovery"]],
+        verify_smoke: Callable[[], bool],
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        if not tiers:
+            raise ValueError(
+                "MultiTierSmokeRecovery: tiers list must be non-empty"
+            )
+        self._tiers = tiers
+        self._verify_smoke = verify_smoke
+        self._on_status = on_status
+
+    def _log(self, msg: str) -> None:
+        if self._on_status is not None:
+            try:
+                self._on_status(msg)
+            except Exception:
+                pass
+
+    def recover(
+        self,
+        critical_failures: List[str],
+        service_names: List[str],
+        milestone_title: str,
+    ) -> "MultiTierRecoveryResult":
+        """Try each tier in order; on each, run SmokeRecovery once,
+        then re-verify smoke. Return the first attempt that produces
+        a passing smoke, or a structured failure if none do."""
+
+        def attempt_fn(agent: "SmokeRecovery", ti, ai, prior):
+            self._log(
+                f"MultiTierSmokeRecovery: tier {ti} attempt {ai} "
+                f"({self._tiers[ti].label!r})..."
+            )
+            sr_result = agent.recover(
+                critical_failures=critical_failures,
+                service_names=service_names,
+                milestone_title=milestone_title,
+            )
+            # After recovery action, re-verify smoke.
+            smoke_passes = False
+            verify_error: Optional[str] = None
+            try:
+                smoke_passes = bool(self._verify_smoke())
+            except Exception as e:
+                verify_error = (
+                    f"verify_smoke raised: {type(e).__name__}: {e}"
+                )
+                self._log(
+                    f"MultiTierSmokeRecovery: {verify_error}"
+                )
+            output_parts = [
+                f"recovery_succeeded={sr_result.succeeded}",
+                f"recovery_summary={sr_result.summary[:200]}",
+                f"smoke_passes_after={smoke_passes}",
+            ]
+            if verify_error:
+                output_parts.append(verify_error)
+            return AttemptOutcome(
+                succeeded=smoke_passes,
+                output=" | ".join(output_parts),
+            )
+
+        escalation = escalate(
+            self._tiers, attempt_fn,
+            on_status=self._on_status,
+        )
+        return MultiTierRecoveryResult(
+            succeeded=escalation.succeeded,
+            final_tier_label=escalation.final_tier_label,
+            total_attempts=escalation.total_attempts,
+            summary=escalation.final_output,
+            tier_history=[
+                f"{a.tier_label}#{a.attempt_index}: "
+                f"{'PASS' if a.succeeded else 'fail'}"
+                for a in escalation.attempts
+            ],
+        )
+
+
+class MultiTierRecoveryResult(BaseModel):
+    """End-of-escalation result for ``MultiTierSmokeRecovery``."""
+    succeeded: bool = False
+    final_tier_label: Optional[str] = None
+    total_attempts: int = 0
+    summary: str = ""
+    tier_history: List[str] = Field(default_factory=list)
