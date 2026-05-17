@@ -572,6 +572,39 @@ class MilestoneLoop:
                     integration_web.error_summary or "Web integration tests failed",
                 )
 
+        # ── Post-integration smoke ─────────────────────────────────────
+        # Re-run the smoke gate AFTER integration phases to catch state
+        # drift that integration tests can introduce — e.g. a
+        # ``Base.metadata.drop_all`` fixture that leaves the production
+        # DB tables-less, or a backend restart whose lifespan's
+        # ``create_all`` silently fails. The pre-implement smoke gate
+        # (above) caught the "implement phase shipped broken code"
+        # class; this one catches the "integration cleanup broke the
+        # running stack" class that surfaced on crm_v1 M5 (2026-05-16).
+        # No state-schema change — this is a transient verification,
+        # not a resumable checkpoint.
+        self._log(
+            "MilestoneLoop: post-integration smoke verification..."
+        )
+        post_smoke = self._smoke.run(
+            milestone=milestone,
+            architecture=architecture,
+            project_root=self._project_root,
+            auth_contract=auth_contract,
+        )
+        if not post_smoke.passed:
+            self._gates.hard(
+                "post_integration_smoke_failed",
+                f"Post-integration smoke regressed "
+                f"({len(post_smoke.critical_failures)} critical "
+                f"failure(s)): "
+                f"{'; '.join(post_smoke.critical_failures[:3])}",
+            )
+        self._log(
+            f"MilestoneLoop: post-integration smoke passed "
+            f"({len(post_smoke.checks)} check(s))"
+        )
+
         # ── UX_REVIEW ──────────────────────────────────────────────────
         # Runs after the milestone's frontend integration verified the
         # service is actually reachable. Self-skips when no frontend or

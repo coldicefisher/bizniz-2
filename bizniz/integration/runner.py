@@ -21,6 +21,7 @@ zero changes here.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import time
@@ -171,6 +172,53 @@ PYTEST_SIDECAR_IMAGE = "bizniz-test-pytest:latest"
 PLAYWRIGHT_SIDECAR_IMAGE = "bizniz-test-playwright:latest"
 
 
+_COLLECTED_RE = re.compile(r"^collected (\d+) items?", re.MULTILINE)
+# Match the final summary: "5 passed in 12.34s", "3 failed, 2 passed in 8s",
+# "1 passed, 1 warning in 3.4s", etc. We just need to confirm the counts
+# add up to non-zero AND no failures.
+_SUMMARY_RE = re.compile(
+    r"^=+ (?P<body>.+?) in [\d.]+s.*=+$",
+    re.MULTILINE,
+)
+
+
+def _assert_pytest_actually_ran_tests(
+    output: str,
+) -> tuple[bool, str]:
+    """Verify pytest collected and executed tests. Returns
+    ``(actually_ran, reason)``.
+
+    Catches the 2026-05-16 crm_v1 failure mode where pytest exited 0
+    because zero tests existed / all were skipped, and the runner
+    incorrectly reported ``passed: true``. A non-zero-exit pytest is
+    handled upstream; this guard handles the silent-empty case.
+    """
+    m = _COLLECTED_RE.search(output)
+    if m is None:
+        return False, "pytest output missing 'collected N items' header"
+    collected = int(m.group(1))
+    if collected == 0:
+        return False, "pytest collected 0 tests"
+    # Look at the summary line to count actually-executed tests.
+    # Anything starting with a digit followed by 'passed' or 'failed'
+    # counts; 'skipped' alone is suspicious (means tests existed but
+    # never exercised the live stack).
+    summary = _SUMMARY_RE.search(output)
+    if summary is None:
+        # Pytest ran tests but didn't emit a summary — odd, treat as failed.
+        return False, "pytest output missing summary line"
+    body = summary.group("body").lower()
+    has_pass_or_fail = any(
+        kw in body for kw in ("passed", "failed", "errors", "error")
+    )
+    if not has_pass_or_fail and "skipped" in body:
+        return False, (
+            f"every collected test was skipped — live stack never "
+            f"exercised: {summary.group('body')}"
+        )
+    return True, f"collected={collected}, summary={summary.group('body')}"
+
+
 def _run_pytest_in_sidecar(
     service: ServiceDefinition,
     workspace_path: Path,
@@ -240,7 +288,18 @@ def _run_pytest_in_sidecar(
         )
 
     output = (proc.stdout or "") + (proc.stderr or "")
-    return proc.returncode == 0, output
+    if proc.returncode != 0:
+        return False, output
+    # Exit code 0 isn't sufficient — verify tests actually ran. The
+    # 2026-05-16 crm_v1 failure shipped because pytest "passed" with
+    # zero / all-skipped tests, so the live stack was never exercised.
+    ran, reason = _assert_pytest_actually_ran_tests(output)
+    if not ran:
+        return False, (
+            f"pytest exited 0 but did not actually exercise the live "
+            f"stack: {reason}\n\n{output}"
+        )
+    return True, output
 
 
 def _capture_container_logs(compose_path: str, service_name: str) -> str:
