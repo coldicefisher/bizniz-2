@@ -77,6 +77,10 @@ class ProUXDesigner(ClaudeUXDesigner):
         # is reused. Set ``force_redesign=True`` to ignore + replace
         # the lock; useful for explicit "redesign milestone" runs.
         force_redesign: bool = False,
+        # Roadmap item 2 done-when criterion — per-story Storybook
+        # loop alongside the per-route loop. Default off until
+        # live-validated on a real Storybook server.
+        storybook_driver: Optional["StorybookDriver"] = None,
     ):
         super().__init__(
             vision_client=vision_client,
@@ -97,6 +101,7 @@ class ProUXDesigner(ClaudeUXDesigner):
         self._project_slug = project_slug
         self._debug = debug
         self._force_redesign = force_redesign
+        self._storybook_driver = storybook_driver
         # Per-run timing. Populated by ``_timed`` calls and surfaced
         # on the ``result["timing"]`` dict at the end of
         # review_frontend.
@@ -458,6 +463,48 @@ class ProUXDesigner(ClaudeUXDesigner):
                 "no routes found via discovery and no per_view_plan"
             )
             return result
+
+        # ── Storybook per-story loop (roadmap item 2 done-when) ──────
+        # Opt-in via constructor injection. Runs alongside the per-
+        # route loop — different content target (primitives vs pages).
+        # Result stashed on ``result["storybook"]``; per-route loop
+        # below proceeds unchanged regardless.
+        if self._storybook_driver is not None:
+            _t0_sb = time.time()
+            screenshots_dir = ws_root_path / ".bizniz" / "storybook_shots"
+            screenshots_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                sb_result = self._storybook_driver.run(
+                    frontend_root=ws_root_path,
+                    screenshots_dir=screenshots_dir,
+                    design_lock_json=(
+                        lock.model_dump_json(indent=2)
+                        if lock is not None else None
+                    ),
+                )
+                result["storybook"] = sb_result.model_dump()
+                _log(
+                    self._on_status,
+                    f"ProUXDesigner: storybook loop done — "
+                    f"{sb_result.score.passing}/{sb_result.score.covered} "
+                    f"passing (mean={sb_result.score.mean})"
+                    if sb_result.skipped_reason is None
+                    else f"ProUXDesigner: storybook skipped — {sb_result.skipped_reason}"
+                )
+            except Exception as e:
+                # Defensive: never let a Storybook bug tank the
+                # whole UX phase. Log and continue with per-route.
+                _log(
+                    self._on_status,
+                    f"ProUXDesigner: storybook loop raised "
+                    f"{type(e).__name__}: {e} — continuing with per-route"
+                )
+                result["storybook"] = {
+                    "skipped_reason": (
+                        f"driver raised {type(e).__name__}: {e}"
+                    ),
+                }
+            self._record_timing("storybook", time.time() - _t0_sb)
 
         _log(
             self._on_status,
