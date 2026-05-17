@@ -27,6 +27,7 @@ from bizniz.code_reviewer.agent import CodeReviewer
 from bizniz.code_reviewer.types import CodeReviewReport
 from bizniz.driver.gates import GatePolicy, GateViolation
 from bizniz.driver.integration_phase import IntegrationPhase, IntegrationPhaseResult
+from bizniz.driver.final_tester import FinalTester
 from bizniz.driver.smoke_phase import SmokePhase, SmokePhaseResult
 from bizniz.driver.smoke_recovery import SmokeRecovery
 from bizniz.driver.ux_phase import UXPhase
@@ -96,6 +97,7 @@ class MilestoneLoop:
         workspace_summary: Optional[str] = None,
         ux_phase: Optional[UXPhase] = None,
         refactor_phase: Optional[RefactorPhase] = None,
+        final_tester: Optional["FinalTester"] = None,
         total_milestones: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         # Confidence-signal thresholds (roadmap item 1). When
@@ -116,6 +118,7 @@ class MilestoneLoop:
         self._confidence_halt_threshold = confidence_halt_threshold
         self._ux_phase = ux_phase
         self._refactor_phase = refactor_phase
+        self._final_tester = final_tester
         self._total_milestones = total_milestones
         self._gates = gates
         self._workspace_for_service = workspace_for_service
@@ -662,6 +665,40 @@ class MilestoneLoop:
                     ),
                 },
             )
+
+        # ── FINAL_TEST ──────────────────────────────────────────────────
+        # End-of-milestone e2e canary — the LAST gate before DONE.
+        # Verifies the stack is shippable by hitting real HTTP
+        # endpoints as a user would. No fixtures, no test data — just
+        # confirms the running services respond on their happy paths.
+        # Catches damage from any prior phase (integration teardown,
+        # refactor extracts that broke imports, UX fixes that
+        # mis-wired a route).
+        if not _has(state, SubPhase.FINAL_TEST):
+            self._tag(state.milestone_index, SubPhase.FINAL_TEST)
+            if self._final_tester is not None:
+                final_result = self._final_tester.run(
+                    milestone=milestone,
+                    architecture=architecture,
+                    project_root=self._project_root,
+                    auth_contract=auth_contract,
+                )
+                state.mark_phase(
+                    SubPhase.FINAL_TEST, final_result.model_dump(),
+                )
+                if not final_result.passed:
+                    self._gates.hard(
+                        "final_test_failed",
+                        f"FinalTester regressed "
+                        f"({len(final_result.critical_failures)} critical "
+                        f"failure(s)): "
+                        f"{'; '.join(final_result.critical_failures[:3])}",
+                    )
+            else:
+                state.mark_phase(
+                    SubPhase.FINAL_TEST,
+                    {"skipped_reason": "no final_tester wired"},
+                )
 
         state.mark_phase(SubPhase.DONE)
         self._log(

@@ -37,6 +37,7 @@ from bizniz.cost.ledger import CostLedger, get_default_ledger_path
 from bizniz.coder.agent import Coder
 from bizniz.driver.gates import GatePolicy
 from bizniz.driver.integration_phase import IntegrationPhase
+from bizniz.driver.final_tester import FinalTester
 from bizniz.driver.smoke_phase import SmokePhase
 from bizniz.driver.smoke_recovery import SmokeRecovery
 from bizniz.driver.ux_phase import UXPhase
@@ -474,6 +475,17 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
 
     smoke_phase = SmokePhase(on_status=on_status)
 
+    # FinalTester — end-of-milestone e2e canary, the LAST gate before
+    # DONE. Verifies the stack is shippable by hitting real HTTP
+    # endpoints as a user would. Delegates probe machinery to
+    # SmokePhase but is a separate state-tracked phase so resume can
+    # pick up at this exact point and the post-mortem report has its
+    # own line for "did the final shipping gate pass?"
+    final_tester = FinalTester(
+        smoke_phase=smoke_phase,
+        on_status=on_status,
+    )
+
     # Smoke recovery — one-shot Claude CLI agent that tries to fix
     # smoke 5xx failures (stale process, missing migration, etc.)
     # before the pipeline hard-halts. Only available when claude is
@@ -626,6 +638,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         workspace_summary=workspace_summary,
         ux_phase=ux_phase,
         refactor_phase=refactor_phase,
+        final_tester=final_tester,
         on_status=on_status,
     )
 

@@ -60,6 +60,12 @@ class SubPhase(str, Enum):
     # has ``refactor_after=True`` or is the final milestone.
     UX_REVIEW = "ux_review"
     REFACTOR = "refactor"
+    # FINAL_TEST is the last gate before DONE — verifies the stack
+    # is end-to-end shippable (no fixtures, no test data, just real
+    # HTTP probes against the running services). Catches stack
+    # damage from any prior phase (integration teardown, refactor
+    # extracts that break imports, UX fixes that mis-wire a route).
+    FINAL_TEST = "final_test"
     DONE = "done"
 
 
