@@ -1,0 +1,21 @@
+{
+  "id": "BE-006",
+  "title": "Build recipes router (CRUD endpoints + UUID coercion)",
+  "description": "Build the complete recipes CRUD router at `app/api/routes/recipes.py`. The file does not yet exist; create it.\n\nEndpoints to implement, all under `prefix='/recipes'` (the auto-mount adds `/api/v1`):\n\n1. **POST `/`** — create a recipe.\n    - Body: `RecipeCreate` (already shipped in `app/schemas/recipe.py`)\n    - Auth: `require_roles(['user', 'admin'])`\n    - owner_id derived from JWT (use `app.services.recipes.ensure_local_user`)\n    - Returns `RecipeOut`, status 201\n\n2. **GET `/mine`** — list the caller's recipes.\n    - Auth: `require_roles(['user', 'admin'])`\n    - Returns `List[RecipeOut]` of recipes where `owner_id == JWT.sub`\n    - Ordered by `created_at DESC`\n\n3. **GET `/{recipe_id}`** — fetch one recipe.\n    - Path param `recipe_id` is a UUID\n    - Auth: `require_roles(['user', 'admin'])`\n    - 404 if not found OR not owned by the caller (don't leak existence)\n    - Returns `RecipeOut`\n\n4. **PUT `/{recipe_id}`** — update a recipe.\n    - Path param `recipe_id` (UUID)\n    - Body: `RecipeCreate` (full replacement; same shape as create)\n    - Auth: `require_roles(['user', 'admin'])`\n    - 404 if not found OR not owned by the caller\n    - Returns `RecipeOut`, status 200\n\n5. **DELETE `/{recipe_id}`** — delete a recipe.\n    - Path param `recipe_id` (UUID)\n    - Auth: `require_roles(['user', 'admin'])`\n    - 404 if not found OR not owned by the caller\n    - Returns 204 No Content (no body)\n\n6. **UUID coercion** — when the path param `recipe_id` is malformed (e.g. `not-a-uuid`), FastAPI's default response is 422 with a Pydantic validation error. Convert that to a plain 400 Bad Request with a simple message — domain errors should be 400-shaped, not 422 (which we reserve for the request-schema-validation envelope).\n\nKey rules across all endpoints:\n- owner_id is derived ONLY from the JWT, never from payload or path\n- `require_roles(...)` handles 401 (no token) and 403 (wrong role)\n- `RecipeCreate.extra='forbid'` rejects client-supplied owner_id/id with 422\n- Async style consistent with the skeleton's `auth/*.py` files\n- Helpers in `app.services.recipes`: `create_recipe`, `ensure_local_user` — use them, don't re-implement\n- Module docstring + helpful comments expected\n\nThis is BE-006 as ServicePlanner emits it — BEFORE the Decomposer would split it into BE-006-U1..U7. The perf test measures how Coder handles the full-issue scope in a single dispatch.\n",
+  "service": "backend",
+  "language": "python",
+  "target_files": ["app/api/routes/recipes.py"],
+  "test_files": [],
+  "spec_refs": ["create_recipe", "list_recipes", "read_recipe", "update_recipe", "delete_recipe"],
+  "depends_on": [],
+  "success_criteria": [
+    "app/api/routes/recipes.py exists with all 5 CRUD endpoints",
+    "Each endpoint uses require_roles(['user', 'admin']) dependency",
+    "owner_id derived from JWT, not payload",
+    "GET /mine returns only the caller's recipes",
+    "GET / PUT / DELETE on missing-or-not-owned recipe returns 404 (not 403)",
+    "Malformed UUID path param returns 400 (not 422)",
+    "router declares prefix='/recipes'"
+  ],
+  "parent_issue_id": null
+}
