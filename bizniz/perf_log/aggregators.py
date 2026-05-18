@@ -22,6 +22,7 @@ from bizniz.perf_log.events import (
     RateLimitEvent,
     ReadonlyRetryEvent,
     SmokeRecoveryEvent,
+    SubprocessCall,
     UnitDispatch,
     UnitSkip,
 )
@@ -173,6 +174,14 @@ def build_report(events: List[Event], source_path: str = "") -> Report:
         if isinstance(ev, AgentCall):
             agent_durations[ev.agent].append(ev.duration_s)
             agent_chars[ev.agent] += ev.response_chars
+        elif isinstance(ev, SubprocessCall):
+            # Tool-loop subprocess agents (Refactorer, ClaudeCliDebugger,
+            # HTTPApiTester, etc.) roll up into the same agents list as
+            # single-call agents — the timing rollup shape is identical,
+            # they just have no response_chars to track. Lumping them
+            # together keeps the report's "top time-sinks" view honest
+            # regardless of agent shape.
+            agent_durations[ev.agent].append(ev.duration_s)
         elif isinstance(ev, UnitDispatch):
             unit_durations.append(ev.duration_s)
             exit_codes[ev.exit_code] += 1

@@ -9,6 +9,7 @@ importing its source.
 from __future__ import annotations
 
 import json
+import time
 from typing import Dict, Optional
 
 from bizniz.architect.types import ServiceDefinition
@@ -52,7 +53,14 @@ class WorkerTester(BaseAIAgent):
             auth_contract=auth_contract,
         )
         self.add_messages_to_history([{"role": "user", "content": prompt}])
+        # Emit perf_log-friendly timing for the integration phase.
+        t0 = time.time()
         text, _, _ = self._ai_client.get_text(messages=self.message_history)
+        elapsed = time.time() - t0
+        print(
+            f"WorkerTester({service.name}): completed in {elapsed:.1f}s",
+            flush=True,
+        )
         source = self._strip_code_block(text or "")
         return source
 

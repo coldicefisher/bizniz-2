@@ -12,6 +12,7 @@ runner enforces is "one Python file the runner can pytest".
 from __future__ import annotations
 
 import json
+import time
 from typing import Optional
 
 from bizniz.core.agent import BaseAIAgent
@@ -51,8 +52,18 @@ class HTTPApiTester(BaseAIAgent):
             auth_contract=auth_contract,
         )
         self.add_messages_to_history([{"role": "user", "content": prompt}])
+        # Emit a perf_log-friendly timing line so the integration phase
+        # shows up in the report. Without this the testers were invisible
+        # to perf_log and we couldn't attribute the "everything else"
+        # bucket of wall time.
+        t0 = time.time()
         text, _, _ = self._ai_client.get_text(
             messages=self.message_history,
+        )
+        elapsed = time.time() - t0
+        print(
+            f"HTTPApiTester({service.name}): completed in {elapsed:.1f}s",
+            flush=True,
         )
         source = self._strip_code_block(text or "")
         return source

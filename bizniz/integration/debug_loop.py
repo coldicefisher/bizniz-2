@@ -17,6 +17,7 @@ migrations). Same agent class, different harness.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -265,6 +266,7 @@ def repair_integration_failure(
 
         for tier_attempt in range(1, tier.repair_attempts + 1):
             total_attempt += 1
+            t_attempt = time.time()
             _log(
                 on_status,
                 f"Integration debug: '{service.name}' [{tier.model_label}] "
@@ -325,6 +327,13 @@ def repair_integration_failure(
                         diagnosis=f"diagnose raised: {type(e).__name__}: {e}",
                         outcome="error",
                     ))
+                # perf_log emission for this terminal attempt.
+                print(
+                    f"IntegrationDebugger[{service.name}, "
+                    f"{tier.model_label} attempt {tier_attempt}]: "
+                    f"{time.time() - t_attempt:.1f}s exit 2",
+                    flush=True,
+                )
                 return False, last_output
 
             _log(
@@ -409,12 +418,19 @@ def repair_integration_failure(
                     outcome="passed" if passed else "still_failing",
                 ))
 
+            attempt_elapsed = time.time() - t_attempt
             if passed:
                 _log(
                     on_status,
                     f"Integration debug: '{service.name}' PASS after "
                     f"{total_attempt} total attempt(s) "
                     f"(tier '{tier.model_label}', attempt {tier_attempt})"
+                )
+                print(
+                    f"IntegrationDebugger[{service.name}, "
+                    f"{tier.model_label} attempt {tier_attempt}]: "
+                    f"{attempt_elapsed:.1f}s exit 0",
+                    flush=True,
                 )
                 return True, output
 
@@ -423,6 +439,12 @@ def repair_integration_failure(
                 f"Integration debug: '{service.name}' [{tier.model_label}] "
                 f"attempt {tier_attempt} did not fix; "
                 f"{'next attempt' if tier_attempt < tier.repair_attempts else 'escalating'}."
+            )
+            print(
+                f"IntegrationDebugger[{service.name}, "
+                f"{tier.model_label} attempt {tier_attempt}]: "
+                f"{attempt_elapsed:.1f}s exit 1",
+                flush=True,
             )
 
     _log(

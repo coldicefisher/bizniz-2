@@ -146,9 +146,35 @@ class ReadonlyRetryEvent(_BaseEvent):
     event_type: Literal["readonly_retry"] = "readonly_retry"
 
 
+class SubprocessCall(_BaseEvent):
+    """A tool-loop subprocess agent (ClaudeCliDebugger, Refactorer,
+    HTTPApiTester, WebUITester, WorkerTester, IntegrationDebugger tier
+    attempt) completed.
+
+    Unlike single-call agents (which emit ``AI responded in Xs (N chars)``),
+    these emit a ``subprocess done in Xs (exit N)``-style line because
+    they shell out to ``claude --print`` themselves. The ``target``
+    field carries the meaningful identity (service name, issue id,
+    file path) depending on agent.
+
+    From log lines like:
+      [12:08:42] ClaudeCliDebugger: subprocess done in 412.3s (exit 0)
+      [09:55:17] Refactorer: subprocess done in 198.1s (exit 0)
+      [11:33:07] HTTPApiTester(backend): completed in 73.2s
+      [11:48:22] WebUITester(frontend): completed in 184.6s
+      [12:01:55] IntegrationDebugger[backend, opus-4-7 attempt 2]: 281.5s exit 0
+    """
+    event_type: Literal["subprocess_call"] = "subprocess_call"
+    agent: str = ""           # "ClaudeCliDebugger", "Refactorer", etc.
+    target: str = ""          # service/issue/file context
+    duration_s: float = 0.0
+    exit_code: int = 0        # 0 when the agent didn't report one
+
+
 # Discriminated union of all event types for parser output.
 Event = Union[
     AgentCall, UnitDispatch, UnitSkip, DecomposerResult,
     MilestoneDone, ProUXDesignerTiming, GateEvent,
     SmokeRecoveryEvent, RateLimitEvent, ReadonlyRetryEvent,
+    SubprocessCall,
 ]

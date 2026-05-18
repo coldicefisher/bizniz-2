@@ -26,6 +26,7 @@ from bizniz.perf_log.events import (
     RateLimitEvent,
     ReadonlyRetryEvent,
     SmokeRecoveryEvent,
+    SubprocessCall,
     UnitDispatch,
     UnitSkip,
 )
@@ -141,6 +142,57 @@ _RE_READONLY_RETRY = re.compile(
     r"^\[ProjectDB\]\s+readonly-database OperationalError"
 )
 
+# Planner: AI responded in 47.6s (8412 chars)
+_RE_PLANNER_CALL = re.compile(
+    r"^Planner:\s+AI responded in ([\d.]+)s\s+\((\d+)\s+chars\)"
+)
+
+# Architect.decompose: AI responded in 91.3s (12044 chars)
+# Architect.evolve: AI responded in 73.8s (9012 chars)
+_RE_ARCHITECT_CALL = re.compile(
+    r"^Architect\.(\w+):\s+AI responded in ([\d.]+)s\s+\((\d+)\s+chars\)"
+)
+
+# AuthPlanner: AI responded in 38.2s (5104 chars)
+_RE_AUTH_PLANNER_CALL = re.compile(
+    r"^AuthPlanner:\s+AI responded in ([\d.]+)s\s+\((\d+)\s+chars\)"
+)
+
+# AuthOperator.code_examples: AI responded in 22.1s (4022 chars)
+_RE_AUTH_OPERATOR_CALL = re.compile(
+    r"^AuthOperator\.(\w+):\s+AI responded in ([\d.]+)s\s+\((\d+)\s+chars\)"
+)
+
+# CodeReviewer: AI responded in 67.3s (5480 chars)
+_RE_CODE_REVIEWER_CALL = re.compile(
+    r"^CodeReviewer:\s+AI responded in ([\d.]+)s\s+\((\d+)\s+chars\)"
+)
+
+# ClaudeCliDebugger: subprocess done in 412.3s (exit 0)
+_RE_CLI_DEBUGGER_DONE = re.compile(
+    r"^ClaudeCliDebugger:\s+subprocess done in ([\d.]+)s\s+\(exit\s+(-?\d+)\)"
+)
+
+# Refactorer: subprocess done in 198.1s (exit 0)
+_RE_REFACTORER_DONE = re.compile(
+    r"^Refactorer:\s+subprocess done in ([\d.]+)s\s+\(exit\s+(-?\d+)\)"
+)
+
+# HTTPApiTester(backend): completed in 73.2s
+# WebUITester(frontend): completed in 184.6s
+# WorkerTester(worker): completed in 91.4s
+_RE_INTEGRATION_TESTER = re.compile(
+    r"^(HTTPApiTester|WebUITester|WorkerTester)\(([a-z_]+)\):"
+    r"\s+completed in ([\d.]+)s"
+)
+
+# Integration debug_loop tier attempt timing:
+#   IntegrationDebugger[backend, claude-cli:claude-opus-4-7 attempt 2]: 281.5s exit 0
+_RE_INTEGRATION_DEBUGGER = re.compile(
+    r"^IntegrationDebugger\[([a-z_]+),\s+([^,\]]+)\s+attempt\s+(\d+)\]:"
+    r"\s+([\d.]+)s\s+exit\s+(-?\d+)"
+)
+
 
 def _parse_ux_phase_timings(body: str) -> dict:
     """Parse ``total=3972.5s, fix=1347.2s, global_design=939.1s`` into
@@ -207,6 +259,79 @@ def _recognize(body: str) -> Optional[Event]:
         return AgentCall(
             agent=f"QualityEngineer.{kind}", target="",
             duration_s=float(dur), response_chars=int(chars),
+        )
+
+    m = _RE_PLANNER_CALL.match(body)
+    if m:
+        dur, chars = m.groups()
+        return AgentCall(
+            agent="Planner", target="",
+            duration_s=float(dur), response_chars=int(chars),
+        )
+
+    m = _RE_ARCHITECT_CALL.match(body)
+    if m:
+        kind, dur, chars = m.groups()
+        return AgentCall(
+            agent=f"Architect.{kind}", target="",
+            duration_s=float(dur), response_chars=int(chars),
+        )
+
+    m = _RE_AUTH_PLANNER_CALL.match(body)
+    if m:
+        dur, chars = m.groups()
+        return AgentCall(
+            agent="AuthPlanner", target="",
+            duration_s=float(dur), response_chars=int(chars),
+        )
+
+    m = _RE_AUTH_OPERATOR_CALL.match(body)
+    if m:
+        kind, dur, chars = m.groups()
+        return AgentCall(
+            agent=f"AuthOperator.{kind}", target="",
+            duration_s=float(dur), response_chars=int(chars),
+        )
+
+    m = _RE_CODE_REVIEWER_CALL.match(body)
+    if m:
+        dur, chars = m.groups()
+        return AgentCall(
+            agent="CodeReviewer", target="",
+            duration_s=float(dur), response_chars=int(chars),
+        )
+
+    m = _RE_CLI_DEBUGGER_DONE.match(body)
+    if m:
+        dur, exit_code = m.groups()
+        return SubprocessCall(
+            agent="ClaudeCliDebugger", target="",
+            duration_s=float(dur), exit_code=int(exit_code),
+        )
+
+    m = _RE_REFACTORER_DONE.match(body)
+    if m:
+        dur, exit_code = m.groups()
+        return SubprocessCall(
+            agent="Refactorer", target="",
+            duration_s=float(dur), exit_code=int(exit_code),
+        )
+
+    m = _RE_INTEGRATION_TESTER.match(body)
+    if m:
+        agent, svc, dur = m.groups()
+        return SubprocessCall(
+            agent=agent, target=svc,
+            duration_s=float(dur), exit_code=0,
+        )
+
+    m = _RE_INTEGRATION_DEBUGGER.match(body)
+    if m:
+        svc, model_label, attempt, dur, exit_code = m.groups()
+        return SubprocessCall(
+            agent="IntegrationDebugger",
+            target=f"{svc}/{model_label.strip()}/attempt{attempt}",
+            duration_s=float(dur), exit_code=int(exit_code),
         )
 
     m = _RE_CODER_DONE.match(body)

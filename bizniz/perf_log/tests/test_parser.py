@@ -12,6 +12,7 @@ from bizniz.perf_log.events import (
     RateLimitEvent,
     ReadonlyRetryEvent,
     SmokeRecoveryEvent,
+    SubprocessCall,
     UnitDispatch,
     UnitSkip,
 )
@@ -83,6 +84,102 @@ class TestPatterns:
         )
         assert isinstance(ev, AgentCall)
         assert ev.agent == "QualityEngineer.review"
+
+    def test_planner_call(self):
+        ev = _parse("[20:14:02] Planner: AI responded in 47.6s (8412 chars)")
+        assert isinstance(ev, AgentCall)
+        assert ev.agent == "Planner"
+        assert ev.duration_s == 47.6
+        assert ev.response_chars == 8412
+
+    def test_architect_decompose_call(self):
+        ev = _parse(
+            "[20:15:33] Architect.decompose: AI responded in 91.3s (12044 chars)"
+        )
+        assert isinstance(ev, AgentCall)
+        assert ev.agent == "Architect.decompose"
+        assert ev.duration_s == 91.3
+
+    def test_architect_evolve_call(self):
+        ev = _parse(
+            "[09:02:11] Architect.evolve: AI responded in 73.8s (9012 chars)"
+        )
+        assert isinstance(ev, AgentCall)
+        assert ev.agent == "Architect.evolve"
+
+    def test_auth_planner_call(self):
+        ev = _parse("[20:18:08] AuthPlanner: AI responded in 38.2s (5104 chars)")
+        assert isinstance(ev, AgentCall)
+        assert ev.agent == "AuthPlanner"
+
+    def test_auth_operator_code_examples(self):
+        ev = _parse(
+            "[20:18:46] AuthOperator.code_examples: AI responded in 22.1s (4022 chars)"
+        )
+        assert isinstance(ev, AgentCall)
+        assert ev.agent == "AuthOperator.code_examples"
+
+    def test_code_reviewer_call(self):
+        ev = _parse(
+            "[09:33:15] CodeReviewer: AI responded in 67.3s (5480 chars)"
+        )
+        assert isinstance(ev, AgentCall)
+        assert ev.agent == "CodeReviewer"
+
+    def test_cli_debugger_subprocess(self):
+        ev = _parse(
+            "[12:08:42] ClaudeCliDebugger: subprocess done in 412.3s (exit 0)"
+        )
+        assert isinstance(ev, SubprocessCall)
+        assert ev.agent == "ClaudeCliDebugger"
+        assert ev.duration_s == 412.3
+        assert ev.exit_code == 0
+
+    def test_refactorer_subprocess(self):
+        ev = _parse(
+            "[09:55:17] Refactorer: subprocess done in 198.1s (exit 0)"
+        )
+        assert isinstance(ev, SubprocessCall)
+        assert ev.agent == "Refactorer"
+        assert ev.duration_s == 198.1
+
+    def test_http_api_tester_completed(self):
+        ev = _parse(
+            "[11:33:07] HTTPApiTester(backend): completed in 73.2s"
+        )
+        assert isinstance(ev, SubprocessCall)
+        assert ev.agent == "HTTPApiTester"
+        assert ev.target == "backend"
+        assert ev.duration_s == 73.2
+
+    def test_web_ui_tester_completed(self):
+        ev = _parse(
+            "[11:48:22] WebUITester(frontend): completed in 184.6s"
+        )
+        assert isinstance(ev, SubprocessCall)
+        assert ev.agent == "WebUITester"
+        assert ev.target == "frontend"
+
+    def test_worker_tester_completed(self):
+        ev = _parse(
+            "[12:00:11] WorkerTester(worker): completed in 91.4s"
+        )
+        assert isinstance(ev, SubprocessCall)
+        assert ev.agent == "WorkerTester"
+        assert ev.target == "worker"
+
+    def test_integration_debugger_attempt(self):
+        ev = _parse(
+            "[12:01:55] IntegrationDebugger[backend, claude-cli:claude-opus-4-7 "
+            "attempt 2]: 281.5s exit 0"
+        )
+        assert isinstance(ev, SubprocessCall)
+        assert ev.agent == "IntegrationDebugger"
+        assert "backend" in ev.target
+        assert "claude-cli:claude-opus-4-7" in ev.target
+        assert "attempt2" in ev.target
+        assert ev.duration_s == 281.5
+        assert ev.exit_code == 0
 
     def test_coder_unit_done(self):
         ev = _parse(

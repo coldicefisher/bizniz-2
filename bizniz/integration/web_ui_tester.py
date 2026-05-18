@@ -12,6 +12,7 @@ Playwright treats the page as a black box.
 from __future__ import annotations
 
 import json
+import time
 from typing import Optional
 
 from bizniz.core.agent import BaseAIAgent
@@ -58,6 +59,9 @@ class WebUITester(BaseAIAgent):
             auth_contract=auth_contract,
         )
         self.add_messages_to_history([{"role": "user", "content": prompt}])
+        # Emit perf_log-friendly timing for the integration phase. Total
+        # wall includes the contract-shape retry round-trip when fired.
+        t0 = time.time()
         text, _, _ = self._ai_client.get_text(
             messages=self.message_history,
         )
@@ -83,6 +87,11 @@ class WebUITester(BaseAIAgent):
                     f"contaminated test file. Reason: {c2.message()[:400]}"
                 )
 
+        elapsed = time.time() - t0
+        print(
+            f"WebUITester({service.name}): completed in {elapsed:.1f}s",
+            flush=True,
+        )
         return source
 
     @staticmethod
