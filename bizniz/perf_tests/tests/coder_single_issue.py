@@ -85,7 +85,7 @@ def run(workspace: Path, fixture_root: Path) -> Dict[str, Any]:
     from bizniz.coder.claude_cli_coder import ClaudeCliCoder
     from bizniz.coder.types import Issue as CoderIssue
     from bizniz.quality_engineer.types import (
-        CapabilitySpec, EnrichedSpec, Scenario,
+        CapabilitySpec, EnrichedSpec,
     )
     from bizniz.workspace.local_workspace import LocalWorkspace
 
@@ -115,12 +115,11 @@ def run(workspace: Path, fixture_root: Path) -> Dict[str, Any]:
                 id="create_recipe",
                 name="Authenticated user can create a recipe",
                 description="POST /api/v1/recipes accepts a payload and stores it.",
-                scenarios=[
-                    Scenario(
-                        id="create_recipe_happy",
-                        name="happy path",
-                        description="valid payload + valid JWT → 201 + RecipeOut",
-                    ),
+                test_scenarios=[
+                    "happy path: valid payload + valid JWT → 201 + RecipeOut",
+                    "unauthenticated request → 401",
+                    "missing role → 403",
+                    "payload with owner_id → 422 (extra='forbid')",
                 ],
             ),
         ],
