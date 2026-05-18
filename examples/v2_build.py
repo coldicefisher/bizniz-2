@@ -685,14 +685,32 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         if use_claude_ux:
             from bizniz.clients.claude_cli.claude_cli_client import ClaudeCliClient
             from bizniz.ux_designer.pro_ux_designer import ProUXDesigner
+            from bizniz.ux_designer.storybook_driver import StorybookDriver
+            from bizniz.ux_designer.storybook_eval import StoryEvaluator
+            from bizniz.ux_designer.storybook_fix import StoryFixDispatcher
             # Text-only client for screenshot script generation.
             vision_client = ClaudeCliClient(model_name="claude-cli")
+            # Roadmap item 2 (2026-05-17): wire the Storybook UX
+            # gate so the per-story loop runs alongside the per-route
+            # loop. Storybook is the primary primitive-grade signal;
+            # per-route continues to cover page-level layout, auth
+            # flows, and multi-route nav that primitives can't.
+            # StoryEvaluator + StoryFixDispatcher default to the
+            # Claude CLI invokers (same dispatch shape as ProUXDesigner
+            # already uses). The driver tears down its server even
+            # on failure, so this can never leak processes.
+            storybook_driver = StorybookDriver(
+                evaluator=StoryEvaluator(on_status=on_status),
+                fix_dispatcher=StoryFixDispatcher(on_status=on_status),
+                on_status=on_status,
+            )
             return ProUXDesigner(
                 vision_client=vision_client,
                 coder_factory=ux_coder_factory,
                 on_status=on_status,
                 review_store=_review_store,
                 project_slug=project_slug,
+                storybook_driver=storybook_driver,
             )
 
         from bizniz.clients.gemini.gemini_client import GeminiClient

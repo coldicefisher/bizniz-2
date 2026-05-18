@@ -469,42 +469,11 @@ class ProUXDesigner(ClaudeUXDesigner):
         # route loop — different content target (primitives vs pages).
         # Result stashed on ``result["storybook"]``; per-route loop
         # below proceeds unchanged regardless.
-        if self._storybook_driver is not None:
-            _t0_sb = time.time()
-            screenshots_dir = ws_root_path / ".bizniz" / "storybook_shots"
-            screenshots_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                sb_result = self._storybook_driver.run(
-                    frontend_root=ws_root_path,
-                    screenshots_dir=screenshots_dir,
-                    design_lock_json=(
-                        lock.model_dump_json(indent=2)
-                        if lock is not None else None
-                    ),
-                )
-                result["storybook"] = sb_result.model_dump()
-                _log(
-                    self._on_status,
-                    f"ProUXDesigner: storybook loop done — "
-                    f"{sb_result.score.passing}/{sb_result.score.covered} "
-                    f"passing (mean={sb_result.score.mean})"
-                    if sb_result.skipped_reason is None
-                    else f"ProUXDesigner: storybook skipped — {sb_result.skipped_reason}"
-                )
-            except Exception as e:
-                # Defensive: never let a Storybook bug tank the
-                # whole UX phase. Log and continue with per-route.
-                _log(
-                    self._on_status,
-                    f"ProUXDesigner: storybook loop raised "
-                    f"{type(e).__name__}: {e} — continuing with per-route"
-                )
-                result["storybook"] = {
-                    "skipped_reason": (
-                        f"driver raised {type(e).__name__}: {e}"
-                    ),
-                }
-            self._record_timing("storybook", time.time() - _t0_sb)
+        self._run_storybook_loop(
+            ws_root_path=ws_root_path,
+            design_lock=lock,
+            result=result,
+        )
 
         _log(
             self._on_status,
@@ -960,6 +929,65 @@ class ProUXDesigner(ClaudeUXDesigner):
         """Accumulate elapsed seconds under ``key``. Multiple calls
         with the same key sum (e.g. per-iteration phases)."""
         self._timings[key] = self._timings.get(key, 0.0) + elapsed
+
+    def _run_storybook_loop(
+        self,
+        ws_root_path: Path,
+        design_lock,
+        result: Dict,
+    ) -> None:
+        """Run the Storybook UX gate (roadmap item 2). No-op when no
+        driver is wired (legacy compat for pre-D20 callers).
+
+        Result is mutated in place:
+        - ``result["storybook"]`` carries the driver's
+          ``StorybookRunResult`` dump on success
+        - ``result["storybook"] = {"skipped_reason": ...}`` on driver
+          exception (never re-raises — UX phase keeps going)
+
+        Per-route loop runs afterward regardless. Primitives are the
+        primary signal here; per-route still covers page-level
+        layout + multi-route flows.
+        """
+        if self._storybook_driver is None:
+            return
+        import time as _time
+        _t0_sb = _time.time()
+        screenshots_dir = ws_root_path / ".bizniz" / "storybook_shots"
+        screenshots_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            sb_result = self._storybook_driver.run(
+                frontend_root=ws_root_path,
+                screenshots_dir=screenshots_dir,
+                design_lock_json=(
+                    design_lock.model_dump_json(indent=2)
+                    if design_lock is not None else None
+                ),
+            )
+            result["storybook"] = sb_result.model_dump()
+            _log(
+                self._on_status,
+                f"ProUXDesigner: storybook loop done — "
+                f"{sb_result.score.passing}/{sb_result.score.covered} "
+                f"passing (mean={sb_result.score.mean})"
+                if sb_result.skipped_reason is None
+                else (
+                    f"ProUXDesigner: storybook skipped — "
+                    f"{sb_result.skipped_reason}"
+                )
+            )
+        except Exception as e:
+            _log(
+                self._on_status,
+                f"ProUXDesigner: storybook loop raised "
+                f"{type(e).__name__}: {e} — continuing with per-route"
+            )
+            result["storybook"] = {
+                "skipped_reason": (
+                    f"driver raised {type(e).__name__}: {e}"
+                ),
+            }
+        self._record_timing("storybook", _time.time() - _t0_sb)
 
     def _format_timings(self) -> str:
         """Human-readable per-phase summary, longest first."""

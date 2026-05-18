@@ -21,10 +21,15 @@ deferred 2026-05-16; remaining items renumbered to 11+12.
    the harness: re-enrich at 0.4-0.6, soft gate at <0.4. Meta-pattern
    audit + retrofit for Architect/Planner/Coder/Tester moves to
    item 9.
-2. **Finish UX with Storybook** — make the interaction-test phase
-   the default UX gate (not screenshot-only loop). Two sub-tickets
-   already filed: design-system-lock (SHIPPED `fd72c94`) and
-   orphan-shot-fallback (open).
+2. ✅ **Finish UX with Storybook** — SHIPPED 2026-05-17. Storybook
+   driver is now wired into ProUXDesigner via v2_build.py
+   (`storybook_driver` constructor arg); per-story loop runs
+   alongside per-route. React skeleton ships 4 starter primitives
+   (Button, FormInput, Modal, Alert) with `.stories.tsx`, plus the
+   existing Toast — so Storybook discovery has something to find
+   on every fresh project. Sub-tickets shipped along the way:
+   design-system-lock (`fd72c94`), orphan-shot-fallback (today).
+   Angular skeleton variants deferred (React loop proves out first).
 3. ✅ **Add version control** — SHIPPED 2026-05-15 (commit
    `8c65435`). `ProjectGit` writes `m0` tag after provisioner +
    `m<N>-done` tags after each milestone. Phase-level commits not
