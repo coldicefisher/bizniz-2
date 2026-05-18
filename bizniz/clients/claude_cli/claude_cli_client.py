@@ -24,81 +24,24 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import time
 import uuid
-from datetime import datetime, timedelta
-from typing import Any, Callable, List, Optional, Tuple
-try:
-    from zoneinfo import ZoneInfo  # Python 3.9+
-except ImportError:  # pragma: no cover
-    ZoneInfo = None  # type: ignore
+from typing import Any, Callable, List, Optional
 
 from bizniz.clients.base_ai_client import BaseAIClient
 from bizniz.clients.chatgpt.messages import Message, MessageList
 from bizniz.clients.chatgpt.types.response_format import ResponseFormat
-
-
-_DEFAULT_TIMEOUT_S = 1800.0
-
-# Max wall-clock wait when sleeping for a Max-plan usage-cap reset.
-# 5-hour windows are typical; cap at 6h so a bug in time parsing
-# can't sleep forever. Overridable via env.
-_DEFAULT_USAGE_CAP_MAX_WAIT_S = 6 * 60 * 60
-
-# Matches the reset-time string the CLI emits on a Max-plan usage cap:
-#   "You've hit your limit · resets 11:20am (America/Los_Angeles)"
-#   "resets 3:05pm (UTC)"
-_RESET_RE = re.compile(
-    r"resets?\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>[ap]m)"
-    r"(?:\s*\((?P<tz>[A-Za-z][A-Za-z0-9_/+\-]*)\))?",
-    re.IGNORECASE,
+# Re-exported for backwards compat with tests that imported these
+# symbols from this module before the shared retry helper landed.
+from bizniz.clients.claude_cli.retry import (  # noqa: F401
+    _DEFAULT_USAGE_CAP_MAX_WAIT_S,
+    parse_usage_cap_reset as _parse_usage_cap_reset,
 )
 
 
-def _parse_usage_cap_reset(body: str) -> Optional[float]:
-    """Parse the reset-time string from a Max-plan 429 body and return
-    seconds-until-reset (with a 30s buffer past the actual reset).
-
-    Returns None for 429s that don't include a parseable reset time
-    (i.e. transient server-side throttles — caller falls back to the
-    short backoff schedule).
-
-    Past-but-recent reset times (within 60s) are treated as "now" so
-    a slightly-late message doesn't accidentally schedule a 24-hour
-    wait. Older-than-60s past times assume the same time tomorrow.
-    """
-    if not body:
-        return None
-    m = _RESET_RE.search(body)
-    if not m:
-        return None
-    hour = int(m.group("hour"))
-    minute = int(m.group("minute"))
-    ampm = m.group("ampm").lower()
-    tz_name = m.group("tz") or ""
-    if ampm == "pm" and hour != 12:
-        hour += 12
-    elif ampm == "am" and hour == 12:
-        hour = 0
-    tz = None
-    if tz_name and ZoneInfo is not None:
-        try:
-            tz = ZoneInfo(tz_name)
-        except Exception:
-            tz = None
-    now = datetime.now(tz) if tz else datetime.now()
-    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    delta = (target - now).total_seconds()
-    if delta < -60:
-        # Reset already happened > 1 min ago — must mean tomorrow.
-        target = target + timedelta(days=1)
-        delta = (target - now).total_seconds()
-    if delta < 0:
-        delta = 0  # very recent reset; treat as "now"
-    return delta + 30.0  # 30s buffer past the published reset
+_DEFAULT_TIMEOUT_S = 1800.0
 
 
 class ClaudeCliClientError(Exception):
@@ -262,125 +205,30 @@ class ClaudeCliClient(BaseAIClient):
         # The prompt goes via stdin — robust for arbitrary length and
         # avoids arg-list size limits.
 
-        # Retry-with-backoff for transient server-side rate limits
-        # (HTTP 429 from Anthropic's CLI backend — distinct from Max
-        # plan usage caps). Schedule: 10s, 30s, 60s, then give up.
-        # Total ceiling: ~100s + 3 cli round-trips. Errs on the side
-        # of finishing the work over failing fast — being throttled
-        # is the most common transient and the retry budget caller
-        # uses (3 attempts in call_with_retry) burns through it in
-        # 5 seconds without this.
-        #
-        # Max-plan USAGE-CAP 429s (body contains "resets HH:MMam") are
-        # handled separately: we parse the reset time and sleep until
-        # then (capped by BIZNIZ_CLAUDE_USAGE_CAP_MAX_WAIT_S or the
-        # 6h default). That makes long-running builds survive a
-        # Max-window roll without crashing the whole pipeline.
-        backoff_schedule = [10.0, 30.0, 60.0]
-        max_usage_wait = float(
-            os.environ.get(
-                "BIZNIZ_CLAUDE_USAGE_CAP_MAX_WAIT_S",
-                str(_DEFAULT_USAGE_CAP_MAX_WAIT_S),
-            )
-        )
+        # 429 retry handling (transient backoff + usage-cap reset wait)
+        # lives in the shared helper so ClaudeCliCoder gets the same
+        # treatment via the same code path.
+        from bizniz.clients.claude_cli.retry import run_with_429_retry
+
         t0 = time.time()
-        proc = None
-        last_429_body = ""
-        transient_attempt = 0  # only incremented on transient 429s
-        while True:
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    input=prompt_text,
-                    capture_output=True,
-                    text=True,
-                    timeout=self._timeout_s,
-                )
-            except subprocess.TimeoutExpired as e:
-                raise ClaudeCliClientError(
-                    f"claude --print timed out after {self._timeout_s:.0f}s"
-                ) from e
-            except FileNotFoundError as e:
-                raise ClaudeCliClientError(
-                    f"claude binary not found at runtime: {e}"
-                ) from e
-
-            # Detect 429 inside the JSON payload — the CLI exits 1
-            # for 429s but ``proc.stdout`` is still well-formed JSON
-            # with ``api_error_status: 429``. Parse pre-emptively so
-            # we can backoff on this path.
-            is_429 = False
-            try:
-                early = json.loads(proc.stdout) if proc.stdout else {}
-                if (
-                    early.get("api_error_status") == 429
-                    or "Rate limited" in (early.get("result") or "")
-                ):
-                    is_429 = True
-                    last_429_body = (early.get("result") or "")[:200]
-            except Exception:
-                pass
-
-            if not is_429:
-                break  # Either success or a non-retryable error.
-
-            # Usage-cap path: body has a parseable "resets HH:MMam"
-            # string → sleep until then (capped) and retry indefinitely
-            # (the work isn't a transient blip; it's a wall-clock wait).
-            usage_cap_wait = _parse_usage_cap_reset(last_429_body)
-            if usage_cap_wait is not None:
-                actual_wait = min(usage_cap_wait, max_usage_wait)
-                import sys as _sys
-                print(
-                    f"  [ClaudeCliClient] Max-plan usage cap hit, "
-                    f"sleeping {actual_wait:.0f}s "
-                    f"({actual_wait/60:.1f} min) until reset window "
-                    f"rolls — {last_429_body[:120]}",
-                    file=_sys.stderr, flush=True,
-                )
-                # Long sleeps log progress every 5 min so the user
-                # sees the process is alive.
-                slept = 0.0
-                while slept < actual_wait:
-                    chunk = min(300.0, actual_wait - slept)
-                    time.sleep(chunk)
-                    slept += chunk
-                    if slept < actual_wait:
-                        remaining = actual_wait - slept
-                        print(
-                            f"  [ClaudeCliClient] still waiting for "
-                            f"usage-cap reset — {remaining/60:.1f} min "
-                            f"to go...",
-                            file=_sys.stderr, flush=True,
-                        )
-                # Usage-cap retries are unbounded — keep going until
-                # we get a real answer. Reset the transient-attempt
-                # counter so the small backoff schedule isn't burned.
-                continue
-
-            if transient_attempt >= len(backoff_schedule):
-                # Exhausted transient retries.
-                raise ClaudeCliClientError(
-                    f"claude --print rate-limited (429) after "
-                    f"{len(backoff_schedule) + 1} attempts: "
-                    f"{last_429_body}"
-                )
-            wait_s = backoff_schedule[transient_attempt]
-            # Best-effort status log so the user sees what's happening.
-            try:
-                from bizniz.cost import get_tracker as _gt
-                _ = _gt()
-            except Exception:
-                pass
-            import sys as _sys
-            print(
-                f"  [ClaudeCliClient] transient 429 (no reset time), "
-                f"backing off {wait_s:.0f}s before retry "
-                f"({transient_attempt + 1}/{len(backoff_schedule)})...",
-                file=_sys.stderr, flush=True,
+        try:
+            proc = run_with_429_retry(
+                cmd,
+                input=prompt_text,
+                timeout=self._timeout_s,
+                log_prefix="[ClaudeCliClient]",
             )
-            time.sleep(wait_s)
-            transient_attempt += 1
+        except subprocess.TimeoutExpired as e:
+            raise ClaudeCliClientError(
+                f"claude --print timed out after {self._timeout_s:.0f}s"
+            ) from e
+        except FileNotFoundError as e:
+            raise ClaudeCliClientError(
+                f"claude binary not found at runtime: {e}"
+            ) from e
+        except RuntimeError as e:
+            # Transient retries exhausted.
+            raise ClaudeCliClientError(str(e)) from e
 
         if proc.returncode != 0:
             raise ClaudeCliClientError(

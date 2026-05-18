@@ -208,16 +208,23 @@ class ClaudeCliCoder:
         env["BIZNIZ_PROJECT_ROOT"] = str(self._project_root_for_mcp())
         env["BIZNIZ_JOB_ID"] = self._infer_job_id() or ""
 
+        from bizniz.clients.claude_cli.retry import run_with_429_retry
+
         t0 = time.time()
         try:
-            proc = subprocess.run(
+            # Shared retry helper: handles transient 429s (10/30/60s
+            # backoff) and Max-plan usage-cap 429s (sleep until the
+            # window resets, capped by BIZNIZ_CLAUDE_USAGE_CAP_MAX_WAIT_S).
+            # Without this, the recipe_v2 M3 failure mode recurs — 429
+            # exits 1 with a well-formed JSON body, the old code raised
+            # CoderError on returncode != 0, and the issue was lost.
+            proc = run_with_429_retry(
                 cmd,
                 input=user_prompt,
-                capture_output=True,
-                text=True,
                 timeout=self._timeout_s,
                 cwd=str(ws_root),
                 env=env,
+                log_prefix=f"[ClaudeCliCoder {issue.id}]",
             )
         except subprocess.TimeoutExpired as e:
             self._log(
@@ -231,6 +238,10 @@ class ClaudeCliCoder:
             raise CoderError(
                 f"claude binary disappeared between init and run: {e}"
             ) from e
+        except RuntimeError as e:
+            # Transient 429 retries exhausted — surface as CoderError so
+            # the orchestrator's stall/escalation path picks it up.
+            raise CoderError(str(e)) from e
 
         elapsed = time.time() - t0
         self._log(

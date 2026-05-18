@@ -40,7 +40,7 @@ class TestParseUsageCapReset:
         tz = ZoneInfo("America/Los_Angeles")
         fake_now = datetime(2026, 5, 15, 10, 50, tzinfo=tz)
         with patch(
-            "bizniz.clients.claude_cli.claude_cli_client.datetime"
+            "bizniz.clients.claude_cli.retry.datetime"
         ) as m:
             m.now.return_value = fake_now
             # Keep the real datetime constructor usable for the
@@ -56,7 +56,7 @@ class TestParseUsageCapReset:
         tz = ZoneInfo("America/Los_Angeles")
         fake_now = datetime(2026, 5, 15, 14, 0, tzinfo=tz)
         with patch(
-            "bizniz.clients.claude_cli.claude_cli_client.datetime"
+            "bizniz.clients.claude_cli.retry.datetime"
         ) as m:
             m.now.return_value = fake_now
             m.side_effect = lambda *a, **kw: datetime(*a, **kw)
@@ -72,7 +72,7 @@ class TestParseUsageCapReset:
         tz = ZoneInfo("UTC")
         fake_now = datetime(2026, 5, 15, 23, 0, tzinfo=tz)
         with patch(
-            "bizniz.clients.claude_cli.claude_cli_client.datetime"
+            "bizniz.clients.claude_cli.retry.datetime"
         ) as m:
             m.now.return_value = fake_now
             m.side_effect = lambda *a, **kw: datetime(*a, **kw)
@@ -88,7 +88,7 @@ class TestParseUsageCapReset:
         tz = ZoneInfo("UTC")
         fake_now = datetime(2026, 5, 15, 10, 0, tzinfo=tz)
         with patch(
-            "bizniz.clients.claude_cli.claude_cli_client.datetime"
+            "bizniz.clients.claude_cli.retry.datetime"
         ) as m:
             m.now.return_value = fake_now
             m.side_effect = lambda *a, **kw: datetime(*a, **kw)
@@ -106,7 +106,7 @@ class TestParseUsageCapReset:
         # rolling to tomorrow.
         fake_now = datetime(2026, 5, 15, 10, 0, 30, tzinfo=tz)
         with patch(
-            "bizniz.clients.claude_cli.claude_cli_client.datetime"
+            "bizniz.clients.claude_cli.retry.datetime"
         ) as m:
             m.now.return_value = fake_now
             m.side_effect = lambda *a, **kw: datetime(*a, **kw)
