@@ -39,6 +39,7 @@ from bizniz.driver.gates import GatePolicy
 from bizniz.driver.integration_phase import IntegrationPhase
 from bizniz.driver.final_tester import FinalTester
 from bizniz.driver.smoke_phase import SmokePhase
+from bizniz.driver.document_recovery import DocumentRecovery
 from bizniz.driver.smoke_recovery import SmokeRecovery
 from bizniz.driver.ux_phase import UXPhase
 from bizniz.driver.refactor_phase import RefactorPhase
@@ -590,6 +591,20 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         refactorer_factory=refactorer_factory, on_status=on_status,
     )
 
+    # DocumentRecovery — agent that writes missing critical docs
+    # when HumanDocsGenerator falls short (D17, 2026-05-17). Only
+    # wired when `claude` is on PATH; otherwise the critical-docs
+    # gate is a no-op (legacy best-effort behavior preserved).
+    import shutil as _shutil_doc
+    document_recovery = (
+        DocumentRecovery(
+            project_root=Path(project_root),
+            on_status=on_status,
+        )
+        if _shutil_doc.which("claude") is not None
+        else None
+    )
+
     gate_mode = "auto" if args.auto else ("interactive" if args.interactive else "strict")
     gates = GatePolicy(mode=gate_mode, on_status=on_status)
 
@@ -653,6 +668,10 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
             config, "debugger_stall_threshold", 5,
         ),
         repair_stall_threshold=getattr(
+            config, "debugger_stall_threshold", 5,
+        ),
+        document_recovery=document_recovery,
+        document_recovery_stall_threshold=getattr(
             config, "debugger_stall_threshold", 5,
         ),
         on_status=on_status,

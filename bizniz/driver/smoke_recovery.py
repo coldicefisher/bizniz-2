@@ -1,75 +1,52 @@
-"""SmokeRecovery + MultiTierSmokeRecovery — agents that attempt to
-fix a failing smoke phase before the pipeline hard-halts.
+"""SmokeRecovery — single-session Claude CLI agent for smoke failures.
 
-The single-shot ``SmokeRecovery`` runs ONE Claude CLI session and
-returns. Roadmap item 7C adds ``MultiTierSmokeRecovery`` —
-an escalation wrapper that walks a tier list (cheap → mid →
-expensive), running each tier's SmokeRecovery + re-verifying smoke
-between attempts. Use multi-tier when project complexity warrants
-multiple shots before halting; use single-shot when keeping
-recovery cheap matters more.
+Refactored 2026-05-17 (D14) to inherit from
+``bizniz.lib.agentic_phase_recovery.AgenticPhaseRecovery``. The
+plumbing (subprocess invocation, JSON parsing, timeout, action
+extraction) lives in the base class; this file owns only the
+smoke-focused system prompt + user-message format + the
+``MultiTierSmokeRecovery`` escalation wrapper.
 
 When ``SmokePhase`` finds a critical failure (route 5xx, /health
-down, /api/login broken), the pipeline currently halts at the
-``smoke_failed`` gate and waits for a human. Most smoke failures
-fall into a small set of cheap-to-fix patterns:
+down, /api/login broken), the milestone loop dispatches this agent.
+It gets one Claude CLI session with file + bash tools to restart
+stale containers, run missing migrations, fix env-var drift, or
+make surgical application-code edits. On return, the harness
+re-runs ``SmokePhase`` — the external re-check is the source of
+truth, not the agent's self-report.
 
-  - Stale uvicorn process (new SQLAlchemy models added in a later
-    milestone never registered → tables missing). Recovery:
-    ``docker compose restart <backend>``.
-  - Frontend dev container holding a cached bundle after a Vite
-    config change. Recovery: ``docker compose restart <frontend>``.
-  - Database missing a manually-required migration. Recovery: run
-    the migration inside the container.
-  - Configuration drift (env var set wrong, file not synced).
-    Recovery: edit the file, restart.
-
-This agent dispatches one Claude CLI session with full Bash + file
-tools, hands it the smoke failures + stack context, and gives it a
-fixed-budget chance to fix things. On return, the caller re-runs
-``SmokePhase``. If the second run passes, the pipeline continues
-normally. If it still fails, the hard-gate fires as before — recovery
-just got one shot.
-
-Design choices:
-  - Single Coder pass (no escalation chain) — keep recovery cheap.
-    If it can't fix in one shot with the sticky recovery log, the
-    bug isn't "state drift" — it's structural and needs human eyes.
-  - Tight allowed-tools (Bash + Read + Edit + Glob + Grep + Write)
-    — recovery may need to edit a config file.
-  - Bounded turn budget (default 30 tool iterations) — enough to
-    inspect logs + restart a container + re-curl, not enough to
-    rewrite a service.
+The iterative loop + ProgressTracker live in
+``MilestoneLoop._maybe_recover_smoke`` (D3 shipped 2026-05-17).
+This module just owns the per-dispatch payload.
 """
 from __future__ import annotations
 
-import json
-import os
-import shutil
-import subprocess
-import time
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from pydantic import BaseModel, Field
+from bizniz.lib.agentic_phase_recovery import (
+    AgenticPhaseRecovery,
+    DEFAULT_TIMEOUT_S as _DEFAULT_TIMEOUT_S,
+    PhaseRecoveryResult,
+)
 
 
-_DEFAULT_TIMEOUT_S = 900.0  # 15 min — generous but bounded
-_ALLOWED_TOOLS = ["Bash", "Read", "Edit", "Glob", "Grep", "Write"]
+# Public alias — preserves the old name for any existing imports.
+# Same shape; identical fields. PhaseRecoveryResult is what callers
+# get back from ``recover()``.
+SmokeRecoveryResult = PhaseRecoveryResult
 
 
-class SmokeRecoveryResult(BaseModel):
-    """Outcome of one recovery attempt."""
-    attempted: bool = False
-    succeeded: bool = False
-    summary: str = ""
-    actions_taken: List[str] = Field(default_factory=list)
-    elapsed_s: float = 0.0
-    raw_response: str = ""
+class SmokeRecovery(AgenticPhaseRecovery):
+    """Single-shot Claude CLI agent that tries to fix smoke failures.
 
+    Inherits all CLI plumbing from ``AgenticPhaseRecovery``. The
+    smoke-focused system prompt is the class-level ``system_prompt``;
+    this class only overrides ``build_user_prompt`` to format the
+    failure list + stack context that the model needs.
+    """
 
-class SmokeRecovery:
-    """Single-shot Claude CLI agent that tries to fix smoke failures."""
+    label = "SmokeRecovery"
 
     def __init__(
         self,
@@ -79,178 +56,18 @@ class SmokeRecovery:
         timeout_seconds: float = _DEFAULT_TIMEOUT_S,
         on_status: Optional[Callable[[str], None]] = None,
         fallback_model: Optional[str] = None,
-    ):
+    ) -> None:
+        super().__init__(
+            project_root=project_root,
+            command=command,
+            timeout_seconds=timeout_seconds,
+            on_status=on_status,
+            fallback_model=fallback_model,
+        )
         self._compose_path = compose_path
-        self._project_root = Path(project_root)
-        self._command = command
-        self._timeout_s = timeout_seconds
-        self._on_status = on_status
-        self._fallback_model = (
-            fallback_model
-            or os.environ.get("BIZNIZ_CLAUDE_FALLBACK_MODEL")
-        )
 
-    def _log(self, msg: str) -> None:
-        if self._on_status:
-            try:
-                self._on_status(msg)
-            except Exception:
-                pass
-
-    def recover(
-        self,
-        critical_failures: List[str],
-        service_names: List[str],
-        milestone_title: str,
-    ) -> SmokeRecoveryResult:
-        """Dispatch one Claude CLI session to attempt recovery.
-
-        Returns a ``SmokeRecoveryResult``. Caller re-runs SmokePhase
-        and decides whether to proceed (succeeded=True or re-run
-        passes) or hard-halt (succeeded=False and re-run still
-        fails).
-        """
-        if shutil.which(self._command) is None:
-            self._log("SmokeRecovery: claude binary not on PATH; skipping")
-            return SmokeRecoveryResult(
-                attempted=False,
-                succeeded=False,
-                summary="claude binary not available",
-            )
-
-        prompt = self._build_prompt(
-            critical_failures=critical_failures,
-            service_names=service_names,
-            milestone_title=milestone_title,
-        )
-        cmd = [
-            self._command, "--print",
-            "--output-format=json",
-            "--append-system-prompt", _SYSTEM_PROMPT,
-            "--permission-mode", "bypassPermissions",
-            "--allowed-tools", " ".join(_ALLOWED_TOOLS),
-            "--add-dir", str(self._project_root),
-        ]
-        if self._fallback_model:
-            cmd.extend(["--fallback-model", self._fallback_model])
-
-        self._log(
-            f"SmokeRecovery: dispatching for {len(critical_failures)} "
-            f"failure(s); milestone='{milestone_title}'"
-        )
-        t0 = time.time()
-        try:
-            proc = subprocess.run(
-                cmd,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout_s,
-                cwd=str(self._project_root),
-            )
-        except subprocess.TimeoutExpired:
-            elapsed = time.time() - t0
-            self._log(
-                f"SmokeRecovery: timed out after {elapsed:.0f}s"
-            )
-            return SmokeRecoveryResult(
-                attempted=True,
-                succeeded=False,
-                summary=f"recovery timed out after {self._timeout_s:.0f}s",
-                elapsed_s=elapsed,
-            )
-        except FileNotFoundError as e:
-            return SmokeRecoveryResult(
-                attempted=False,
-                succeeded=False,
-                summary=f"claude binary missing at runtime: {e}",
-            )
-        elapsed = time.time() - t0
-
-        if proc.returncode != 0:
-            self._log(
-                f"SmokeRecovery: claude exited {proc.returncode}: "
-                f"{(proc.stderr or '')[:200]}"
-            )
-            return SmokeRecoveryResult(
-                attempted=True,
-                succeeded=False,
-                summary=f"claude exited {proc.returncode}",
-                elapsed_s=elapsed,
-                raw_response=(proc.stdout or "")[:2000],
-            )
-
-        try:
-            payload = json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            return SmokeRecoveryResult(
-                attempted=True,
-                succeeded=False,
-                summary="non-JSON CLI output",
-                elapsed_s=elapsed,
-                raw_response=(proc.stdout or "")[:2000],
-            )
-        if payload.get("is_error"):
-            return SmokeRecoveryResult(
-                attempted=True,
-                succeeded=False,
-                summary="claude is_error=true",
-                elapsed_s=elapsed,
-                raw_response=(payload.get("result") or "")[:2000],
-            )
-
-        result_text = payload.get("result") or ""
-        actions = self._extract_actions(result_text)
-        # Model self-reports success at the end of recovery — we
-        # still re-run smoke to verify externally. This flag is just
-        # a quick "did anything happen" signal.
-        self_reported_ok = (
-            "RECOVERY SUCCESS" in result_text
-            or "recovery succeeded" in result_text.lower()
-        )
-        self._log(
-            f"SmokeRecovery: returned in {elapsed:.1f}s — "
-            f"{len(actions)} action(s); self_reported_ok={self_reported_ok}"
-        )
-        return SmokeRecoveryResult(
-            attempted=True,
-            succeeded=self_reported_ok,
-            summary=result_text[:400],
-            actions_taken=actions,
-            elapsed_s=elapsed,
-            raw_response=result_text[:4000],
-        )
-
-    def _build_prompt(
-        self,
-        critical_failures: List[str],
-        service_names: List[str],
-        milestone_title: str,
-    ) -> str:
-        failure_block = "\n".join(f"  - {f}" for f in critical_failures)
-        services_block = ", ".join(service_names) if service_names else "(unknown)"
-        return _USER_TEMPLATE.format(
-            milestone_title=milestone_title,
-            failure_block=failure_block,
-            services_block=services_block,
-            compose_path=self._compose_path,
-            project_root=str(self._project_root),
-        )
-
-    @staticmethod
-    def _extract_actions(result_text: str) -> List[str]:
-        """Pull a short list of ``ACTION:`` lines the model emits, for
-        diagnostics. Best-effort — empty list if model didn't emit
-        the expected format."""
-        actions: List[str] = []
-        for line in result_text.splitlines():
-            stripped = line.strip()
-            if stripped.upper().startswith("ACTION:"):
-                actions.append(stripped[7:].strip()[:200])
-        return actions
-
-
-_SYSTEM_PROMPT = """\
+    # Class attribute — focused prompt for smoke recovery.
+    system_prompt = """\
 You are a smoke-test recovery agent for the bizniz build pipeline.
 
 The smoke phase makes simple HTTP probes against a running docker
@@ -304,7 +121,9 @@ What NOT to do:
 Your toolset: Bash (for ``docker compose``, ``docker exec``, ``curl``,
 ``psql``), Read, Edit, Write, Glob, Grep. You have permissive
 permissions — no human will be asked to approve individual tool
-calls.
+calls. Use the discovery tools (Read/Glob/Grep) explicitly to
+locate the failing code — don't assume the workspace is already
+loaded.
 
 Workflow:
   1. ``docker logs --tail 50 <service>`` for each failing service to
@@ -330,6 +149,40 @@ truth. So don't lie; if your fix didn't take, say RECOVERY FAILED
 so the human can see the right state.
 """
 
+    def build_user_prompt(
+        self,
+        *,
+        critical_failures: List[str],
+        service_names: List[str],
+        milestone_title: str,
+    ) -> str:
+        failure_block = "\n".join(f"  - {f}" for f in critical_failures)
+        services_block = ", ".join(service_names) if service_names else "(unknown)"
+        return _USER_TEMPLATE.format(
+            milestone_title=milestone_title,
+            failure_block=failure_block,
+            services_block=services_block,
+            compose_path=self._compose_path,
+            project_root=str(self._project_root),
+        )
+
+    # Back-compat: old code called ``recover(critical_failures=..., ...)``.
+    # The base class's ``recover(**context)`` handles that natively —
+    # all positional/keyword shapes still work. This explicit method
+    # only exists so subclass signature is preserved in IDE / tooling
+    # introspection.
+    def recover(
+        self,
+        critical_failures: List[str],
+        service_names: List[str],
+        milestone_title: str,
+    ) -> PhaseRecoveryResult:
+        return super().recover(
+            critical_failures=critical_failures,
+            service_names=service_names,
+            milestone_title=milestone_title,
+        )
+
 
 _USER_TEMPLATE = """\
 SMOKE FAILURE — milestone: {milestone_title}
@@ -353,6 +206,9 @@ RECOVERY FAILED) when done.
 # ── Multi-tier wrapper (item 7C) ─────────────────────────────────
 
 
+from typing import Callable as _Callable  # noqa: E402
+from pydantic import BaseModel as _BaseModel, Field as _Field  # noqa: E402
+
 from bizniz.lib.tier_escalation import (  # noqa: E402
     AttemptOutcome, EscalationResult, TierSpec, escalate,
 )
@@ -374,8 +230,8 @@ class MultiTierSmokeRecovery:
     def __init__(
         self,
         tiers: List[TierSpec["SmokeRecovery"]],
-        verify_smoke: Callable[[], bool],
-        on_status: Optional[Callable[[str], None]] = None,
+        verify_smoke: _Callable[[], bool],
+        on_status: Optional[_Callable[[str], None]] = None,
     ) -> None:
         if not tiers:
             raise ValueError(
@@ -453,10 +309,10 @@ class MultiTierSmokeRecovery:
         )
 
 
-class MultiTierRecoveryResult(BaseModel):
+class MultiTierRecoveryResult(_BaseModel):
     """End-of-escalation result for ``MultiTierSmokeRecovery``."""
     succeeded: bool = False
     final_tier_label: Optional[str] = None
     total_attempts: int = 0
     summary: str = ""
-    tier_history: List[str] = Field(default_factory=list)
+    tier_history: List[str] = _Field(default_factory=list)

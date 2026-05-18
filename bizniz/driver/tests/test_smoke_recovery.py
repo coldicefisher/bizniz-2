@@ -25,7 +25,12 @@ def _make(**kwargs):
 
 
 class TestExtractActions:
+    """Action-line + RECOVERY-SUCCESS sentinel parsing moved to
+    ``bizniz.lib.agentic_phase_recovery`` (D14, 2026-05-17).
+    Tests now exercise the helpers directly."""
+
     def test_pulls_action_lines(self):
+        from bizniz.lib.agentic_phase_recovery import _extract_action_lines
         text = (
             "I'll restart the backend.\n"
             "ACTION: docker compose restart backend\n"
@@ -33,32 +38,32 @@ class TestExtractActions:
             "ACTION: curl /api/v1/contacts → 200\n"
             "RECOVERY SUCCESS: tables created on lifespan re-run.\n"
         )
-        actions = SmokeRecovery._extract_actions(text)
+        actions = _extract_action_lines(text)
         assert actions == [
             "docker compose restart backend",
             "curl /api/v1/contacts → 200",
         ]
 
     def test_no_actions_returns_empty(self):
+        from bizniz.lib.agentic_phase_recovery import _extract_action_lines
         text = "Could not diagnose. RECOVERY FAILED: needs human."
-        actions = SmokeRecovery._extract_actions(text)
-        assert actions == []
+        assert _extract_action_lines(text) == []
 
     def test_case_insensitive_action(self):
+        from bizniz.lib.agentic_phase_recovery import _extract_action_lines
         text = "action: did the thing\nAction: did the other"
-        actions = SmokeRecovery._extract_actions(text)
-        assert len(actions) == 2
+        assert len(_extract_action_lines(text)) == 2
 
     def test_truncates_long_actions(self):
+        from bizniz.lib.agentic_phase_recovery import _extract_action_lines
         text = "ACTION: " + ("x" * 500)
-        actions = SmokeRecovery._extract_actions(text)
-        assert len(actions[0]) <= 200
+        assert len(_extract_action_lines(text)[0]) <= 200
 
 
 class TestRecoverFlow:
     def test_no_claude_binary_skips_attempt(self):
         with patch(
-            "bizniz.driver.smoke_recovery.shutil.which",
+            "bizniz.lib.agentic_phase_recovery.shutil.which",
             return_value=None,
         ):
             r = _make()
@@ -82,10 +87,10 @@ class TestRecoverFlow:
             "session_id": "s",
         })
         with patch(
-            "bizniz.driver.smoke_recovery.shutil.which",
+            "bizniz.lib.agentic_phase_recovery.shutil.which",
             return_value="/usr/bin/claude",
         ), patch(
-            "bizniz.driver.smoke_recovery.subprocess.run"
+            "bizniz.lib.agentic_phase_recovery.subprocess.run"
         ) as run:
             run.return_value = MagicMock(
                 returncode=0, stdout=success_stdout, stderr="",
@@ -115,10 +120,10 @@ class TestRecoverFlow:
             "session_id": "s",
         })
         with patch(
-            "bizniz.driver.smoke_recovery.shutil.which",
+            "bizniz.lib.agentic_phase_recovery.shutil.which",
             return_value="/usr/bin/claude",
         ), patch(
-            "bizniz.driver.smoke_recovery.subprocess.run"
+            "bizniz.lib.agentic_phase_recovery.subprocess.run"
         ) as run:
             run.return_value = MagicMock(
                 returncode=0, stdout=failed_stdout, stderr="",
@@ -134,10 +139,10 @@ class TestRecoverFlow:
 
     def test_is_error_returns_failure(self):
         with patch(
-            "bizniz.driver.smoke_recovery.shutil.which",
+            "bizniz.lib.agentic_phase_recovery.shutil.which",
             return_value="/usr/bin/claude",
         ), patch(
-            "bizniz.driver.smoke_recovery.subprocess.run"
+            "bizniz.lib.agentic_phase_recovery.subprocess.run"
         ) as run:
             run.return_value = MagicMock(
                 returncode=0,
@@ -173,10 +178,10 @@ class TestRecoverFlow:
 
     def test_fallback_model_appended_when_set(self):
         with patch(
-            "bizniz.driver.smoke_recovery.shutil.which",
+            "bizniz.lib.agentic_phase_recovery.shutil.which",
             return_value="/usr/bin/claude",
         ), patch(
-            "bizniz.driver.smoke_recovery.subprocess.run"
+            "bizniz.lib.agentic_phase_recovery.subprocess.run"
         ) as run:
             run.return_value = MagicMock(
                 returncode=0,

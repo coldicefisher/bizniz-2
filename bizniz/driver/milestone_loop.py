@@ -28,6 +28,7 @@ from bizniz.code_reviewer.types import CodeReviewReport
 from bizniz.driver.gates import GatePolicy, GateViolation
 from bizniz.driver.integration_phase import IntegrationPhase, IntegrationPhaseResult
 from bizniz.driver.final_tester import FinalTester
+from bizniz.driver.document_recovery import DocumentRecovery
 from bizniz.driver.smoke_phase import SmokePhase, SmokePhaseResult
 from bizniz.driver.smoke_recovery import SmokeRecovery
 from bizniz.lib.progress_tracker import ProgressTracker
@@ -120,6 +121,13 @@ class MilestoneLoop:
         # Default 5 matches BiznizConfig.debugger_stall_threshold. Set to
         # 1 to recover legacy single-shot behavior.
         smoke_recovery_stall_threshold: int = 5,
+        # Critical-docs recovery (D17, 2026-05-17). When wired,
+        # MilestoneLoop runs ``_maybe_recover_document`` after the
+        # DOCUMENT phase to verify deterministic-required docs exist
+        # and dispatch the recovery agent on misses. ``None`` makes
+        # the gate a no-op (legacy best-effort docs behavior).
+        document_recovery: Optional["DocumentRecovery"] = None,
+        document_recovery_stall_threshold: int = 5,
         # Progress-based stop threshold for the review/repair loop
         # (D5, 2026-05-17). Replaces the legacy ``repair_budget`` hard
         # cap. The loop iterates as long as defect count (missing
@@ -143,6 +151,10 @@ class MilestoneLoop:
         self._smoke_recovery_stall_threshold = max(1, int(smoke_recovery_stall_threshold))
         self._repair_stall_threshold = max(1, int(repair_stall_threshold))
         self._repair_max_iterations = max(1, int(repair_max_iterations))
+        self._document_recovery = document_recovery
+        self._document_recovery_stall_threshold = max(
+            1, int(document_recovery_stall_threshold)
+        )
         self._confidence_low_threshold = confidence_low_threshold
         self._confidence_halt_threshold = confidence_halt_threshold
         self._ux_phase = ux_phase
@@ -348,6 +360,191 @@ class MilestoneLoop:
         # failure when the very first dispatch crashed, or the most
         # recent re-run result on a later-iteration crash.
         return current
+
+    # ── DOCUMENT recovery (D17, 2026-05-17) ──────────────────────────
+
+    # Minimum body size for a critical doc to count as "present."
+    # Smaller than this and we treat it as effectively missing — a
+    # 12-byte "# TODO\n" file shouldn't satisfy the gate. Calibrated
+    # from the smallest legit deterministic doc HumanDocsGenerator
+    # produces (auth.md pointer is ~200 bytes); 100 bytes catches
+    # accidentally-empty writes without burning real generations.
+    _MIN_CRITICAL_DOC_BYTES = 100
+
+    def _critical_docs_for(
+        self, architecture: SystemArchitecture,
+    ) -> List[str]:
+        """Return the relative-to-docs/ paths that MUST exist for
+        the milestone to pass the DOCUMENT gate. Always:
+
+        - architecture.md
+        - infrastructure.md
+        - auth.md
+        - api/<svc>.md for every backend service
+
+        Narrative docs (README, quickstart, services/, milestones/)
+        are excluded from this list — they're best-effort because
+        they're LLM-driven and a hiccup shouldn't halt the
+        milestone.
+        """
+        critical = ["architecture.md", "infrastructure.md", "auth.md"]
+        for svc in architecture.services:
+            if (svc.service_type or "").lower() == "backend":
+                critical.append(f"api/{svc.name}.md")
+        return critical
+
+    def _missing_critical_docs(
+        self, architecture: SystemArchitecture,
+    ) -> List[str]:
+        """Return the subset of critical docs that don't exist on
+        disk OR whose body is below ``_MIN_CRITICAL_DOC_BYTES``."""
+        docs_root = self._project_root / "docs"
+        missing: List[str] = []
+        for rel in self._critical_docs_for(architecture):
+            path = docs_root / rel
+            try:
+                if not path.exists():
+                    missing.append(rel)
+                    continue
+                size = path.stat().st_size
+                if size < self._MIN_CRITICAL_DOC_BYTES:
+                    missing.append(rel)
+            except OSError:
+                missing.append(rel)
+        return missing
+
+    def _maybe_recover_document(
+        self,
+        milestone: Milestone,
+        architecture: SystemArchitecture,
+        state: MilestoneState,
+    ) -> None:
+        """Iterative critical-docs recovery (D17, 2026-05-17). Mirrors
+        ``_maybe_recover_smoke``'s shape: ProgressTracker on the
+        missing-critical-docs count, dispatches ``DocumentRecovery``
+        per iteration, re-checks after each. Hard-gates
+        ``document_critical_missing`` on stall.
+
+        No-op when no recovery agent is wired."""
+        if self._document_recovery is None:
+            return
+        initial_missing = self._missing_critical_docs(architecture)
+        if not initial_missing:
+            return
+
+        tracker = ProgressTracker(
+            initial_failure_count=len(initial_missing),
+            stall_threshold=self._document_recovery_stall_threshold,
+        )
+        recovery_history: List[dict] = []
+        services_payload = [
+            {
+                "name": s.name,
+                "framework": s.framework,
+                "language": s.language,
+                "port": s.port,
+                "service_type": s.service_type,
+            }
+            for s in architecture.services
+        ]
+        runs_root_hint = str(state.root) if hasattr(state, "root") else None
+
+        if self._on_status:
+            try:
+                self._on_status(
+                    f"DocumentRecovery: {len(initial_missing)} critical "
+                    f"doc(s) missing; entering iterative recovery "
+                    f"(stall threshold={self._document_recovery_stall_threshold})..."
+                )
+            except Exception:
+                pass
+
+        iteration = 0
+        current_missing = initial_missing
+        while True:
+            iteration += 1
+            try:
+                recovery_result = self._document_recovery.recover(
+                    missing_critical_docs=current_missing,
+                    services=services_payload,
+                    milestone_name=milestone.name,
+                    runs_root=runs_root_hint,
+                )
+            except Exception as e:
+                if self._on_status:
+                    try:
+                        self._on_status(
+                            f"DocumentRecovery iter {iteration}: dispatch "
+                            f"raised {type(e).__name__}: {e} — stopping loop"
+                        )
+                    except Exception:
+                        pass
+                break
+
+            recovery_history.append(recovery_result.model_dump())
+
+            if not recovery_result.attempted:
+                break
+
+            current_missing = self._missing_critical_docs(architecture)
+            verdict = tracker.update(len(current_missing))
+
+            if self._on_status:
+                try:
+                    self._on_status(
+                        f"DocumentRecovery iter {iteration}: "
+                        f"{len(current_missing)} critical doc(s) still "
+                        f"missing; verdict={verdict}, "
+                        f"stall_counter={tracker.consecutive_no_progress}/"
+                        f"{self._document_recovery_stall_threshold}"
+                    )
+                except Exception:
+                    pass
+
+            # Persist progress alongside the DOCUMENT artifact.
+            try:
+                existing = state.read_artifact(SubPhase.DOCUMENT) or {}
+                state.mark_phase(
+                    SubPhase.DOCUMENT,
+                    {
+                        **existing,
+                        "recovery_history": recovery_history,
+                        "recovery_iterations": iteration,
+                        "missing_critical_docs_after": list(current_missing),
+                    },
+                )
+            except Exception:
+                # Best-effort artifact write; never break the loop.
+                pass
+
+            if tracker.has_converged():
+                if self._on_status:
+                    try:
+                        self._on_status(
+                            f"DocumentRecovery: converged after "
+                            f"{iteration} iteration(s) — all critical "
+                            f"docs present"
+                        )
+                    except Exception:
+                        pass
+                return
+
+            if tracker.should_stop():
+                break
+
+        # Stall (or dispatch-crash) without convergence — hard gate.
+        if current_missing:
+            self._gates.hard(
+                "document_critical_missing",
+                f"DocumentRecovery exhausted: "
+                f"{len(current_missing)} critical doc(s) still "
+                f"missing after {iteration} iteration(s): "
+                f"{', '.join(current_missing[:5])}"
+                + (
+                    f" (+{len(current_missing) - 5} more)"
+                    if len(current_missing) > 5 else ""
+                ),
+            )
 
     # ── Public ─────────────────────────────────────────────────────────
 
@@ -688,8 +885,16 @@ class MilestoneLoop:
         # Generate human-readable docs (README, architecture, api/,
         # services/, milestones/) into <project>/docs/. Hybrid:
         # deterministic for structured data, LLM for narrative.
-        # Failure is RECORDED but doesn't gate the milestone — docs
-        # are best-effort, and the operator can re-run later.
+        #
+        # **Critical-docs gate (D17, 2026-05-17):** after generation,
+        # verify the deterministic-required docs exist with
+        # non-trivial content. If any are missing, dispatch
+        # ``DocumentRecovery`` in a ProgressTracker loop. If recovery
+        # stalls without producing the missing docs, hard-gate
+        # ``document_critical_missing``. Narrative-doc failures
+        # (README, quickstart, services/, milestones/) stay
+        # best-effort — those are LLM-driven and a hiccup shouldn't
+        # halt the milestone.
         if not _has(state, SubPhase.DOCUMENT):
             self._tag(state.milestone_index, SubPhase.DOCUMENT)
             if self._human_docs_generator_factory is not None:
@@ -723,6 +928,15 @@ class MilestoneLoop:
                 state.mark_phase(SubPhase.DOCUMENT, {
                     "skipped_reason": "no human_docs_generator_factory wired",
                 })
+
+            # Critical-docs gate runs regardless of generator outcome —
+            # if generator never ran (no factory), critical docs are
+            # ALL missing, and the recovery loop will write them.
+            self._maybe_recover_document(
+                milestone=milestone,
+                architecture=architecture,
+                state=state,
+            )
 
         # ── FINAL_TEST ──────────────────────────────────────────────────
         # End-of-milestone e2e canary — the LAST gate before DONE.
