@@ -1,0 +1,127 @@
+[
+  {
+    "id": "BE-006-U1",
+    "title": "Create router module with APIRouter, imports, and dependencies",
+    "description": "Part of parent issue BE-006: Build recipes router.\n\nThis unit only: create the file `app/api/routes/recipes.py` with the router scaffold — imports + APIRouter declaration + dependency closures. NO endpoint bodies yet (those land in U2-U6).\n\nRequired:\n- `router = APIRouter(prefix='/recipes', tags=['recipes'])` (auto-mount adds `/api/v1`)\n- Imports from FastAPI: APIRouter, Depends, HTTPException, status, Path\n- Imports for SQLAlchemy: AsyncSession\n- Imports from app: `require_roles` (from app.core.auth), `get_db` (from app.db.session), `User` (from app.models.user), `RecipeCreate`/`RecipeOut` (from app.schemas.recipe), `create_recipe`/`ensure_local_user` (from app.services.recipes)\n- Capture the dependency closure once: `_require_user_or_admin = require_roles('user', 'admin')` — tests need a stable handle to override\n- Module docstring describing what the file will contain across U1-U7\n\nThe file should be syntactically valid and importable after this unit, even with no endpoints.\n",
+    "service": "backend",
+    "language": "python",
+    "target_files": ["app/api/routes/recipes.py"],
+    "test_files": [],
+    "spec_refs": ["create_recipe", "list_recipes", "read_recipe", "update_recipe", "delete_recipe"],
+    "depends_on": [],
+    "success_criteria": [
+      "app/api/routes/recipes.py exists",
+      "router declared with prefix='/recipes'",
+      "All required imports present",
+      "_require_user_or_admin closure captured at module level"
+    ],
+    "parent_issue_id": "BE-006"
+  },
+  {
+    "id": "BE-006-U2",
+    "title": "Implement POST /api/v1/recipes (create)",
+    "description": "Part of parent issue BE-006: Build recipes router.\n\nThis unit only: add the POST `''` handler to `app/api/routes/recipes.py` (U1 already created the file with imports + router).\n\nHandler:\n```python\n@router.post('', response_model=RecipeOut, status_code=status.HTTP_201_CREATED)\nasync def create_recipe_endpoint(\n    payload: RecipeCreate,\n    db: AsyncSession = Depends(get_db),\n    user: User = Depends(_require_user_or_admin),\n) -> RecipeOut:\n    owner_id = user.user_id  # JWT-derived\n    return await create_recipe(db, owner_id=owner_id, data=payload)\n```\n\nKey rules:\n- owner_id from JWT (via `user.user_id` returned by `require_roles`), NEVER from payload\n- RecipeCreate's `extra='forbid'` rejects client-supplied owner_id/id with 422\n- 201 Created on success\n",
+    "service": "backend",
+    "language": "python",
+    "target_files": ["app/api/routes/recipes.py"],
+    "test_files": [],
+    "spec_refs": ["create_recipe"],
+    "depends_on": ["BE-006-U1"],
+    "success_criteria": [
+      "POST '' handler exists",
+      "Returns RecipeOut with status 201",
+      "owner_id derived from user.user_id",
+      "calls create_recipe(db, owner_id=..., data=payload)"
+    ],
+    "parent_issue_id": "BE-006"
+  },
+  {
+    "id": "BE-006-U3",
+    "title": "Implement GET /api/v1/recipes/mine (list)",
+    "description": "Part of parent issue BE-006: Build recipes router.\n\nThis unit only: add the GET `/mine` handler. Register BEFORE `/{recipe_id}` so FastAPI's path matcher doesn't treat `mine` as a UUID.\n\nHandler returns `List[RecipeOut]` of recipes where `owner_id == user.user_id`, ordered by `created_at DESC`. Use SQLAlchemy `select` + `where` + `order_by`. Returns `[]` when the caller has no recipes.\n\nNo `ensure_local_user` here — list is read-only, no FK insert.\n",
+    "service": "backend",
+    "language": "python",
+    "target_files": ["app/api/routes/recipes.py"],
+    "test_files": [],
+    "spec_refs": ["list_recipes"],
+    "depends_on": ["BE-006-U1"],
+    "success_criteria": [
+      "GET '/mine' handler exists",
+      "Returns List[RecipeOut]",
+      "Filters by owner_id = user.user_id",
+      "Ordered by created_at DESC",
+      "Registered before /{recipe_id} path"
+    ],
+    "parent_issue_id": "BE-006"
+  },
+  {
+    "id": "BE-006-U4",
+    "title": "Implement GET /api/v1/recipes/{recipe_id} (read)",
+    "description": "Part of parent issue BE-006: Build recipes router.\n\nThis unit only: add the GET-by-id handler.\n\nHandler signature:\n```python\n@router.get('/{recipe_id}', response_model=RecipeOut)\nasync def get_recipe_endpoint(\n    recipe_id: UUID,\n    db: AsyncSession = Depends(get_db),\n    user: User = Depends(_require_user_or_admin),\n) -> RecipeOut:\n    ...\n```\n\nReturns the recipe if `recipe_id` exists AND owner_id matches the caller. Otherwise 404 (`detail='recipe_not_found'`). Do NOT distinguish 'not found' from 'not yours' — both are 404 to avoid leaking existence.\n",
+    "service": "backend",
+    "language": "python",
+    "target_files": ["app/api/routes/recipes.py"],
+    "test_files": [],
+    "spec_refs": ["read_recipe"],
+    "depends_on": ["BE-006-U1", "BE-006-U3"],
+    "success_criteria": [
+      "GET '/{recipe_id}' handler exists",
+      "Returns RecipeOut on success",
+      "404 with detail='recipe_not_found' on miss or cross-owner",
+      "Registered AFTER /mine"
+    ],
+    "parent_issue_id": "BE-006"
+  },
+  {
+    "id": "BE-006-U5",
+    "title": "Implement PUT /api/v1/recipes/{recipe_id} (update)",
+    "description": "Part of parent issue BE-006: Build recipes router.\n\nThis unit only: add the PUT handler. Full-replacement semantics (PUT, not PATCH).\n\nHandler:\n```python\n@router.put('/{recipe_id}', response_model=RecipeOut)\nasync def update_recipe_endpoint(\n    recipe_id: UUID,\n    payload: RecipeCreate,\n    db: AsyncSession = Depends(get_db),\n    user: User = Depends(_require_user_or_admin),\n) -> RecipeOut:\n    ...\n```\n\nLook up the recipe by (recipe_id, owner_id=user.user_id). 404 if not found OR not owned. Otherwise overwrite the mutable fields from payload (title/description/ingredients/instructions/prep_time_minutes/cook_time_minutes/servings). NEVER touch id/owner_id/created_at; updated_at gets the server time via the model's onupdate=func.now().\n",
+    "service": "backend",
+    "language": "python",
+    "target_files": ["app/api/routes/recipes.py"],
+    "test_files": [],
+    "spec_refs": ["update_recipe"],
+    "depends_on": ["BE-006-U1"],
+    "success_criteria": [
+      "PUT '/{recipe_id}' handler exists",
+      "Returns RecipeOut on success",
+      "404 on miss or cross-owner",
+      "Does not mutate id, owner_id, created_at"
+    ],
+    "parent_issue_id": "BE-006"
+  },
+  {
+    "id": "BE-006-U6",
+    "title": "Implement DELETE /api/v1/recipes/{recipe_id}",
+    "description": "Part of parent issue BE-006: Build recipes router.\n\nThis unit only: add the DELETE handler.\n\nHandler:\n```python\n@router.delete('/{recipe_id}', status_code=status.HTTP_204_NO_CONTENT)\nasync def delete_recipe_endpoint(\n    recipe_id: UUID,\n    db: AsyncSession = Depends(get_db),\n    user: User = Depends(_require_user_or_admin),\n) -> None:\n    ...\n```\n\nLook up by (recipe_id, owner_id=user.user_id). 404 if not found or not owned. Otherwise delete and return None (FastAPI emits 204 No Content with empty body). Idempotency note: second DELETE on the same id returns 404 — that's fine.\n",
+    "service": "backend",
+    "language": "python",
+    "target_files": ["app/api/routes/recipes.py"],
+    "test_files": [],
+    "spec_refs": ["delete_recipe"],
+    "depends_on": ["BE-006-U1"],
+    "success_criteria": [
+      "DELETE '/{recipe_id}' handler exists",
+      "Returns None (204 No Content) on success",
+      "404 on miss or cross-owner"
+    ],
+    "parent_issue_id": "BE-006"
+  },
+  {
+    "id": "BE-006-U7",
+    "title": "Add 422→400 coercion for malformed UUID path params",
+    "description": "Part of parent issue BE-006: Build recipes router.\n\nThis unit only: add 400-on-malformed-UUID-path behavior.\n\nFastAPI's default for a `recipe_id: UUID` path param returns 422 on a malformed value (e.g. `not-a-uuid`). Our domain contract is: 422 is reserved for body-schema validation; path-param malformedness is a 400 Bad Request.\n\nApproach — add a typed dependency that does the coercion explicitly:\n```python\ndef _validate_recipe_id(recipe_id: str = Path(...)) -> UUID:\n    try:\n        return UUID(recipe_id)\n    except ValueError:\n        raise HTTPException(status_code=400, detail='invalid_recipe_id')\n```\n\nThen update U4, U5, U6 handler signatures to use `recipe_id: UUID = Depends(_validate_recipe_id)` instead of the raw `recipe_id: UUID` path type. Add a one-line comment explaining the coercion.\n\nDon't introduce a global RequestValidationError handler — that would also coerce 422s from body validation, which we don't want.\n",
+    "service": "backend",
+    "language": "python",
+    "target_files": ["app/api/routes/recipes.py"],
+    "test_files": [],
+    "spec_refs": ["read_recipe", "update_recipe", "delete_recipe"],
+    "depends_on": ["BE-006-U4", "BE-006-U5", "BE-006-U6"],
+    "success_criteria": [
+      "_validate_recipe_id dependency exists",
+      "U4/U5/U6 handlers updated to use the dependency",
+      "Malformed UUID path param returns 400 (not 422) with detail='invalid_recipe_id'"
+    ],
+    "parent_issue_id": "BE-006"
+  }
+]
