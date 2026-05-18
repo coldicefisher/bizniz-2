@@ -1,0 +1,52 @@
+[
+  {
+    "agent": "agenticdebugger",
+    "trigger": "service \"backend\" is not running\n",
+    "diagnosis": "The legacy proxy file app/api/routes/auth.py defined POST /auth/login alongside the newer modular BE-008 file app/api/routes/auth_login.py. FastAPI's auto-discovery in main.py iterates pkgutil.iter_modules alphabetically, so 'auth' was registered before 'auth_login', producing a 'Duplicate Operation ID login_api_v1_auth_login_post' warning and \u2014 more importantly \u2014 making the legacy handler win the route match. The legacy login returned a {access_token, refresh_token} envelope and skipped the loc",
+    "fixes": [],
+    "outcome": "still_failing",
+    "tier": "(unspecified)",
+    "attempt": 1,
+    "timestamp": "2026-05-17T17:46:46.305829+00:00"
+  },
+  {
+    "agent": "agenticdebugger",
+    "trigger": "service \"backend\" is not running\n",
+    "diagnosis": "The legacy proxy router app/api/routes/auth.py defined its own POST /auth/login next to the newer modular BE-008 router app/api/routes/auth_login.py; FastAPI's pkgutil-based auto-discovery registered whichever was iterated last, masking the modular login handler and causing /api/v1/auth/login (and downstream /auth/me + /recipes/mine, which rely on its token shape) to intermittently 401. Removing the legacy auth.py leaves only the per-endpoint files, restoring deterministic routing. The container",
+    "fixes": [],
+    "outcome": "still_failing",
+    "tier": "(unspecified)",
+    "attempt": 2,
+    "timestamp": "2026-05-17T17:48:02.540768+00:00"
+  },
+  {
+    "agent": "agenticdebugger",
+    "trigger": "service \"backend\" is not running\n",
+    "diagnosis": "tests/auth/test_auth_contract.py read FUSIONAUTH_HOST_URL to pick the FusionAuth base URL. In this stack that env var is set to http://localhost:9012 (the browser-facing host port for the SPA), so when pytest runs inside the backend container the three contract tests dial localhost:9012 on the backend itself and get ECONNREFUSED. The container-internal URL is exposed under a different env var (FUSIONAUTH_URL=http://auth:9011), which is what the integration tests' app actually uses \u2014 that is why ",
+    "fixes": [],
+    "outcome": "still_failing",
+    "tier": "(unspecified)",
+    "attempt": 3,
+    "timestamp": "2026-05-17T17:49:56.719021+00:00"
+  },
+  {
+    "agent": "agenticdebugger",
+    "trigger": "service \"backend\" is not running\n",
+    "diagnosis": "The backend service container (recipe_v2-backend-1) was in an Exited(0) state at test time \u2014 uvicorn had shut down cleanly (likely a reloader/lifecycle hiccup during a previous probe), so pytest could not connect to http://localhost:8001. The provided server log snippet shows the entire test sequence had succeeded with the expected 200/201/204/401/400 codes immediately before the 'Shutting down' line; nothing in the application code or test code is broken. Restarting the backend container restor",
+    "fixes": [],
+    "outcome": "passed",
+    "tier": "(unspecified)",
+    "attempt": 1,
+    "timestamp": "2026-05-17T17:54:08.048738+00:00"
+  },
+  {
+    "agent": "agenticdebugger",
+    "trigger": "service \"backend\" is not running\n",
+    "diagnosis": "The backend service container (recipe_v2-backend-1) had exited cleanly (exit code 0) before the test run, leaving the test harness unable to reach the API. The logs show the backend successfully handled requests and then went through a normal uvicorn shutdown sequence ('Shutting down', 'Waiting for application shutdown', 'Application shutdown complete'), likely due to an external compose stop or reloader termination. The code itself was healthy (200 OKs on /api/v1/recipes/mine right before shutd",
+    "fixes": [],
+    "outcome": "passed",
+    "tier": "(unspecified)",
+    "attempt": 1,
+    "timestamp": "2026-05-17T23:10:07.223267+00:00"
+  }
+]
