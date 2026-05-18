@@ -3,30 +3,42 @@
 **Question:** does Decomposer make Coder faster, slower, or the same
 on a real CRUD-router issue? And does it cost or gain quality?
 
-**Tests:**
+**Tests (three-way):**
 - `bizniz/perf_tests/tests/coder_be006_fat.py` — single Coder dispatch
   for the entire BE-006 scope (POST + GET list + GET one + PUT + DELETE +
-  UUID coercion).
+  UUID coercion). **Decomposer not in the loop.**
 - `bizniz/perf_tests/tests/coder_be006_decomposed.py` — 7 serial Coder
   dispatches for the same scope, one per `BE-006-U1..U7` unit.
+  **Decomposer-as-dispatcher.**
+- `bizniz/perf_tests/tests/coder_be006_fat_with_guideline.py` —
+  Decomposer runs first, its unit list is appended to the issue as an
+  "advisory, not literal" breakdown, then ONE fat Coder dispatch
+  consumes the augmented issue. **Decomposer-as-guideline.**
 
-Both run against the same `coder_be006_decomposed/workspace_seed/`
-fixture (a recipe_v2-class skeleton + Recipe model + schemas + helpers).
+All three run against the same shared workspace seed (recipe_v2-class
+skeleton + Recipe model + schemas + helpers). The guideline-fat
+fixture symlinks its `workspace_seed` to fat's so the seed bytes are
+provably identical.
 
-## Results — first run pair
+## Results — three-way, first run each
 
-| | fat | decomposed | delta |
+| | bare fat | guideline-fat | decomposed |
 |---|---|---|---|
-| **wall clock** | **296.4s** (4m 56s) | **1196.3s** (19m 56s) | **+899.9s (+304%)** |
-| coder calls | 1 | 7 | +6 |
-| median call | 296s | 179s | -39% per call |
-| structural match | 12/12 | 12/12 | same |
-| AST parse | ok | ok | same |
-| symbol validation | passed (12 resolved) | passed (12 resolved) | same |
-| file size | 6640 bytes | 8249 bytes | +24% |
-| top-level defs | 9 | 8 | -1 |
-| git rev | `b955e729` | `b955e729` | same |
-| tags | `perf/coder_be006_fat/run-1` | `perf/coder_be006_decomposed/run-1` | |
+| **wall clock** | **296.4s** (4m 56s) | **514.3s** (8m 34s) | **1196.3s** (19m 56s) |
+| **Δ vs bare fat** | baseline | **+74%** | **+304%** |
+| decomposer | — | 33.9s | n/a (embedded) |
+| decomposer confidence | — | 0.82 | n/a |
+| coder calls | 1 | 1 | 7 |
+| coder elapsed | 296s | 480s | 1196s |
+| median coder call | 296s | 480s | 179s |
+| structural match | 12/12 | 12/12 | 12/12 |
+| AST parse | ok | ok | ok |
+| symbol validation | passed (12 resolved) | passed (13 resolved) | passed (12 resolved) |
+| file size | 6640 B / 190 ln | 7233 B / 206 ln | 8249 B / 219 ln |
+| top-level defs | 9 | 9 | 8 |
+| git rev (fat, dec) | `b955e729` | — | `b955e729` |
+| git rev (guideline) | — | `e04d549` | — |
+| tags | `perf/coder_be006_fat/run-1` | `perf/coder_be006_fat_with_guideline/run-1` | `perf/coder_be006_decomposed/run-1` |
 
 ### Per-unit timings (decomposed)
 
@@ -46,91 +58,113 @@ near-flat ~3-min overhead.
 
 ## What this answers
 
-### 1. Decomposer is **net-negative on wall clock** here.
+### 1. **Pure decomposition is net-negative on BE-006-class issues.**
 
-The fat dispatch handled the same scope **4x faster** end-to-end.
-The decomposer's per-unit "smaller surface" advantage doesn't
-recover what's lost to 7x the per-call setup cost (LLM cold-start,
-discovery tool loop on already-edited files, context re-build).
+Both Decomposer modes (as-dispatcher AND as-guideline) lose to bare
+fat. Guideline-fat — which was supposed to be the cheap variant —
+added **74% wall clock** for zero quality gain. The Coder didn't
+spend 26s extra (the Decomposer cost); it spent **180s extra**
+inside its own dispatch. The guideline either pulled the Coder into
+more elaborate code OR triggered extra tool calls / verification per
+unit. Either way, the planning aid wasn't an aid.
 
-If this ratio holds at scale, recipe_v2 M2 (24 production issues
-decomposed into ~80 units) would pay roughly:
+Decomposed-as-dispatcher is even worse — 7 dispatches × ~3 min each
+(cold start + workspace re-discovery + context re-build × 7).
+
+### 2. Quality is **at parity** across all three modes.
+
+- All three parse cleanly via `ast.parse`.
+- All three pass `bizniz.coder.symbol_validator` with zero
+  unresolved symbols, zero hallucinated attributes, zero syntax
+  errors. (Guideline added 1 extra resolved symbol — an extra helper
+  function — but no functional improvement.)
+- All three match all 12 structural patterns.
+- File sizes scale with the Decomposer's involvement: bare fat is
+  tightest (190 ln), guideline-fat is middle (206 ln), decomposed is
+  longest (219 ln). More words for the same shape.
+
+### 3. Projection to recipe_v2 M2 (24 issues, IMPLEMENT phase)
 
 ```
-24 issues × 4 min (fat baseline) = 96 min
-80 units  × 3 min (per-unit obs) = 240 min
-                                  ────────
-                       penalty ≈ +144 min on M2 alone
+bare-fat       projection: 24 issues × 4m 56s          ≈ 1h 58m
+guideline-fat  projection: 24 issues × 8m 34s          ≈ 3h 25m
+decomposed     projection: 80 units  × 3m 0s           ≈ 4h 00m
+recipe_v2 M2   observed IMPLEMENT                       ≈ 3h 10m
 ```
 
-This is consistent with the M2 walkthrough showing Coder dispatch
-as 92% of IMPLEMENT phase — and IMPLEMENT as 61% of M2 wall time.
+Observed M2 lands between guideline-fat and decomposed projections —
+consistent with the v2_build default being "always decompose" but
+some issues having very few units.
 
-### 2. Quality is **at parity** on this scope.
+### 4. What we still **don't** know
 
-- Both outputs parse cleanly via `ast.parse`.
-- Both pass `bizniz.coder.symbol_validator` with zero unresolved
-  symbols, zero hallucinated attributes, zero syntax errors.
-- Both match all 12 structural patterns (router shape, all HTTP
-  decorators, auth dependency, correct status codes, 404 + 400).
-- Fat's output is tighter (190 lines / 9 defs). Decomposed's is
-  more verbose (219 lines / 8 defs) — the extra bytes come from
-  per-unit boilerplate that didn't get unified across calls.
-
-The decomposed output is NOT lower-quality. It's just longer for
-no functional gain.
-
-### 3. What we still **don't** know
-
-- Whether decomposed wins on issues that the fat call **fails on**.
-  This run had a fat dispatch succeed first-try; the hypothesis that
-  decomposed reduces escalation rate isn't tested here.
-- Whether decomposed has lower variance across runs. One sample each.
-- Whether issue families exist where decomposed beats fat (e.g.,
-  highly-coupled refactors vs greenfield CRUD).
+- Whether any Decomposer mode wins on issues the bare-fat dispatch
+  actually **fails** on. The whole stated purpose of Decomposer was
+  reliability on complex issues. BE-006 is moderately-complex CRUD
+  that fat handles first-try, AST-clean, symbol-clean.
+- Whether a richer "Planner / Framer" Decomposer (one that actually
+  explores the codebase and emits a structured briefing — not just a
+  unit list) would help where pure decomposition hurts.
+- Per-run variance. One sample each. Could be ±60s of noise.
 
 ## Implications for the broader perf question
 
-This is the first hard data point that the **Decomposer is the
-direct cost driver** for the 30-50x regression we saw in
-recipe_v2. The math now fits:
+This is the first hard data point on what's driving the 30-50x
+recipe_v2 regression. The math fits:
 
 ```
-recipe_v2 M2 observed:       3h 10m IMPLEMENT
-fat-projection M2:           ≈ 1h 36m  (24 issues × 4 min)
-decomposed-projection M2:    ≈ 4h 00m  (80 units × 3 min)
+recipe_v2 M2 observed IMPLEMENT:  3h 10m
+bare-fat projection (24 issues):  ≈ 1h 58m  ← bookshelf_claude territory
+guideline-fat projection:         ≈ 3h 25m  ← in the observed range
+decomposed projection (80 units): ≈ 4h 00m  ← in the observed range
 ```
 
-Decomposed projection lands within the observed range. The
-fat-projection is in the bookshelf_claude (40-min build) ballpark.
+**Both** Decomposer modes account for the regression. Bare fat would
+have shaved roughly half the wall clock — at parity quality, on at
+least this class of issue.
 
 **Recommended next moves (in order):**
 
 1. **Make Decomposer opt-in, not opt-out.** Default `v2_build`
-   to `--no-decompose` until we have an issue class where it
-   demonstrably wins. The current "always on" default has cost us
-   3 days on recipe_v2.
-2. **Add a second A/B issue family.** Pick something the fat
-   dispatch fails on (a known-hard greenfield issue), re-run.
-   If decomposed wins there, we keep it as a tier-2 strategy
-   gated on first-pass failure rather than always-on.
-3. **Decomposer prompt tightening.** If we keep it, the per-unit
-   p50 of 179s with zero retries is suspicious — the model is
-   probably re-reading the same files 7 times. The decomposer's
-   unit prompts could include the previous unit's exact diff
-   instead of letting Coder re-discover the workspace each time.
+   to `--no-decompose` until we have an issue class where some
+   Decomposer mode demonstrably wins. The current "always on"
+   default has cost us 3 days on recipe_v2.
+2. **Find a fat-fails issue.** Pull a known-complex issue from
+   recipe_v2 M4's 27-defect stall, run it through bare fat first.
+   If fat succeeds first-try, pick a harder one. The goal is to
+   establish a fixture where Decomposer's stated value (reliability
+   on complex issues) is actually testable.
+3. **Three-way against the fat-fails fixture.** All three modes,
+   same fixture. THEN we'll know whether Decomposer's role should
+   be eliminated, rescoped to as-guideline, or rebuilt as a
+   Planner/Framer that explores the codebase first.
+4. **(Deferred.)** If even guideline-fat doesn't win on the
+   fat-fails fixture, the answer may be that Decomposer's right
+   shape is a *Planner/Framer*: tool-loop the codebase, emit a
+   structured briefing (relevant files + integration points + risks
+   + idiomatic patterns), and the Coder consumes that as pre-flight
+   context instead of rediscovering. Out of scope until (2)+(3)
+   tell us pure decomposition is dead.
 
 ## Run metadata
 
-- **Git rev:** `b955e729`
 - **Date:** 2026-05-18
-- **Model:** claude-cli (default tier 0) on both sides
-- **Fixture:** identical workspace_seed copied for each side
-- **Tags:** `perf/coder_be006_fat/run-1`, `perf/coder_be006_decomposed/run-1`
+- **Model:** `claude-cli` (default tier 0) on all three sides
+- **Fixture:** all three sides share the same workspace_seed bytes
+  (guideline-fat's seed is a relative symlink to fat's). Validated
+  via the runner's `fixture_sha256` env fingerprint.
+- **Tags + git rev:**
+  - `perf/coder_be006_fat/run-1`           — rev `b955e729`
+  - `perf/coder_be006_decomposed/run-1`    — rev `b955e729`
+  - `perf/coder_be006_fat_with_guideline/run-1` — rev `e04d549`
+  (Guideline-fat's rev is later because the scenario didn't exist
+  at `b955e729`. Workspace seed bytes are provably identical — see
+  fixture_sha256 in each result.json's `env` block.)
 - **Result files:**
   - `~/bizniz_perf_tests/coder_be006_fat/.runs/20260518_161715/result.json`
   - `~/bizniz_perf_tests/coder_be006_decomposed/.runs/20260518_162211/result.json`
+  - `~/bizniz_perf_tests/coder_be006_fat_with_guideline/.runs/20260518_171420/result.json`
 - **Validation:** `python -m bizniz.perf_tests validate <slug>/<run>`
   augments any existing run's result.json with a `quality` block
-  (AST parse + symbol resolution). Run live during scenarios going
-  forward; applied post-hoc for both runs above.
+  (AST parse + symbol resolution). Applied post-hoc to fat +
+  decomposed; live during the guideline-fat scenario.
