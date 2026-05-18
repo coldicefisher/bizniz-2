@@ -441,19 +441,21 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     def service_planner_factory(_service):
         return ServicePlanner(client=sp_client, on_status=on_status)
 
-    # Decomposer factory — roadmap item 4. **Always on by default.**
-    # Each ServicePlanner-emitted issue is broken into ordered units;
-    # Coder runs per-unit instead of per-issue. Opt-out via
-    # ``--no-decompose`` (escape hatch for debugging / A/B comparison
-    # runs against the legacy issue-level path).
-    if args.no_decompose:
-        decomposer_factory = None
-        on_status(
-            "Decomposer: DISABLED (--no-decompose) — legacy "
-            "issue-level dispatch. Coder gets full feature-sized "
-            "issues."
-        )
-    else:
+    # Decomposer factory — roadmap item 4. **Opt-in only as of
+    # 2026-05-18.** Two-fixture perf validation (BE-006 + BA-fix2-2;
+    # see docs/perf_tests/) showed Decomposer is net-negative on
+    # Claude CLI: 3-4× wall-clock penalty for the same 14/14 + AST
+    # + symbol-clean output that bare fat dispatch produces in one
+    # shot. The dense per-unit dispatch pattern also burns through
+    # Max-plan usage windows faster and triggers 429 cascades.
+    # Pass ``--decompose`` to opt in (kept for model-tier experiments
+    # and future tier-2 fallback uses); ``--no-decompose`` is the
+    # deprecated explicit form of the new default.
+    decompose_requested = (
+        getattr(args, "decompose", False)
+        and not getattr(args, "no_decompose", False)
+    )
+    if decompose_requested:
         from bizniz.decomposer.agent import Decomposer
         decomposer_client = config.make_client(
             model=getattr(config, "decomposer_model", config.engineer_model)
@@ -464,8 +466,15 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
                 client=decomposer_client, on_status=on_status,
             )
         on_status(
-            "Decomposer: enabled (default) — per-unit dispatch active. "
+            "Decomposer: enabled (--decompose) — per-unit dispatch active. "
             "ServicePlanner issues will be expanded into ordered units."
+        )
+    else:
+        decomposer_factory = None
+        on_status(
+            "Decomposer: disabled (default since 2026-05-18 perf "
+            "verdict). Coder gets full feature-sized issues. Use "
+            "--decompose to opt in."
         )
 
     coder_tiers = list(
@@ -926,12 +935,20 @@ def main():
     p.add_argument("--retry-service", default=None,
                    help="With --retry-failed, restrict the reset to one service")
     p.add_argument(
+        "--decompose", action="store_true",
+        help=(
+            "Opt in to the Decomposer (per-unit dispatch). Default is "
+            "OFF as of 2026-05-18 after two-fixture perf validation "
+            "showed Decomposer is net-negative on Claude CLI "
+            "(3-4× wall-clock penalty, no quality win). Use this flag "
+            "for model-tier experiments or A/B comparison runs."
+        ),
+    )
+    p.add_argument(
         "--no-decompose", action="store_true",
         help=(
-            "Disable the Decomposer (roadmap item 4 default). Reverts "
-            "to legacy per-issue dispatch — Coder gets full "
-            "feature-sized issues. Escape hatch for debugging or "
-            "A/B comparison runs."
+            "Deprecated explicit form of the new default (Decomposer "
+            "off). Kept for backwards-compat with older invocations."
         ),
     )
     p.add_argument(

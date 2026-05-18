@@ -15,43 +15,63 @@
 # typo or omission hard-fails at config load rather than silently
 # routing to a generic default.
 
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  TIER STRATEGY (2026-05-18)                                       ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+#
+# Two-fixture perf validation (BE-006 + BA-fix2-2 — see docs/perf_tests/)
+# established that Haiku 4.5 ships complex multi-file production-grade
+# issues at parity quality with Opus 4.7 in 42% less wall time. Combined
+# with ~4-5× cheaper per-token rate, that's ~7-9× cheaper end-to-end on
+# Coder-class work.
+#
+# So the default is: **Haiku 4.5 for high-volume execution roles (Coder,
+# Tester, repair), Opus 4.7 for orchestration roles where reasoning depth
+# dominates per-call cost** (Planner, Architect, ServicePlanner,
+# AuthPlanner, QualityEngineer, CodeReviewer, integration testers, the
+# Decomposer when opted-in, and the AgenticDebugger which IS the
+# escalation tier itself).
+#
+# Per-role escalation lists below progress Haiku → Opus → Opus so that
+# stall-detection escalates to the better model rather than retrying
+# at the same tier.
+#
+# Model-name syntax: ``claude-cli`` (= CLI's active model, default
+# Opus on Max plan) or ``claude-cli:<anthropic-model-id>`` to pin
+# a specific model. See bizniz/clients/claude_cli/model_name.py.
+
 # The Engineer plans the work for each service: requirements, use cases,
-# domain models, issues. Starts on the cheapest model; escalates via
-# engineer_escalation on repetition-detected stalls or repair iterations.
-engineer_model: claude-cli
+# domain models, issues. Single call per service, reasoning-heavy.
+engineer_model: claude-cli:claude-opus-4-7
 
 # Escalation chain when Engineer detects a repetition stall (same
-# action three of the last five iterations) or when repair iteration
-# escalates a tier. Indexed by tier 0, 1, 2... — Engineer.implement
-# starts at tier 0 (= engineer_model above). Repair iter N uses tier N.
-# Claude-cli at every tier: subprocess routing to the claude binary
-# ($0 marginal on Max plan), so escalating just means "another shot
-# with the same model" — which works fine when the sticky repair log
-# compounds across attempts.
+# action three of the last five iterations). Stays on Opus across
+# tiers — the Engineer's job is planning + decomposition, where
+# Haiku-on-stall would compound the wrong direction.
 engineer_escalation:
-  - claude-cli
-  - claude-cli
-  - claude-cli
+  - claude-cli:claude-opus-4-7
+  - claude-cli:claude-opus-4-7
+  - claude-cli:claude-opus-4-7
 
 # The Architect decomposes the project into services and orchestrates
 # the milestone walk. One call per milestone, so quality > cost.
-architect_model: claude-cli
+architect_model: claude-cli:claude-opus-4-7
 
 # The Planner runs once per project (or rarely on re-plans) and its
-# output drives the entire build sequence — top-tier model is worth
-# the rounding-error cost.
-planner_model: claude-cli
+# output drives the entire build sequence — top-tier worth the
+# rounding-error cost.
+planner_model: claude-cli:claude-opus-4-7
 
 # Top-tier model for integration test generation (HTTPApiTester +
 # WebUITester). Hallucinations here get amplified by the debugger
 # into real code corruption (e.g. fake /grooming routes appearing in
 # a property-manager app), so we pay for the better model.
-integration_tester_model: claude-cli
+integration_tester_model: claude-cli:claude-opus-4-7
 
 # Legacy single-tier debugger model — only used as a fallback when
 # `debugger_escalation` (further down) is empty. The active config
 # is the escalation chain, not this field.
-debugger_model: claude-cli
+debugger_model: claude-cli:claude-opus-4-7
 
 
 # ╔═══════════════════════════════════════════════════════════════════╗
@@ -75,28 +95,30 @@ debugger_model: claude-cli
 # rather than silently routing to a generic default.
 
 # Coder agent: writes the actual code in a target file based on the
-# issue description + tests. Escalates when its generated code fails
-# tests repeatedly.
+# issue description + tests. Default Haiku 4.5 (validated 2026-05-18
+# against the BA-fix2-2 fat-fails fixture — 14/14 + AST + symbols
+# clean, beat Opus by 42% wall). Escalates to Opus on stall, then
+# Opus again as a defense in depth.
 coder_models:
-  - claude-cli
-  - claude-cli
-  - claude-cli
+  - claude-cli:claude-haiku-4-5
+  - claude-cli:claude-opus-4-7
+  - claude-cli:claude-opus-4-7
 
 # Tester agent: writes the tests for an issue based on the issue
-# description and target signatures. Escalates when its generated
-# tests are malformed or fail to compile.
+# description and target signatures. Same tier strategy as Coder —
+# Haiku starts cheap, Opus on stall.
 tester_models:
-  - claude-cli
-  - claude-cli
-  - claude-cli
+  - claude-cli:claude-haiku-4-5
+  - claude-cli:claude-opus-4-7
+  - claude-cli:claude-opus-4-7
 
 # QuickDebugger inline repair: fixes test failures via single-call
-# diagnose-and-patch (no agentic tool loop). Skips the cheapest tier
-# because trivial fixes already pass the Coder; if QuickDebugger is
-# firing, we already need at least mid-tier reasoning.
+# diagnose-and-patch (no agentic tool loop). Already skipping the
+# cheapest tier; with Haiku as start tier and Opus on escalation
+# the pattern matches Coder/Tester.
 repair_models:
-  - claude-cli
-  - claude-cli
+  - claude-cli:claude-haiku-4-5
+  - claude-cli:claude-opus-4-7
 
 
 # ╔═══════════════════════════════════════════════════════════════════╗
@@ -133,16 +155,19 @@ debugger_escalation:
   # bail fast on truly trivial bugs (typo, wrong import, missing
   # field name) without burning a long Claude session. Two attempts
   # because the sticky log compounds — a second pass with the prior
-  # diagnosis in context often nails the fix.
-  - model: claude-cli
+  # diagnosis in context often nails the fix. Haiku is plenty for
+  # triage-class fixes and ~5× cheaper per tool call.
+  - model: claude-cli:claude-haiku-4-5
     tool_iterations: 4
     repair_attempts: 2
   # Tier 2 — workhorse grind. 40 tool iterations per attempt lets the
   # model view multiple files + do live runtime introspection
   # (run_python_in_container, hit_endpoint, inspect_env, decode_jwt)
   # before forming a diagnosis. 5 attempts because the sticky log
-  # builds across attempts.
-  - model: claude-cli
+  # builds across attempts. Opus once we're past triage — the
+  # multi-file reasoning + sticky log compounding is where Opus
+  # earns its keep.
+  - model: claude-cli:claude-opus-4-7
     tool_iterations: 40
     repair_attempts: 5
   # Tier 3 — final escalation. 24 iterations to use live-introspection
@@ -150,7 +175,7 @@ debugger_escalation:
   # session with the full sticky log can't fix it after this much
   # context, the bug is structural (wrong skeleton, wrong contract)
   # and surfaces for human review.
-  - model: claude-cli
+  - model: claude-cli:claude-opus-4-7
     tool_iterations: 24
     repair_attempts: 2
 
