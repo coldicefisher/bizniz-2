@@ -72,9 +72,13 @@ class ClaudeCliClient(BaseAIClient):
         on_message_callback: Optional[Callable[[Message], None]] = None,
         fallback_model: Optional[str] = None,
     ):
+        # Parse ``claude-cli:<model>`` suffix into ``--model <model>``
+        # CLI args. The name itself stays unchanged for telemetry.
+        from bizniz.clients.claude_cli.model_name import parse_claude_cli_model
+        _label, model_args = parse_claude_cli_model(model_name)
         self._model_name = model_name
         self._command = command
-        self._additional_args = list(additional_args or [])
+        self._additional_args = list(additional_args or []) + model_args
         self._timeout_s = timeout_s
         self._on_message_callback = on_message_callback
         # When the primary model is overloaded, the CLI's

@@ -111,6 +111,11 @@ class ClaudeCliCoder:
         additional_args: Optional[List[str]] = None,
         fallback_model: Optional[str] = None,
     ):
+        # Parse ``claude-cli:<model>`` suffix into ``--model <model>``
+        # CLI args. The label stays in self._model_name for cost
+        # tracking; the args go on the subprocess invocation.
+        from bizniz.clients.claude_cli.model_name import parse_claude_cli_model
+        _label, model_args = parse_claude_cli_model(model_name)
         self._workspace = workspace
         self._compose_path = compose_path
         self._target_service = target_service
@@ -121,7 +126,7 @@ class ClaudeCliCoder:
         self._runner = runner
         self._model_name = model_name
         self._command = command
-        self._additional_args = list(additional_args or [])
+        self._additional_args = list(additional_args or []) + model_args
         # When the primary model is overloaded, CLI auto-switches to
         # this for the call. Trades quality for "the build keeps
         # moving" during Max-plan usage caps. Env override:
