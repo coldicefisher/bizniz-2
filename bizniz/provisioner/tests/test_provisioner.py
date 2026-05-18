@@ -176,6 +176,46 @@ def test_provision_port_remap_is_recorded(tmp_parent):
     assert "b" in result.port_remap or "a" in result.port_remap
 
 
+def test_provision_remap_uses_host_port_field_not_mutation(tmp_parent, monkeypatch):
+    """Regression: the provisioner must not mutate ``svc.port`` on
+    collision. Container port (``svc.port``) stays at the architect's
+    choice; the host-side remap lives on ``svc.host_port``. In-network
+    URLs (``http://<svc>:<port>``) depend on this — pre-fix, the
+    integration tester was building ``http://backend:8002`` (host port)
+    inside a Docker network sidecar and getting Connection Refused."""
+    from bizniz.architect.types import host_port_for
+    # Isolate the cross-process port reservation registry so live
+    # builds on the same machine don't bleed into the test's choices.
+    monkeypatch.setenv("BIZNIZ_PROJECTS_ROOT", str(tmp_parent))
+    arch = SystemArchitecture(
+        project_name="X", project_slug="x_host_port", description="x",
+        services=[
+            _service(name="alpha", workspace_name="alpha", port=58000, skeleton="none"),
+            _service(name="beta",  workspace_name="beta",  port=58000, skeleton="none"),
+        ],
+    )
+    p = Provisioner(project_parent=tmp_parent, build_images=False)
+    result = p.provision(arch, project_name="X")
+    # Both still report port=58000 (container port — never mutated).
+    assert arch.services[0].port == 58000
+    assert arch.services[1].port == 58000
+    # Exactly one of them got remapped via host_port.
+    remapped = [s for s in arch.services if s.host_port is not None]
+    not_remapped = [s for s in arch.services if s.host_port is None]
+    assert len(remapped) == 1 and len(not_remapped) == 1, (
+        f"expected 1 remapped + 1 unchanged; got remapped={remapped}"
+    )
+    # host_port_for() returns the right value in both cases.
+    for s in arch.services:
+        if s.host_port is not None:
+            assert host_port_for(s) == s.host_port
+            assert host_port_for(s) != 58000
+        else:
+            assert host_port_for(s) == 58000  # falls back to container port
+    # Result's remap dict matches the host_port choice.
+    assert remapped[0].name in result.port_remap
+
+
 def test_provision_unknown_infra_framework_logs_no_template(tmp_parent):
     """When a service points at infrastructure with no registered template,
     we don't crash — just skip its compose entry and log."""

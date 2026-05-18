@@ -15,7 +15,8 @@ class RedisTemplate(InfraTemplate):
     DEFAULT_CONTAINER_PORT = 6379
 
     def render(self, ctx: TemplateContext) -> TemplateOutput:
-        host_port = ctx.service.port or 6379
+        from bizniz.architect.types import host_port_for
+        host_port = host_port_for(ctx.service) or 6379
 
         compose_service = {
             "image": "redis:7-alpine",

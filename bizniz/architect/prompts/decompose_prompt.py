@@ -14,7 +14,7 @@ Decompose this into a service-based architecture. For each service, specify:
 - language: primary language ("python", "typescript", "yaml", "sql")
 - description: what this service does
 - workspace_name: directory name for the service source code (e.g. "backend", "frontend")
-- port: exposed HOST port number (the dev port on the host machine, if applicable)
+- port: the CONTAINER port the service listens on inside its container. Use the framework default (see reference list below). The Provisioner handles host-side port mapping and remaps automatically if there's a collision with other dev stacks running on the same host.
 - depends_on: list of other service names this depends on
 - requirements: list of pip/npm packages needed (e.g. ["fastapi", "uvicorn", "pydantic"] for Python, or ["react", "axios"] for TypeScript)
 - skeleton: which skeleton repo to seed this service from (pick from the list below, or "none")
@@ -84,8 +84,8 @@ Skeleton selection rules:
 - Infrastructure services (database, cache, proxy, auth) ALWAYS use skeleton="none" — the
   Provisioner has dedicated templates for them.
 
-Container-port reference (used by the Provisioner's compose builder; you only need to
-set the HOST port via service.port — the Provisioner picks the container side):
+Container-port reference (the port each framework's dev server listens on
+inside its container — set ``service.port`` to this value):
 - fastapi → 8000   |   teams-backend → 8000
 - react → 5173
 - angular → 4200   |   teams-frontend → 4200

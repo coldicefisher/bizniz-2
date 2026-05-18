@@ -90,7 +90,9 @@ keep their original skeleton):
 - Infrastructure (database/cache/proxy/auth): always "none" — the
   Provisioner has dedicated templates.
 
-Container-port reference (for service.port host-side picks):
+Container-port reference (set ``service.port`` to this — it's the port
+the framework's dev server listens on inside its container; Provisioner
+handles host-side mapping + collision remap):
 - fastapi → 8000   |   teams-backend → 8000
 - react → 5173
 - angular → 4200   |   teams-frontend → 4200

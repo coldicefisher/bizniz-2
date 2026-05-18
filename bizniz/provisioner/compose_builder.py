@@ -156,13 +156,14 @@ def _build_app_service_entry(
         }
 
     if service.port:
-        # Container port comes from the service's framework defaults if not
-        # explicit. For skeleton-seeded services the architect prompt should
-        # have set service.port to the host side; container side derived
-        # from skeleton metadata. Here we keep them equal as a reasonable
-        # default; the architect can populate more nuanced mappings later.
+        # ``service.port`` is the CONTAINER port (the port the service
+        # listens on inside its container). ``service.host_port`` is the
+        # host-side mapping, set by the provisioner when collision-detect
+        # forces a remap; None means "same as container port."
+        from bizniz.architect.types import host_port_for
         container_port = _container_port_for(service)
-        entry["ports"] = [f"{service.port}:{container_port}"]
+        host_port = host_port_for(service) or container_port
+        entry["ports"] = [f"{host_port}:{container_port}"]
 
     # Resolve dependencies that exist in the architecture
     valid_deps = {s.name for s in architecture.services if s.name != service.name}

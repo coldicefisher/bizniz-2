@@ -244,8 +244,10 @@ class AIFallbackTemplate(InfraTemplate):
         self.name = f"ai_fallback:{framework}"
 
     def render(self, ctx: TemplateContext) -> TemplateOutput:
+        from bizniz.architect.types import host_port_for
         svc = ctx.service
-        host_port = svc.port
+        container_port = svc.port
+        host_port = host_port_for(svc)
         ws = svc.workspace_name
 
         compose_service: Dict = {}
@@ -261,11 +263,12 @@ class AIFallbackTemplate(InfraTemplate):
 
         # Provisioner-controlled fields. The AI does not get to specify
         # these — we layer them on from the architect's plan.
-        if host_port is not None:
-            # Without knowing the framework's canonical container port,
-            # mirror host:container — most prebuilt infra images expose
-            # a single port and the architect sets it via service.port.
-            compose_service["ports"] = [f"{host_port}:{host_port}"]
+        if container_port is not None:
+            # ``svc.port`` is the container port; ``host_port`` is the
+            # host-side mapping (may have been remapped on collision).
+            # For AI-fallback templates we don't know the framework's
+            # canonical container port — assume container=svc.port.
+            compose_service["ports"] = [f"{host_port}:{container_port}"]
         compose_service["networks"] = ["app-network"]
         if svc.depends_on:
             compose_service["depends_on"] = list(svc.depends_on)

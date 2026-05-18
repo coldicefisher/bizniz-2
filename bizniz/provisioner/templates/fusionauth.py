@@ -60,7 +60,8 @@ class FusionAuthTemplate(InfraTemplate):
     FUSIONAUTH_SYSTEM_APP_ID = "3c219e58-ed0e-4b18-ad48-f4f92793ae32"
 
     def render(self, ctx: TemplateContext) -> TemplateOutput:
-        host_port = ctx.service.port or self.DEFAULT_CONTAINER_PORT
+        from bizniz.architect.types import host_port_for
+        host_port = host_port_for(ctx.service) or self.DEFAULT_CONTAINER_PORT
         slug = ctx.project_slug
         # The architect can name the postgres service anything ("db",
         # "postgres", "data") — look up the actual name and use it for

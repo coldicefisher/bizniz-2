@@ -704,10 +704,20 @@ class Provisioner:
     ) -> Dict[str, tuple]:
         """Single attempt at the allocation. ``externally_reserved``
         is the set of ports held by OTHER projects' reservations at
-        the moment we snapshotted the registry."""
+        the moment we snapshotted the registry.
+
+        Sets ``svc.host_port`` when a remap is needed. Leaves
+        ``svc.port`` (the container port) alone — Docker-network
+        internal URLs read it. Pre-fix this method mutated ``svc.port``
+        to the host port, which broke ``http://<svc>:<port>`` from
+        sidecar containers in remap scenarios.
+        """
+        from bizniz.architect.types import host_port_for
         remap: Dict[str, tuple] = {}
+        # Other services in this architecture that we're NOT creating —
+        # use their already-chosen host port for collision avoidance.
         taken: set = set(externally_reserved) | {
-            s.port for s in architecture.services
+            host_port_for(s) for s in architecture.services
             if s.port is not None
             and action_by_name[s.name].action != "create"
         }
@@ -719,17 +729,17 @@ class Provisioner:
             free = _find_free_port(svc.port, taken)
             if free != svc.port:
                 remap[svc.name] = (svc.port, free)
-                svc.port = free
+                svc.host_port = free
             taken.add(free)
-        # Commit our picks to the registry. Raises ValueError if a
-        # racing provisioner grabbed any of these ports between our
-        # snapshot read and now — caller catches and retries.
-        chosen_ports = [
-            s.port for s in architecture.services
+        # Commit our picks (host-side ports) to the registry. Raises
+        # ValueError if a racing provisioner grabbed any of these
+        # between our snapshot read and now — caller catches + retries.
+        chosen_host_ports = [
+            host_port_for(s) for s in architecture.services
             if s.port is not None and action_by_name[s.name].action == "create"
         ]
-        if chosen_ports:
-            reserve_fn(architecture.project_slug, chosen_ports)
+        if chosen_host_ports:
+            reserve_fn(architecture.project_slug, chosen_host_ports)
         return remap
 
     @staticmethod

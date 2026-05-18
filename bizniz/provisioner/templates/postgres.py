@@ -17,7 +17,8 @@ class PostgresTemplate(InfraTemplate):
     DEFAULT_CONTAINER_PORT = 5432
 
     def render(self, ctx: TemplateContext) -> TemplateOutput:
-        host_port = ctx.service.port or 5432
+        from bizniz.architect.types import host_port_for
+        host_port = host_port_for(ctx.service) or 5432
         # Use this service's actual name — the architect can call it
         # anything ("db", "data", "postgres"). Hardcoding "postgres" in
         # the DATABASE_URL causes a DNS lookup failure inside containers

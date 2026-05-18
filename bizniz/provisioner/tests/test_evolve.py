@@ -164,8 +164,15 @@ def test_evolve_only_remaps_new_service_ports(tmp_parent):
     result = p.evolve(arch, project_name="Mini CRM")
     backend = next(s for s in arch.services if s.name == "backend")
     reporter = next(s for s in arch.services if s.name == "reporter")
-    assert backend.port == 8001, "existing backend port should NOT be remapped"
-    assert reporter.port != 8001, "new colliding service should be remapped"
+    # ``svc.port`` is the CONTAINER port — never mutated by the
+    # provisioner, even on collision. ``svc.host_port`` captures the
+    # remap so in-network URLs (``http://reporter:8001``) keep working.
+    assert backend.port == 8001, "container port stays put on existing service"
+    assert backend.host_port is None, "no remap → no host_port override"
+    assert reporter.port == 8001, "container port stays at architect's choice"
+    assert reporter.host_port is not None and reporter.host_port != 8001, (
+        "colliding new service should get a host_port remap"
+    )
     assert "reporter" in result.port_remap
 
 

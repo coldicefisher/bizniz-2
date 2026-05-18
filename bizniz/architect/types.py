@@ -22,7 +22,18 @@ class ServiceDefinition(BaseModel):
         return v.lower() if isinstance(v, str) else v
     description: str
     workspace_name: str  # directory name for source code at project_root/<workspace_name>/
+    # CONTAINER port — the port the service listens on inside its container.
+    # Stable across remaps; safe to use in Docker-network internal URLs
+    # (e.g. ``http://backend:{port}`` from a sidecar joined to the same
+    # network). Architect sets this; Provisioner does NOT mutate it.
     port: Optional[int] = None
+    # HOST port — the host-side port mapped to ``port``. None means
+    # "same as container port" (the default when there's no conflict).
+    # Provisioner sets this only when port-collision detection forces
+    # a remap. Use for host-side URLs (browser, smoke tests, debugger
+    # inspecting from the host). NEVER use for Docker-network URLs —
+    # those always use ``port`` (the container side).
+    host_port: Optional[int] = None
     depends_on: List[str] = []
     requirements: List[str] = []  # pip/npm packages
     skeleton: Optional[str] = None  # fastapi | react | angular | teams-backend | teams-consumer | teams-frontend | none
@@ -82,3 +93,11 @@ class ArchitectError(Exception):
 
 class ArchitectBadAIResponseError(ArchitectError):
     pass
+
+
+def host_port_for(svc: ServiceDefinition) -> Optional[int]:
+    """Return the host-side port for a service: ``svc.host_port`` if the
+    provisioner remapped, else ``svc.port`` (= container port, which by
+    default is also exposed on the same host port). Use this for any
+    host-side URL or compose ports declaration."""
+    return svc.host_port if svc.host_port is not None else svc.port

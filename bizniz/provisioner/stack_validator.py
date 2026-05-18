@@ -192,8 +192,14 @@ def validate_stack(
             ))
             continue
 
-        # Use the host port (after remapping if applicable)
-        host_port = svc.port
+        # Use the host port (after remapping if applicable). The
+        # remap is now reflected on the ``svc.host_port`` field;
+        # ``port_remap`` is retained as a defensive fallback for
+        # legacy callers that pass the dict but haven't seen the
+        # new field. Once all callers migrate, ``port_remap`` can
+        # be dropped from this function's signature.
+        from bizniz.architect.types import host_port_for
+        host_port = host_port_for(svc)
         if port_remap and svc.name in port_remap:
             host_port = port_remap[svc.name][1]  # (old, new)
 
