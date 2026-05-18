@@ -121,6 +121,38 @@ Both effects compound. Fat dispatch sidesteps both.
   CLI. Two fixtures isn't enough to conclude "never," but it is
   enough to conclude "not the default."
 
+## Tier-strategy follow-up: Haiku bare fat (2026-05-18)
+
+After the three-way verdict landed, ran a fourth scenario
+(``coder_ba_fix2_2_fat_haiku``) — identical to bare fat but pinned
+to ``--model=claude-haiku-4-5``. Same fixture seed, same workspace
+state, only the model knob changed.
+
+| | Opus fat | **Haiku fat** | Δ |
+|---|---|---|---|
+| wall clock | 1074s | **628s** | **-42%** |
+| structural | 14/14 | **14/14** | same |
+| AST parse | ok | ok | same |
+| symbol validation | passed (13+16) | passed (8+16) | same |
+| target files written | 2 | 2 | same |
+| **test file written** | 0 (not in target_files) | **1** (`tests/integration/test_recipes_tags_search.py`) | **+1** |
+| coder iters | 0 | 0 | same |
+| tier used | 0 | 0 | same |
+| self-reported security guard | yes | yes ("load-bearing security properties") | same |
+
+Haiku didn't just hit parity — it **beat Opus by 42% wall** AND
+wrote the integration test that Opus's bare-fat skipped. Tier 0,
+zero retries, AST-clean, symbol-clean. On Anthropic's metered
+billing Haiku is ~4-5× cheaper per token, so the combined effect
+on a recipe_v2-class build is roughly **7-9× cheaper end-to-end**
+(faster wall + cheaper rate). Tag: ``perf/coder_ba_fix2_2_fat_haiku/run-1``,
+rev ``39eb8dd``.
+
+This locks the tier strategy: **default Coder/Tester/Debugger to
+Haiku, escalate to Opus only on stall.** Planning agents
+(Architect, Planner, ServicePlanner, AuthPlanner, QE, CR) stay on
+Opus where reasoning depth matters more than per-call cost.
+
 ## Implications
 
 ### Flip Decomposer to opt-in. Default ``v2_build`` to ``--no-decompose``.
@@ -160,8 +192,10 @@ code shape.
   - `perf/coder_ba_fix2_2_fat/run-1`           — rev `0901e4c`
   - `perf/coder_ba_fix2_2_decomposed/run-1`    — rev `b132642`
   - guideline-fat: terminated at ~30m wall, no tag.
+  - `perf/coder_ba_fix2_2_fat_haiku/run-1`     — rev `39eb8dd`
 - **Result files:**
   - `~/bizniz_perf_tests/coder_ba_fix2_2_fat/.runs/20260518_173853/result.json`
   - `~/bizniz_perf_tests/coder_ba_fix2_2_decomposed/.runs/20260518_175647/result.json`
+  - `~/bizniz_perf_tests/coder_ba_fix2_2_fat_haiku/.runs/20260518_193652/result.json`
 - **Validation:** quality block (AST + symbol-validator) ran live
   during the scenarios.
