@@ -168,6 +168,9 @@ def run(workspace: Path, fixture_root: Path) -> Dict[str, Any]:
     pass_count = sum(1 for v in matched_patterns.values() if v)
     total_patterns = len(EXPECTED_PATTERNS)
 
+    from bizniz.perf_tests.validate import validate_output
+    quality = validate_output(target_path=target_path, workspace_root=workspace)
+
     return {
         "coder_elapsed_s": coder_elapsed_s,
         "coder_error": error or None,
@@ -186,4 +189,5 @@ def run(workspace: Path, fixture_root: Path) -> Dict[str, Any]:
             "patterns_matched": matched_patterns,
             "match_rate": f"{pass_count}/{total_patterns}",
         },
+        "quality": quality,
     }

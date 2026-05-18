@@ -132,6 +132,9 @@ def run(workspace: Path, fixture_root: Path) -> Dict[str, Any]:
     matched = {label: bool(re.search(p, text)) for p, label in EXPECTED_PATTERNS}
     pass_count = sum(matched.values())
 
+    from bizniz.perf_tests.validate import validate_output
+    quality = validate_output(target_path=target, workspace_root=workspace)
+
     return {
         "mode": "fat_single_dispatch",
         "coder_elapsed_s": elapsed,
@@ -150,4 +153,5 @@ def run(workspace: Path, fixture_root: Path) -> Dict[str, Any]:
             "patterns_matched": matched,
             "match_rate": f"{pass_count}/{len(EXPECTED_PATTERNS)}",
         },
+        "quality": quality,
     }

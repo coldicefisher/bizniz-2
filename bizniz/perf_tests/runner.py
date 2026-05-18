@@ -237,6 +237,26 @@ def cmd_list(_args) -> int:
     return 0
 
 
+def cmd_validate(args) -> int:
+    """Post-hoc augment an existing run with AST + symbol checks."""
+    from bizniz.perf_tests.validate import validate_existing_run
+
+    parts = args.run_spec.split("/")
+    if len(parts) != 2:
+        sys.stderr.write(
+            f"bad spec '{args.run_spec}'; expected <slug>/<run-id>\n"
+        )
+        return 2
+    run_dir = _runs_dir(parts[0]) / parts[1]
+    if not run_dir.exists():
+        sys.stderr.write(f"no run dir: {run_dir}\n")
+        return 2
+
+    quality = validate_existing_run(run_dir, target_relpath=args.target)
+    print(json.dumps(quality, indent=2, default=str))
+    return 0
+
+
 def cmd_compare(args) -> int:
     """Cheap diff of two result.json files. Markdown-shaped output
     so it's drop-in for docs/perf_tests/<slug>.md."""
@@ -310,6 +330,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_cmp.add_argument("baseline", help="<test-slug>/<run-id>")
     p_cmp.add_argument("candidate", help="<test-slug>/<run-id>")
     p_cmp.set_defaults(func=cmd_compare)
+
+    p_val = sub.add_parser(
+        "validate",
+        help="post-hoc AST + symbol-validator on an existing run's output",
+    )
+    p_val.add_argument("run_spec", help="<test-slug>/<run-id>")
+    p_val.add_argument(
+        "--target",
+        default="app/api/routes/recipes.py",
+        help="relative path under workspace/ to validate (default: recipes router)",
+    )
+    p_val.set_defaults(func=cmd_validate)
 
     args = parser.parse_args(argv)
     return args.func(args)
