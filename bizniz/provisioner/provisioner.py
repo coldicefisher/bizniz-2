@@ -660,9 +660,53 @@ class Provisioner:
     ) -> Dict[str, tuple]:
         """Reassign host ports that collide with each other or the dev
         machine, but only for services the reconciler flagged ``create``.
-        Preserved services keep their original ports."""
+        Preserved services keep their original ports.
+
+        Concurrency: a second provisioner running in parallel for a
+        DIFFERENT project consults the cross-process port reservation
+        registry. Without this guard, two parallel builds both saw
+        ``9011`` free at provisioning time (neither stack was up yet)
+        and both tried to bind it at ``docker compose up``.
+        """
+        from bizniz.provisioner.port_reservation import (
+            active_reservations, reserve_ports,
+        )
+
+        # Up to 3 attempts: between our snapshot read and our reserve
+        # write, another concurrent provisioner could grab a port we
+        # picked. reserve_ports() raises in that case; we re-snapshot
+        # and try again. 3 retries is well over the practical race
+        # window (parallel builds aren't allocating dozens at a time).
+        last_err: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                return self._try_allocate(
+                    architecture=architecture,
+                    action_by_name=action_by_name,
+                    externally_reserved=set(active_reservations().keys()),
+                    reserve_fn=reserve_ports,
+                )
+            except ValueError as e:
+                last_err = e
+                continue
+        raise RuntimeError(
+            f"port allocation: lost the cross-process race 3x; "
+            f"last error: {last_err}"
+        )
+
+    def _try_allocate(
+        self,
+        *,
+        architecture: SystemArchitecture,
+        action_by_name: Dict[str, ReconcileAction],
+        externally_reserved: set,
+        reserve_fn,
+    ) -> Dict[str, tuple]:
+        """Single attempt at the allocation. ``externally_reserved``
+        is the set of ports held by OTHER projects' reservations at
+        the moment we snapshotted the registry."""
         remap: Dict[str, tuple] = {}
-        taken: set = {
+        taken: set = set(externally_reserved) | {
             s.port for s in architecture.services
             if s.port is not None
             and action_by_name[s.name].action != "create"
@@ -677,6 +721,15 @@ class Provisioner:
                 remap[svc.name] = (svc.port, free)
                 svc.port = free
             taken.add(free)
+        # Commit our picks to the registry. Raises ValueError if a
+        # racing provisioner grabbed any of these ports between our
+        # snapshot read and now — caller catches and retries.
+        chosen_ports = [
+            s.port for s in architecture.services
+            if s.port is not None and action_by_name[s.name].action == "create"
+        ]
+        if chosen_ports:
+            reserve_fn(architecture.project_slug, chosen_ports)
         return remap
 
     @staticmethod
