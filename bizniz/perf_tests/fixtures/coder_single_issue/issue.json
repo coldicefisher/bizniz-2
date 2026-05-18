@@ -1,0 +1,19 @@
+{
+  "id": "BE-006-U2",
+  "title": "Implement POST /api/recipes (create)",
+  "description": "Part of parent issue BE-006: Build recipes router (CRUD endpoints)\n\nThis unit only: Implement POST /api/recipes (create)\n\nAdd the POST handler at backend/app/api/routes/recipes.py. The router file does not yet exist; create it.\n\nThe handler signature must be:\n\n```python\n@router.post('', response_model=RecipeOut, status_code=status.HTTP_201_CREATED)\nasync def create_recipe_endpoint(\n    payload: RecipeCreate,\n    db: AsyncSession = Depends(get_db),\n    user = Depends(require_roles(['user', 'admin'])),\n) -> RecipeOut:\n    ...\n```\n\nKey rules:\n- owner_id is derived ONLY from the JWT (via ensure_local_user); never from payload\n- require_roles dependency handles 401 (no/invalid token) and 403 (missing user/admin role)\n- RecipeCreate's extra='forbid' rejects client-supplied owner_id/id with 422 automatically\n- Match async style to the surrounding skeleton conventions (check auth/*.py)\n- The router declares `prefix='/recipes'` (the auto-mount adds /api/v1)\n- Module docstring + helpful comments are expected\n\nHelpers to call:\n- `app.services.recipes.create_recipe(session, owner_id=..., data=payload)`\n- `app.services.recipes.ensure_local_user(session, jwt_claims=claims)`\n",
+  "service": "backend",
+  "language": "python",
+  "target_files": ["app/api/routes/recipes.py"],
+  "test_files": [],
+  "spec_refs": ["create_recipe"],
+  "depends_on": [],
+  "success_criteria": [
+    "app/api/routes/recipes.py exists with a POST '' handler",
+    "Handler uses require_roles(['user', 'admin']) dependency",
+    "Handler derives owner_id from JWT, not payload",
+    "Handler calls app.services.recipes.create_recipe with the owner_id and payload",
+    "router declares prefix='/recipes'"
+  ],
+  "parent_issue_id": "BE-006"
+}
