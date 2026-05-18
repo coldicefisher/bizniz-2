@@ -124,6 +124,139 @@ def _resolve_fa_endpoint(project_root: Path) -> tuple[str, str]:
     )
 
 
+def _build_v3_refactorer_adapter(
+    *,
+    project_root: Path,
+    on_status: Optional[callable] = None,
+):
+    """Build the v3 RefactorerAgent wrapped in a v1-compat adapter.
+
+    v1's ``Refactorer.run(milestone, architecture, is_final_milestone)``
+    is what ``RefactorPhase`` calls; v3's ``V3RefactorerAgent.run()``
+    takes no args. Adapter logs the milestone context and delegates.
+
+    The agents inside (decision gate, destination planner,
+    misplacement scanner) need an LLM invoker. For now we use a
+    minimal Claude CLI subprocess invoker that mirrors what
+    ``AgenticPhaseRecovery`` does — single ``claude --print`` call,
+    returns the result text. Backend swap point lives here.
+    """
+    from bizniz.refactorer.decision_gate import DecisionGate
+    from bizniz.refactorer.destination_planner import DestinationPlanner
+    from bizniz.refactorer.extraction_executor import ExtractionExecutor
+    from bizniz.refactorer.import_verifier import ImportVerifier
+    from bizniz.refactorer.misplacement_scanner import MisplacementScanner
+    from bizniz.refactorer.v3_agent import V3RefactorerAgent
+
+    invoker = _make_claude_cli_invoker(project_root=project_root)
+
+    decision_gate = DecisionGate(
+        llm_invoker=invoker,
+        on_status=on_status,
+    )
+    destination_planner = DestinationPlanner(
+        project_root=project_root,
+        llm_invoker=invoker,
+        on_status=on_status,
+    )
+    misplacement_scanner = MisplacementScanner(
+        project_root=project_root,
+        llm_invoker=invoker,
+        on_status=on_status,
+    )
+    executor = ExtractionExecutor(
+        project_root=project_root,
+        on_status=on_status,
+    )
+    import_verifier = ImportVerifier(
+        search_roots=[
+            project_root,
+            project_root / "core" / "python",
+        ],
+    )
+    agent = V3RefactorerAgent(
+        project_root=project_root,
+        executor=executor,
+        decision_gate=decision_gate,
+        destination_planner=destination_planner,
+        misplacement_scanner=misplacement_scanner,
+        import_verifier=import_verifier,
+        on_status=on_status,
+    )
+    return _V3RefactorPhaseAdapter(agent=agent, on_status=on_status)
+
+
+def _make_claude_cli_invoker(project_root: Path):
+    """Return a callable ``(system_prompt, user_prompt) -> str`` that
+    shells out to ``claude --print`` and returns the result text.
+
+    Used by v3 refactorer's gate + destination planner + scanner.
+    Mirrors the dispatch shape in ``AgenticPhaseRecovery``; kept
+    inline here because v3's collaborators take a simpler
+    invoker contract (no tool calls — just text → text).
+    """
+    import json as _json
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    DEFAULT_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+
+    def invoke(system_prompt: str, user_prompt: str) -> str:
+        if _shutil.which("claude") is None:
+            return ""
+        cmd = [
+            "claude", "--print",
+            "--output-format=json",
+            "--append-system-prompt", system_prompt,
+            "--permission-mode", "bypassPermissions",
+            "--allowed-tools", " ".join(DEFAULT_TOOLS),
+            "--add-dir", str(project_root),
+        ]
+        proc = _subprocess.run(
+            cmd, input=user_prompt, capture_output=True, text=True,
+            timeout=900, cwd=str(project_root),
+        )
+        if proc.returncode != 0:
+            return ""
+        try:
+            payload = _json.loads(proc.stdout)
+        except _json.JSONDecodeError:
+            return ""
+        if payload.get("is_error"):
+            return ""
+        return payload.get("result") or ""
+
+    return invoke
+
+
+class _V3RefactorPhaseAdapter:
+    """Bridges ``V3RefactorerAgent.run()`` (no args) to RefactorPhase's
+    expected ``run(milestone, architecture, is_final_milestone)``
+    signature."""
+
+    def __init__(self, agent, on_status=None):
+        self._agent = agent
+        self._on_status = on_status
+
+    def run(
+        self,
+        milestone,
+        architecture,
+        is_final_milestone: bool,
+    ):
+        scope = "FINAL-MILESTONE" if is_final_milestone else "MID-PROJECT"
+        if self._on_status:
+            try:
+                self._on_status(
+                    f"V3Refactorer ({scope}): starting refactor pass for "
+                    f"milestone '{milestone.name}' "
+                    f"(M{milestone.sequence_index + 1})"
+                )
+            except Exception:
+                pass
+        return self._agent.run()
+
+
 def render_workspace_summary(project_root: Path, max_files: int = 200) -> str:
     """Pre-render a compact workspace tree for the Engineer's initial context.
 
@@ -575,11 +708,18 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         ux_factory=ux_designer_factory, on_status=on_status,
     )
 
-    # RefactorPhase factory: builds a Refactorer rooted at the
-    # project (so Claude can see all service workspaces). Runs at
-    # milestone boundaries the Planner flagged + always the final
-    # milestone.
+    # RefactorPhase factory. v1 (single-shot Refactorer) is the
+    # default; opt into v3 (deterministic + agent pipeline with
+    # decision gate, destination planner, import verifier, executor)
+    # via ``BIZNIZ_REFACTORER=v3``. v3 lands per
+    # docs/backlog/v3_refactorer_design.md.
     def refactorer_factory():
+        mode = os.environ.get("BIZNIZ_REFACTORER", "v1").lower()
+        if mode == "v3":
+            return _build_v3_refactorer_adapter(
+                project_root=project_root,
+                on_status=on_status,
+            )
         from bizniz.refactorer.refactorer import Refactorer
         return Refactorer(
             project_root=project_root,
