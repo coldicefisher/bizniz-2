@@ -37,13 +37,45 @@ docs/perf_tests/                           # in-repo (committed)
   <test-slug>.md                           # results doc per test
 ```
 
-## Git tag convention
+## Versioning + rollback
 
-After every successful test run, the runner tags the bizniz repo
-at `HEAD` with `perf/<test-slug>/run-<N>`. This lets us
-`git diff perf/coder/run-1 perf/coder/run-2` and see exactly what
-code state produced each measured number — no guessing about
-which prompt rev / which model / which threshold was in effect.
+Perf data is only as trustworthy as our knowledge of what code +
+deps + binary were in effect at run time. The harness records four
+things on every run:
+
+1. **Git tag at HEAD** — `perf/<test-slug>/run-<N>` (annotated). Lets
+   us `git diff perf/coder/run-1 perf/coder/run-2` to see what
+   changed, and `git checkout perf/coder/run-1` + re-run to verify a
+   rollback reproduces the original numbers.
+2. **Dirty-tree gate** — `python -m bizniz.perf_tests run …` refuses
+   to start when the working tree is dirty (would record a misleading
+   `git_rev`). `--allow-dirty` overrides and captures the full
+   `git diff HEAD` into `result.json` so the run stays traceable.
+3. **Env fingerprint** in `result.json` under `env`:
+   - `bizniz_git_rev` + `bizniz_git_status.dirty`
+   - `claude_cli_version` — catches binary upgrades
+   - `pip_freeze.sha256` — catches dep drift without a 50KB freeze dump
+   - `fixture_sha256` — catches fixture edits that change what's
+     actually being measured
+   - `python_version`, `platform`
+4. **A row in `docs/perf_tests/<slug>.md`** for every change that
+   affects the numbers. The doc is the audit log; the git tag is the
+   pointer; the env fingerprint is the "was this comparable" check.
+
+### Experiment branches
+
+Knob tweaks (prompt versions, thresholds, model tiers) land on
+`experiment/<name>` branches first. Run perf tests on the branch,
+compare to `main`, only merge if you'd ship the change. Keep losing
+experiments as branches for archaeology — `git branch -D` only after
+the result is documented.
+
+### Library upgrades
+
+If `pip_freeze.sha256` changes between two runs, treat the numeric
+delta as untrusted until a same-deps re-baseline is captured. The
+runner doesn't enforce this — it's a discipline check at compare
+time.
 
 ## Workflow
 

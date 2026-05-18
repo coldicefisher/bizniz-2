@@ -27,9 +27,11 @@ the test scenarios.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -116,6 +118,103 @@ def _bizniz_git_rev() -> Optional[str]:
     return None
 
 
+def _git_dirty_status() -> Dict[str, Any]:
+    """Return ``{dirty: bool, files: List[str], diff: str}`` describing
+    the bizniz repo's working tree."""
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(_bizniz_repo_root()),
+            capture_output=True, text=True, check=False,
+        )
+        if proc.returncode != 0:
+            return {"dirty": False, "files": [], "error": proc.stderr.strip()}
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        if not lines:
+            return {"dirty": False, "files": []}
+        # Diff stays small enough to embed; full unified diff for
+        # post-mortem. Capped to avoid bloat.
+        diff_proc = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=str(_bizniz_repo_root()),
+            capture_output=True, text=True, check=False,
+        )
+        diff = diff_proc.stdout[:20000] if diff_proc.returncode == 0 else ""
+        return {
+            "dirty": True,
+            "files": [ln[3:] if len(ln) > 3 else ln for ln in lines],
+            "diff": diff,
+        }
+    except OSError as e:
+        return {"dirty": False, "files": [], "error": str(e)}
+
+
+def _claude_version() -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip() or proc.stderr.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def _pip_freeze_sha() -> Optional[Dict[str, Any]]:
+    """Returns ``{sha: str, package_count: int}`` for the active venv,
+    or None if pip isn't reachable. Hash detects dep drift between
+    runs without dumping a multi-kilobyte freeze into result.json."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "freeze"],
+            capture_output=True, text=True, check=False, timeout=15,
+        )
+        if proc.returncode != 0:
+            return None
+        text = proc.stdout.strip()
+        return {
+            "sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "package_count": len([ln for ln in text.splitlines() if ln.strip()]),
+        }
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _fixture_sha(fixture_root: Path) -> Optional[str]:
+    """sha256 of fixture-dir contents (path + bytes). Catches edits
+    that change what the test is actually measuring without touching
+    the scenario code or the bizniz git_rev."""
+    if not fixture_root.exists():
+        return None
+    h = hashlib.sha256()
+    # Walk deterministically. Follow symlinks so the shared workspace_seed
+    # symlink case (guideline-fat → fat) hashes the real bytes.
+    for path in sorted(fixture_root.rglob("*")):
+        if path.is_dir():
+            continue
+        rel = path.relative_to(fixture_root)
+        h.update(str(rel).encode())
+        try:
+            h.update(path.read_bytes())
+        except OSError:
+            h.update(b"<unreadable>")
+    return h.hexdigest()
+
+
+def _env_fingerprint(fixture_root: Path) -> Dict[str, Any]:
+    return {
+        "bizniz_git_rev": _bizniz_git_rev(),
+        "bizniz_git_status": _git_dirty_status(),
+        "claude_cli_version": _claude_version(),
+        "pip_freeze": _pip_freeze_sha(),
+        "fixture_sha256": _fixture_sha(fixture_root),
+        "python_version": platform.python_version(),
+        "platform": f"{platform.system()} {platform.release()}",
+    }
+
+
 def _tag_run(slug: str, run_index: int, run_id: str) -> Optional[str]:
     """Tag the bizniz repo at HEAD: ``perf/<slug>/run-<N>``.
 
@@ -168,6 +267,21 @@ def cmd_run(args) -> int:
         )
         return 2
 
+    # Dirty-tree gate. Misleading git_rev is worse than a noisy abort.
+    dirty = _git_dirty_status()
+    if dirty.get("dirty") and not args.allow_dirty:
+        sys.stderr.write(
+            "bizniz working tree is dirty — results would record a "
+            "misleading git_rev.\n  Dirty files:\n"
+        )
+        for f in dirty.get("files", [])[:20]:
+            sys.stderr.write(f"    {f}\n")
+        sys.stderr.write(
+            "  Commit, stash, or pass --allow-dirty to override "
+            "(captures git diff into result.json).\n"
+        )
+        return 2
+
     existing = _existing_run_count(slug)
     for i in range(args.runs):
         run_index = existing + i + 1
@@ -177,7 +291,8 @@ def cmd_run(args) -> int:
         workspace.mkdir(parents=True, exist_ok=True)
 
         print(f"=== {slug} run #{run_index} (id={run_id}) ===")
-        git_rev = _bizniz_git_rev()
+        env = _env_fingerprint(fixture_root)
+        git_rev = env["bizniz_git_rev"]
         t0 = time.time()
         status = "ok"
         scenario_result: Dict[str, Any] = {}
@@ -201,6 +316,7 @@ def cmd_run(args) -> int:
             "wall_clock_s": elapsed,
             "status": status,
             "git_rev": git_rev,
+            "env": env,
             "scenario_result": scenario_result,
         }
         (run_dir / "result.json").write_text(
@@ -318,6 +434,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_run.add_argument(
         "--no-tag", action="store_true",
         help="skip git-tagging this run",
+    )
+    p_run.add_argument(
+        "--allow-dirty", action="store_true",
+        help="run even with a dirty bizniz working tree; the diff "
+             "is captured into result.json so the run remains traceable",
     )
     p_run.set_defaults(func=cmd_run)
 
