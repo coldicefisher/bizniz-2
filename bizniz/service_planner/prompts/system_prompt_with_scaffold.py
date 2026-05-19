@@ -73,6 +73,17 @@ Typically 1:1 with unique target_files across all issues. For a
 shared, e.g. ``app/api/routes/auth.py`` if multiple issues add
 endpoints to the same router). Don't seed files no issue will fill.
 
+PARALLEL EXECUTION (v4) — depends_on IS LOAD-BEARING:
+The Coder dispatches issues in parallel up to a configurable cap.
+The runner builds a dependency DAG from (a) file-overlap (any two
+issues touching the same file are auto-serialized) UNION (b) your
+``depends_on`` lists. depends_on is for LOGICAL deps that file-
+overlap can't see — e.g. issue B's route handler calls a function
+defined in issue A's service file but they're in different files.
+File-overlap is detected for you; ``depends_on`` is what YOU bring
+on top. When in doubt, ADD a dep (over-serializing is safe;
+under-serializing causes races).
+
 RESPONSE FORMAT:
 Return ONE valid JSON object with `issues` AND `seeded_files`. No
 markdown, no code fences around the outer object, no commentary
