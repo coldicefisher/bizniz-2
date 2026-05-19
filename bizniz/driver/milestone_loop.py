@@ -1762,7 +1762,9 @@ class MilestoneLoop:
             # Workspace root = the primary workspace (or the
             # backend workspace if one exists). The debugger uses
             # full Claude CLI tools to make edits across the
-            # workspace.
+            # workspace. compose_path + service_name are .run() args,
+            # not constructor args — ReviewUnitLoop passes them per
+            # iteration.
             ws_root = getattr(self._primary_workspace, "root", None)
             if ws_root is None:
                 ws_root = self._project_root
@@ -1770,7 +1772,6 @@ class MilestoneLoop:
             return BatchFixDebugger(
                 workspace_root=Path(str(ws_root)),
                 on_status=self._on_status,
-                compose_path=str(self._compose_path) if self._compose_path else None,
             )
 
         ws_root = getattr(self._primary_workspace, "root", None)
