@@ -1,0 +1,288 @@
+=== HAIKU BASELINE START 2026-05-18T16:01:37-07:00 ===
+[16:01:38] Sidecar preflight: all 4 image(s) already built — proceeding
+[16:01:38] Decomposer: disabled (default since 2026-05-18 perf verdict). Coder gets full feature-sized issues. Use --decompose to opt in.
+[16:01:39] Cost ledger: /home/jamey/.bizniz/cost_ledger.jsonl
+[16:01:39] Workspace summary: 0 files pre-rendered for Engineer initial context
+[16:01:39] v2-build: project=recipe_v3_haiku job=new mode=auto
+[16:01:39] Planner: planning 'recipe_v3_haiku'...
+[16:01:39] Planner: AI call (attempt 1/10)...
+[16:02:51] Planner: AI responded in 72.5s (7255 chars)
+[16:02:51] Planner: produced 5 milestone(s): Auth and authenticated shell → Recipe creation and management → Search and tags → Favorites and dashboard → Admin moderation interface
+[16:02:51] Architect: decomposing 'recipe_v3_haiku' into services...
+[16:02:51] Architect.decompose: AI call (attempt 1/10)...
+[16:03:15] Architect.decompose: AI responded in 23.7s (2454 chars)
+[16:03:15] Architect: architecture designed — 4 services: backend, frontend, db, auth
+[16:03:15] Provisioner: probed 'recipe_v3_haiku' — 0 known services, 1 orphan workspace(s), 2 project image(s)
+[16:03:15] Provisioner: remapped 4 colliding host port(s): backend 8000->8001, frontend 5173->5174, db 5432->5433, auth 9011->9012
+[16:03:16] Provisioner: seeded 'backend' from skeleton 'fastapi' (35 files)
+[16:03:16] Provisioner: seeded 'frontend' from skeleton 'react' (53 files)
+[16:03:16] Provisioner: applied skeleton substitution in vite.config.ts ('target: "http://api:8000"' → 'target: "http://backend:8000"')
+[16:03:16] Provisioner: rendered 'db' from postgres template
+[16:03:16] Provisioner: rendered 'auth' from fusionauth template
+[16:03:16] Provisioner: wrote docker-compose.yml and .env
+[16:03:16] Provisioner: docker build recipe_v3_haiku-backend:dev (from /home/jamey/bizniz_projects/recipe_v3_haiku/infra/development/backend/Dockerfile)...
+[16:03:18] Provisioner: docker build OK in 2.2s
+[16:03:18] Provisioner: docker build recipe_v3_haiku-frontend:dev (from /home/jamey/bizniz_projects/recipe_v3_haiku/infra/development/frontend/Dockerfile)...
+[16:03:19] Provisioner: docker build OK in 1.0s
+[16:03:19] ProjectGit: initialized fresh repo at /home/jamey/bizniz_projects/recipe_v3_haiku (user.name=Bizniz Pipeline)
+[16:03:19] ProjectGit: committed 'Initial provision (architect + provisioner)' (tag=m0)
+[16:03:29] V2Pipeline: waiting for FusionAuth at http://localhost:9012 (http server; 0s elapsed)...
+[16:03:34] V2Pipeline: waiting for FusionAuth at http://localhost:9012 (http server; 5s elapsed)...
+[16:03:39] V2Pipeline: FusionAuth fully ready at http://localhost:9012 (after 10s)
+[16:03:39] AuthPlanner: planning auth spec
+[16:03:39] AuthPlanner: AI call (attempt 1/10)...
+[16:03:53] AuthPlanner: AI responded in 14.0s (978 chars)
+[16:03:53] AuthPlanner: emitted spec — 3 role(s), 1 app(s), 2 user(s)
+[16:03:53] FusionAuthOperator: apply starting
+[16:03:53] FusionAuth: fully ready after 0s (attempt 1)
+[16:03:53] FusionAuth: generating RS256 key 'bizniz-app-85a03867-dccf-4882-adde-1a79aeec50df-rs256' (2048 bits) at 0e740ebe-f52f-51ba-86fd-0f8e6bafc194
+[16:03:53] FusionAuth: binding key 0e740ebe-f52f-51ba-86fd-0f8e6bafc194 as tenant 782e2131-ff63-4e7b-95c9-e01b4fc0dd67 accessTokenKeyId + idTokenKeyId
+[16:03:53] FusionAuth: binding key 0e740ebe-f52f-51ba-86fd-0f8e6bafc194 as application 85a03867-dccf-4882-adde-1a79aeec50df accessTokenKeyId + idTokenKeyId
+[16:03:53] FusionAuth: PATCHing application 'primary' login config to requireAuthentication=false
+[16:03:53] FusionAuth: creating role 'super_admin' on app 85a03867-dccf-4882-adde-1a79aeec50df
+[16:03:53] FusionAuth: creating user admin@admin.com (roles=['super_admin'])
+[16:03:53] FusionAuth: creating user user@example.com (roles=['user'])
+[16:03:53] FusionAuth: creating user admin@example.com (roles=['admin'])
+[16:03:53] FusionAuth: resetting password for existing user user@example.com
+[16:03:53] FusionAuth: resetting password for existing user admin@example.com
+[16:03:53] FusionAuthOperator: apply done — 2 user(s) (2 login-verified), signing_key=RS256
+[16:03:53] AuthOperator: generating code samples for python, typescript
+[16:03:53] AuthOperator.code_examples: AI call (attempt 1/9)...
+[16:04:29] AuthOperator.code_examples: AI responded in 35.4s (4720 chars)
+[16:04:29] V2Pipeline: wrote /home/jamey/bizniz_projects/recipe_v3_haiku/AUTH_CONTRACT.md
+[16:04:29] V2Pipeline: emitted contract test backend/tests/auth/test_auth_contract.py
+[16:04:29] MilestoneLoop: M1 'Auth and authenticated shell' (resume from None)
+[16:04:29] QualityEngineer (enrich): Auth and authenticated shell
+[16:04:29] QualityEngineer.enrich: AI call (attempt 1/10)...
+[16:06:32] QualityEngineer.enrich: AI responded in 122.7s (33503 chars)
+[16:06:32] QualityEngineer (enrich): 7 capabilities, confidence=0.80
+[16:06:32] MilestoneLoop: implement via v2.5 code dispatcher
+[16:06:32] MilestoneCodeDispatcher: starting
+[16:06:32] MilestoneCodeDispatcher: skipping `db` (language='sql' is infrastructure-only — provisioner already materialized it; nothing to code)
+[16:06:32] MilestoneCodeDispatcher: skipping `auth` (language='yaml' is infrastructure-only — provisioner already materialized it; nothing to code)
+[16:06:32] MilestoneCodeDispatcher: planning service `backend` (fastapi/python)
+[16:06:32] ServicePlanner: backend
+[16:06:32] ServicePlanner(backend): AI call (attempt 1/10)...
+[16:08:34] ServicePlanner(backend): AI responded in 122.2s (7152 chars)
+[16:08:34] ServicePlanner: backend → 5 issue(s) in 3 layer(s)
+[16:08:34] MilestoneCodeDispatcher: `backend` planner emitted 5 issues
+[16:08:34] [backend] BE-001: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:08:34] ClaudeCliCoder: BE-001 — Implement JWT validation middleware (service=backend)
+[16:12:06] ClaudeCliCoder: BE-001 subprocess done in 211.7s (exit 0)
+[16:12:06] [backend] BE-002: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:12:06] ClaudeCliCoder: BE-002 — Implement signup endpoint (service=backend)
+[16:16:50] ClaudeCliCoder: BE-002 subprocess done in 283.9s (exit 0)
+[16:16:50] [backend] BE-005: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:16:50] ClaudeCliCoder: BE-005 — Implement My Recipes dashboard route (service=backend)
+[16:21:24] ClaudeCliCoder: BE-005 subprocess done in 274.6s (exit 0)
+[16:21:24] [backend] BE-003: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:21:24] ClaudeCliCoder: BE-003 — Implement login endpoint (service=backend)
+[16:24:57] ClaudeCliCoder: BE-003 subprocess done in 213.1s (exit 0)
+[16:24:57] [backend] BE-004: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:24:57] ClaudeCliCoder: BE-004 — Implement logout endpoint (service=backend)
+[16:26:07] ClaudeCliCoder: BE-004 subprocess done in 69.6s (exit 0)
+[16:26:07] MilestoneCodeDispatcher: planning service `frontend` (react/typescript)
+[16:26:07] ServicePlanner: frontend
+[16:26:07] ServicePlanner(frontend): AI call (attempt 1/10)...
+[16:27:41] ServicePlanner(frontend): AI responded in 93.7s (11590 chars)
+[16:27:41] ServicePlanner: frontend → 8 issue(s) in 4 layer(s)
+[16:27:41] MilestoneCodeDispatcher: `frontend` planner emitted 8 issues
+[16:27:41] [frontend] FE-001: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:27:41] ClaudeCliCoder: FE-001 — Implement JWT validation and auth utilities (service=frontend)
+[16:32:01] ClaudeCliCoder: FE-001 subprocess done in 259.9s (exit 0)
+[16:32:01] [frontend] FE-002: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:32:01] ClaudeCliCoder: FE-002 — Implement auth API client (service=frontend)
+[16:34:14] ClaudeCliCoder: FE-002 subprocess done in 133.7s (exit 0)
+[16:34:14] [frontend] FE-003: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:34:14] ClaudeCliCoder: FE-003 — Implement session restoration on app load (service=frontend)
+[16:37:41] ClaudeCliCoder: FE-003 subprocess done in 206.6s (exit 0)
+[16:37:41] ClaudeCliCoder: FE-003 edited package.json — installing in container (npm install)
+[16:37:48] ClaudeCliCoder: FE-003 package.json installed in container
+[16:37:48] [frontend] FE-004: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:37:49] ClaudeCliCoder: FE-004 — Implement signup form and route (service=frontend)
+[16:45:17] ClaudeCliCoder: FE-004 subprocess done in 448.7s (exit 0)
+[16:45:17] ClaudeCliCoder: FE-004 edited package.json — installing in container (npm install)
+[16:45:19] ClaudeCliCoder: FE-004 package.json installed in container
+[16:45:19] [frontend] FE-005: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:45:19] ClaudeCliCoder: FE-005 — Implement login form and route (service=frontend)
+[16:49:06] ClaudeCliCoder: FE-005 subprocess done in 226.5s (exit 0)
+[16:49:06] [frontend] FE-006: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:49:06] ClaudeCliCoder: FE-006 — Implement logout button (service=frontend)
+[16:50:36] ClaudeCliCoder: FE-006 subprocess done in 90.0s (exit 0)
+[16:50:36] [frontend] FE-007: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:50:36] ClaudeCliCoder: FE-007 — Implement protected route component (service=frontend)
+[16:52:19] ClaudeCliCoder: FE-007 subprocess done in 103.4s (exit 0)
+[16:52:19] [frontend] FE-008: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:52:19] ClaudeCliCoder: FE-008 — Implement My Recipes dashboard route and component (service=frontend)
+[16:54:10] ClaudeCliCoder: FE-008 subprocess done in 110.4s (exit 0)
+[16:54:10] MilestoneCodeDispatcher: done — 13 issue(s) completed (13 unit(s)), 0 issue(s) deferred (0 unit(s)), final=passed
+[16:54:10] SmokePhase: starting for M1 'Auth and authenticated shell'
+[16:54:11] SmokePhase: done in 0.7s — 12/12 checks ok, 0 critical failure(s)
+[16:54:11] QualityEngineer (review): Auth and authenticated shell (0 test file(s))
+[16:54:11] QualityEngineer.review: AI call (attempt 1/10)...
+[16:54:41] QualityEngineer.review: AI responded in 30.4s (8979 chars)
+[16:54:41] QualityEngineer (review): approved=False, covered=0/7, gaps=31
+[16:54:41] CodeReviewer: Auth and authenticated shell (0 file(s))
+[16:54:41] MilestoneLoop: entering review/repair loop (initial defects=31, stall threshold=5, hard cap=20)
+[16:54:41] MilestoneLoop: repair iteration 1 (escalation tier 0, defects 31)
+[16:54:41] MilestoneCodeDispatcher.repair: iter 1 starting
+[16:54:41] repair: planning `backend` (5 prior issues)
+[16:54:41] ServicePlanner (repair iter 1): backend
+[16:54:41] ServicePlanner.repair(backend, iter1): AI call (attempt 1/10)...
+[16:55:47] ServicePlanner.repair(backend, iter1): AI responded in 66.3s (7470 chars)
+[16:55:47] ServicePlanner (repair iter 1): backend → 5 fix-issue(s)
+[16:55:47] repair: `backend` → 5 fix-issue(s)
+[16:55:47] [backend] BE-001-fix1: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:55:47] ClaudeCliCoder: BE-001-fix1 — Add JWT validation and middleware integration tests (service=backend)
+[16:58:47] ClaudeCliCoder: BE-001-fix1 subprocess done in 179.1s (exit 0)
+[16:58:47] [backend] BE-002-fix1: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[16:58:47] ClaudeCliCoder: BE-002-fix1 — Add signup endpoint integration tests (service=backend)
+[17:01:28] ClaudeCliCoder: BE-002-fix1 subprocess done in 161.0s (exit 0)
+[17:01:28] [backend] BE-003-fix1: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[17:01:28] ClaudeCliCoder: BE-003-fix1 — Add login endpoint integration tests (service=backend)
+[17:02:38] ClaudeCliCoder: BE-003-fix1 subprocess done in 70.0s (exit 0)
+[17:02:38] [backend] BE-004-fix1: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[17:02:38] ClaudeCliCoder: BE-004-fix1 — Add logout endpoint integration tests (service=backend)
+[17:03:51] ClaudeCliCoder: BE-004-fix1 subprocess done in 72.9s (exit 0)
+[17:03:51] [backend] BE-005-fix1: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[17:03:51] ClaudeCliCoder: BE-005-fix1 — Add My Recipes dashboard integration tests (service=backend)
+[17:06:58] ClaudeCliCoder: BE-005-fix1 subprocess done in 187.1s (exit 0)
+[17:06:58] repair: planning `frontend` (8 prior issues)
+[17:06:58] ServicePlanner (repair iter 1): frontend
+[17:06:58] ServicePlanner.repair(frontend, iter1): AI call (attempt 1/10)...
+[17:08:24] ServicePlanner.repair(frontend, iter1): AI responded in 86.7s (10371 chars)
+[17:08:24] ServicePlanner(frontend): dropped 2 issue(s) with empty target_files: ['FE-001-fix1', 'FE-004-fix1']
+[17:08:24] ServicePlanner (repair iter 1): frontend → 0 fix-issue(s)
+[17:08:24] repair: `frontend` — planner emitted no fix-issues, skipping
+[17:08:24] MilestoneCodeDispatcher.repair: iter 1 done — 18 passing, 0 not
+[17:08:24] QualityEngineer (review): Auth and authenticated shell (15 test file(s))
+[17:08:24] QualityEngineer.review: AI call (attempt 1/10)...
+[17:09:21] QualityEngineer.review: AI responded in 56.9s (2795 chars)
+[17:09:21] QualityEngineer (review): approved=False, covered=6/7, gaps=2
+[17:09:21] CodeReviewer: Auth and authenticated shell (21 file(s))
+[17:09:21] CodeReviewer: AI call (attempt 1/10)...
+[17:10:26] CodeReviewer: AI responded in 64.4s (2126 chars)
+[17:10:26] CodeReviewer: approved=False, findings=1 (1 critical)
+[17:10:26] MilestoneLoop: review/repair iter 1: verdict=progress, defects=3, stall_counter=0/5
+[17:10:26] MilestoneLoop: repair iteration 2 (escalation tier 1, defects 3)
+[17:10:26] MilestoneCodeDispatcher.repair: iter 2 starting
+[17:10:26] repair: planning `backend` (10 prior issues)
+[17:10:26] ServicePlanner (repair iter 2): backend
+[17:10:26] ServicePlanner.repair(backend, iter2): AI call (attempt 1/10)...
+[17:11:02] ServicePlanner.repair(backend, iter2): AI responded in 36.6s (2863 chars)
+[17:11:02] ServicePlanner(backend): dropped 1 issue(s) with empty target_files: ['BA-fix2-1']
+[17:11:02] ServicePlanner (repair iter 2): backend → 0 fix-issue(s)
+[17:11:02] repair: `backend` — planner emitted no fix-issues, skipping
+[17:11:02] repair: planning `frontend` (8 prior issues)
+[17:11:02] ServicePlanner (repair iter 2): frontend
+[17:11:02] ServicePlanner.repair(frontend, iter2): AI call (attempt 1/10)...
+[17:11:25] ServicePlanner.repair(frontend, iter2): AI responded in 22.3s (4748 chars)
+[17:11:25] ServicePlanner(frontend): dropped 1 issue(s) with empty target_files: ['FR-fix2-1']
+[17:11:25] ServicePlanner (repair iter 2): frontend → 1 fix-issue(s)
+[17:11:25] repair: `frontend` → 1 fix-issue(s)
+[17:11:25] [frontend] FE-004-fix2: starting on tier 0 (claude-cli:claude-haiku-4-5)
+[17:11:25] ClaudeCliCoder: FE-004-fix2 — Fix SignupForm to extract user claims from JWT instead of response.user (service=frontend)
+[17:13:26] ClaudeCliCoder: FE-004-fix2 subprocess done in 121.3s (exit 0)
+[17:13:26] MilestoneCodeDispatcher.repair: iter 2 done — 19 passing, 0 not
+[17:13:26] QualityEngineer (review): Auth and authenticated shell (15 test file(s))
+[17:13:26] QualityEngineer.review: AI call (attempt 1/10)...
+[17:14:17] QualityEngineer.review: AI responded in 50.5s (2798 chars)
+[17:14:17] QualityEngineer (review): overriding approval — found missing capabilities or critical gaps
+[17:14:17] QualityEngineer (review): approved=False, covered=6/7, gaps=2
+[17:14:17] CodeReviewer: Auth and authenticated shell (21 file(s))
+[17:14:17] CodeReviewer: AI call (attempt 1/10)...
+[17:14:46] CodeReviewer: AI responded in 28.9s (1017 chars)
+[17:14:46] CodeReviewer: approved=True, findings=0 (0 critical)
+[17:14:46] MilestoneLoop: review/repair iter 2: verdict=progress, defects=2, stall_counter=0/5
+[17:14:46] MilestoneLoop: repair iteration 3 (escalation tier 2, defects 2)
+[17:14:46] MilestoneCodeDispatcher.repair: iter 3 starting
+[17:14:46] repair: planning `backend` (10 prior issues)
+[17:14:46] ServicePlanner (repair iter 3): backend
+[17:14:46] ServicePlanner.repair(backend, iter3): AI call (attempt 1/10)...
+[17:15:26] ServicePlanner.repair(backend, iter3): AI responded in 40.3s (3163 chars)
+[17:15:26] ServicePlanner(backend): dropped 1 issue(s) with empty target_files: ['BA-fix3-1']
+[17:15:26] ServicePlanner (repair iter 3): backend → 0 fix-issue(s)
+[17:15:26] repair: `backend` — planner emitted no fix-issues, skipping
+[17:15:26] repair: planning `frontend` (9 prior issues)
+[17:15:26] ServicePlanner (repair iter 3): frontend
+[17:15:26] ServicePlanner.repair(frontend, iter3): AI call (attempt 1/10)...
+[17:15:54] ServicePlanner.repair(frontend, iter3): AI responded in 28.1s (3502 chars)
+[17:15:54] ServicePlanner(frontend): dropped 1 issue(s) with empty target_files: ['FR-fix3-1']
+[17:15:54] ServicePlanner (repair iter 3): frontend → 0 fix-issue(s)
+[17:15:54] repair: `frontend` — planner emitted no fix-issues, skipping
+[17:15:54] MilestoneCodeDispatcher.repair: iter 3 done — 19 passing, 0 not
+[17:15:54] QualityEngineer (review): Auth and authenticated shell (15 test file(s))
+[17:15:54] QualityEngineer.review: AI call (attempt 1/10)...
+[17:15:58] QualityEngineer.review: attempt 1 failed — ClaudeCliClientError: claude --print exited 1: {"type":"result","subtype":"success","is_error":true,"api_error_status":null,"duration_ms":2864,"duration_api_ms":0,"num_turns":1,"result":"Prompt is too long","stop_reason":"stop_sequence","session_id":"84638cdd-00d1-477a-aaa8-36c93f9dd165","total_cost_usd":0,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"server_tool_use":{"web_search_requ
+[17:15:58] QualityEngineer.review: AI call (attempt 2/10)...
+[17:16:01] QualityEngineer.review: attempt 2 failed — ClaudeCliClientError: claude --print exited 1: {"type":"result","subtype":"success","is_error":true,"api_error_status":null,"duration_ms":2292,"duration_api_ms":0,"num_turns":1,"result":"Prompt is too long","stop_reason":"stop_sequence","session_id":"e2c391a1-e659-4574-b4fc-461c591db51b","total_cost_usd":0,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"server_tool_use":{"web_search_requ
+[17:16:01] QualityEngineer.review: AI call (attempt 3/10)...
+[17:16:04] QualityEngineer.review: attempt 3 failed — ClaudeCliClientError: claude --print exited 1: {"type":"result","subtype":"success","is_error":true,"api_error_status":null,"duration_ms":1936,"duration_api_ms":0,"num_turns":1,"result":"Prompt is too long","stop_reason":"stop_sequence","session_id":"edfcfb16-da2a-4c85-9a5d-9364ebc2aaab","total_cost_usd":0,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"server_tool_use":{"web_search_requ
+Traceback (most recent call last):
+  File "/home/jamey/bizniz/examples/v2_build.py", line 1079, in <module>
+    main()
+    ~~~~^^
+  File "/home/jamey/bizniz/examples/v2_build.py", line 1008, in main
+    result = pipeline.run(
+        problem_statement=args.problem or "",
+    ...<2 lines>...
+        target_phase=args.phase,
+    )
+  File "/home/jamey/bizniz/bizniz/driver/pipeline.py", line 203, in run
+    return self._run_inner(problem_statement, plan_only, target_milestone)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jamey/bizniz/bizniz/driver/pipeline.py", line 417, in _run_inner
+    outcome: MilestoneOutcome = self._milestone_loop.run(
+                                ~~~~~~~~~~~~~~~~~~~~~~~~^
+        milestone=milestone,
+        ^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+        state=ms_state,
+        ^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/jamey/bizniz/bizniz/driver/milestone_loop.py", line 573, in run
+    return self._run_full(
+           ~~~~~~~~~~~~~~^
+        milestone, architecture, list(prior_specs or []),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        auth_contract, state,
+        ^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/jamey/bizniz/bizniz/driver/milestone_loop.py", line 700, in _run_full
+    self._phase_review_repair_loop(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        state=state,
+        ^^^^^^^^^^^^
+    ...<5 lines>...
+        prior_list=prior_list,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/jamey/bizniz/bizniz/driver/milestone_loop.py", line 1629, in _phase_review_repair_loop
+    coverage, code_review = self._phase_review(
+                            ~~~~~~~~~~~~~~~~~~^
+        milestone, architecture, spec, result,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        auth_contract, prior_list,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/jamey/bizniz/bizniz/driver/milestone_loop.py", line 1462, in _phase_review
+    coverage = self._qe.review(
+        milestone=milestone,
+    ...<3 lines>...
+        auth_contract=auth_contract,
+    )
+  File "/home/jamey/bizniz/bizniz/quality_engineer/agent.py", line 244, in review
+    raw = call_with_retry(
+        client=self._client,
+    ...<8 lines>...
+        label="QualityEngineer.review",
+    )
+  File "/home/jamey/bizniz/bizniz/lib/llm_utils.py", line 261, in call_with_retry
+    raise LLMCallError(
+    ...<3 lines>...
+    )
+bizniz.lib.llm_utils.LLMCallError: QualityEngineer.review failed after 3 attempts (0 transient, 3 permanent). Last error: claude --print exited 1: {"type":"result","subtype":"success","is_error":true,"api_error_status":null,"duration_ms":1936,"duration_api_ms":0,"num_turns":1,"result":"Prompt is too long","stop_reason":"stop_sequence","session_id":"edfcfb16-da2a-4c85-9a5d-9364ebc2aaab","total_cost_usd":0,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"server_tool_use":{"web_search_requ
