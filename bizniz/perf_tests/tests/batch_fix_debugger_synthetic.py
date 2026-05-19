@@ -248,12 +248,20 @@ def run(workspace: Path, fixture_root: Path) -> Dict[str, Any]:
 
     # 6. Coverage of findings: how many of the 6 fingerprints did the
     #    agent address (per its own summary)?
+    #    The agent commonly decorates fingerprints with source/file/line
+    #    prefixes for audit clarity (e.g. our "F401" appears as
+    #    "static_ruff:F401:app/routes.py:14"). Use substring containment
+    #    so the matcher honors that without forcing the agent to echo
+    #    the bare fingerprint string.
     expected_fingerprints = {f.fingerprint for f in report.findings}
-    addressed = set()
+    addressed_strings: List[str] = []
     for fix in result_dict.get("fixes_applied", []):
         for fp in fix.get("addresses_fingerprints", []):
-            addressed.add(fp)
-    addressed_in_expected = expected_fingerprints & addressed
+            addressed_strings.append(str(fp))
+    addressed_in_expected = {
+        fp for fp in expected_fingerprints
+        if any(fp in s for s in addressed_strings)
+    }
     coverage_count = len(addressed_in_expected)
     coverage_pct = (coverage_count / len(expected_fingerprints) * 100.0) if expected_fingerprints else 0.0
 
