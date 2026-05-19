@@ -564,7 +564,8 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     # IMPLEMENT (Stage A) + parallel QE+CR review with V2 approval
     # semantics + V2 per-issue repair dispatch. Implies Stage A;
     # does NOT enable Stage B's lossy UnifiedFinding adapter path.
-    use_v3_1_flag = getattr(args, "use_v3_1", False)
+    use_v4_flag = getattr(args, "use_v4", False)
+    use_v3_1_flag = use_v4_flag or getattr(args, "use_v3_1", False)
     use_v3_shortcut = getattr(args, "use_v3", False)
     use_v3_implement_flag = (
         use_v3_1_flag
@@ -573,12 +574,89 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     )
     use_v3_review_flag = use_v3_shortcut or getattr(args, "use_v3_review", False)
 
+    # ── v4 IMPLEMENT + REPAIR dispatcher ──────────────────────────
+    # When ``use_v4_flag``, BOTH IMPLEMENT and REPAIR dispatch via the
+    # V4 dispatcher: ServicePlannerWithScaffold + per-issue
+    # CoderTesterAgent (single agent writes code AND tests) + per-issue
+    # validator (deterministic gates + fix-loop) + PIRunner
+    # (DAG-aware parallel ThreadPoolExecutor). Repair uses Opus-only
+    # tier list (no Haiku→Opus escalation).
+    if use_v4_flag:
+        from bizniz.coder_tester.agent import CoderTesterAgent
+        from bizniz.driver.v4_milestone_code_dispatcher import (
+            V4MilestoneCodeDispatcher,
+        )
+        from bizniz.service_planner.scaffolded import ServicePlannerWithScaffold
+
+        max_parallel = int(getattr(config, "max_parallel_coders", 6))
+        repair_tiers = list(getattr(config, "use_v4_repair_tiers", []))
+        if not repair_tiers:
+            repair_tiers = ["claude-cli:claude-opus-4-7"]
+
+        def v4_planner_factory(_service):
+            sp_client = _client_for(
+                getattr(config, "service_planner_model", config.engineer_model),
+                f"service_planner_v4:{_service.name}",
+            )
+            return ServicePlannerWithScaffold(
+                client=sp_client, on_status=on_status,
+            )
+
+        def v4_coder_tester_factory(service):
+            # IMPLEMENT-tier CoderTester: uses the same tier-0 model as
+            # v3 (Haiku by default). Per-issue scope means the model
+            # sees one issue's context, not the whole milestone.
+            tier0_model = coder_tiers[0] if coder_tiers else config.engineer_model
+            v4_client = _client_for(
+                tier0_model, f"coder_tester_v4:{service.name}",
+            )
+            return CoderTesterAgent(
+                client=v4_client, on_status=on_status,
+            )
+
+        def v4_repair_coder_tester_factory(service):
+            # REPAIR-tier CoderTester: Opus-only by default. Repair is
+            # the harder case (IMPLEMENT already missed); skip the
+            # Haiku tier so we don't burn the wasted retry budget.
+            repair_model = repair_tiers[0]
+            v4_repair_client = _client_for(
+                repair_model, f"coder_tester_v4_repair:{service.name}",
+            )
+            return CoderTesterAgent(
+                client=v4_repair_client, on_status=on_status,
+            )
+
+        # Repair planner: reuse the production ServicePlanner (which
+        # has a repair() method that takes coverage + code_review and
+        # returns fix-issues). v2_dispatcher already has the service
+        # planner internally; we expose it as a factory here.
+        def v4_repair_planner_factory(service):
+            return v2_dispatcher._service_planner_for(service) if hasattr(v2_dispatcher, "_service_planner_for") else v2_dispatcher
+
+        code_dispatcher = V4MilestoneCodeDispatcher(
+            planner_factory=v4_planner_factory,
+            coder_tester_factory=v4_coder_tester_factory,
+            repair_coder_tester_factory=v4_repair_coder_tester_factory,
+            workspace_for_service=workspace_for_service,
+            max_parallel_coders=max_parallel,
+            issue_store=None,
+            on_status=on_status,
+            only_service=getattr(args, "retry_service", None),
+            repair_planner_factory=v4_repair_planner_factory,
+        )
+        on_status(
+            f"IMPLEMENT + REPAIR phase: v4 dispatcher ENABLED (--use-v4). "
+            f"Per-issue CoderTesterAgent + PerIssueValidator + PIRunner "
+            f"(max_parallel={max_parallel}). Repair tier: "
+            f"{repair_tiers[0]} (Opus-only, no escalation chain)."
+        )
+
     # ── v3 IMPLEMENT dispatcher (Stage A) ──────────────────────────
     # When ``use_v3_implement_flag``, IMPLEMENT phase runs a single
     # ServicePlannerWithScaffold + CoderAgentV3 per service instead of
     # today's per-issue Coder loop. Review/repair still uses the v2
     # dispatcher (delegated via .repair()) — that's Stage B's scope.
-    if use_v3_implement_flag:
+    elif use_v3_implement_flag:
         from bizniz.coder.agent_v3 import CoderAgentV3
         from bizniz.driver.v3_milestone_code_dispatcher import (
             V3MilestoneCodeDispatcher,
@@ -1062,13 +1140,23 @@ def main():
     p.add_argument(
         "--use-v3-1", dest="use_v3_1", action="store_true",
         help=(
-            "v3.1 — canonical path as of 2026-05-19. V3 IMPLEMENT "
-            "(Stage A) + parallel QE+CR review (V3 fan-out) + native "
-            "CoverageReport/CodeReviewReport + V2 per-issue repair "
-            "dispatch. Combines V3's IMPLEMENT speedup (5×) and "
-            "review parallelism with V2's proven approval semantics "
-            "and 90%%/iter repair convergence. Implies --use-v3-implement; "
+            "v3.1 — V3 IMPLEMENT (Stage A) + parallel QE+CR review "
+            "(V3 fan-out) + native CoverageReport/CodeReviewReport + "
+            "V2 per-issue repair dispatch. Implies --use-v3-implement; "
             "does NOT enable Stage B's lossy UnifiedFinding adapter."
+        ),
+    )
+    p.add_argument(
+        "--use-v4", dest="use_v4", action="store_true",
+        help=(
+            "v4 — canonical path as of 2026-05-19. Per-issue "
+            "CoderTesterAgent (one agent writes code AND tests) + "
+            "PerIssueValidator (deterministic gates + fix-loop) + "
+            "PIRunner (DAG-aware parallel ThreadPoolExecutor) for "
+            "BOTH IMPLEMENT and REPAIR. Repair tier Opus-only (no "
+            "Haiku escalation chain). Implies --use-v3-1 (parallel "
+            "review + V2 approval semantics). max_parallel_coders "
+            "from bizniz.yaml (default 6)."
         ),
     )
     p.add_argument(

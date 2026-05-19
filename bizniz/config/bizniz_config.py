@@ -110,6 +110,17 @@ class BiznizConfig(BaseModel):
     api_base: Optional[str] = None
     max_iterations: int = 20
     database_url: Optional[str] = None
+    # v4 pipeline (2026-05-19): max concurrent CoderTesterAgent
+    # subprocesses dispatched by PIRunner within a single service's
+    # topological level. 6 = Anthropic Max-plan realistic ceiling
+    # (start lower at 4 if rate-limits bite; raise to 8+ if not).
+    max_parallel_coders: int = 6
+    # v4 repair tier list (2026-05-19): repair issues are by definition
+    # the harder case (IMPLEMENT already missed there). Going Opus-only
+    # skips the Haiku→Opus escalation chain that doubled cost on stuck
+    # issues in tonight's v3.1 run (BA-fix1-1: Haiku 7m + Opus 11m = 18m
+    # vs Opus-direct ~11m, -39%). IMPLEMENT keeps the Haiku-default.
+    use_v4_repair_tiers: List[str] = ["claude-cli:claude-opus-4-7"]
 
     @classmethod
     def from_yaml(cls, path: str) -> "BiznizConfig":
