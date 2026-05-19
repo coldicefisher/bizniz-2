@@ -1,0 +1,96 @@
+{
+  "project_name": "Recipe Box",
+  "project_slug": "recipe_v3_opus",
+  "services": [
+    {
+      "name": "backend",
+      "service_type": "backend",
+      "framework": "fastapi",
+      "language": "python",
+      "description": "FastAPI backend exposing REST endpoints for recipe CRUD, tagging, search (title/ingredient/tag), favorites, and dashboard activity. Validates FusionAuth-issued JWTs via JWKS, reads roles from the JWT claims to enforce user/admin authorization, and persists data in Postgres.",
+      "workspace_name": "backend",
+      "port": 8000,
+      "depends_on": [
+        "db",
+        "auth"
+      ],
+      "requirements": [
+        "fastapi",
+        "uvicorn[standard]",
+        "pydantic",
+        "pydantic-settings",
+        "sqlalchemy",
+        "psycopg2-binary",
+        "alembic",
+        "python-jose[cryptography]",
+        "httpx",
+        "python-multipart",
+        "pytest",
+        "pytest-asyncio",
+        "pytest-cov",
+        "requests"
+      ],
+      "skeleton": "fastapi",
+      "image_name": null,
+      "evolve_state": "new"
+    },
+    {
+      "name": "frontend",
+      "service_type": "frontend",
+      "framework": "react",
+      "language": "typescript",
+      "description": "React + TypeScript + Vite SPA providing signup/login flows, the 'My Recipes' authenticated shell, recipe create/edit/view/delete forms, search and tag filtering, favorites toggling, and the dashboard view showing favorites and recent activity.",
+      "workspace_name": "frontend",
+      "port": 5173,
+      "depends_on": [
+        "backend",
+        "auth"
+      ],
+      "requirements": [
+        "react",
+        "react-dom",
+        "react-router-dom",
+        "axios",
+        "typescript",
+        "vite",
+        "@vitejs/plugin-react",
+        "jest"
+      ],
+      "skeleton": "react",
+      "image_name": null,
+      "evolve_state": "new"
+    },
+    {
+      "name": "db",
+      "service_type": "database",
+      "framework": "postgres",
+      "language": "sql",
+      "description": "Postgres database storing recipe data (recipes, ingredients, instructions, tags, favorites) for the backend and also backing the FusionAuth identity store.",
+      "workspace_name": "postgres",
+      "port": 5432,
+      "depends_on": [],
+      "requirements": [],
+      "skeleton": "none",
+      "image_name": null,
+      "evolve_state": "new"
+    },
+    {
+      "name": "auth",
+      "service_type": "auth",
+      "framework": "fusionauth",
+      "language": "yaml",
+      "description": "FusionAuth identity provider handling user signup, login, JWT issuance, and role management (user, admin). The backend validates issued JWTs via JWKS.",
+      "workspace_name": "fusionauth",
+      "port": 9011,
+      "depends_on": [
+        "db"
+      ],
+      "requirements": [],
+      "skeleton": "none",
+      "image_name": null,
+      "evolve_state": "new"
+    }
+  ],
+  "description": "A personal recipe-management web app where home cooks save, organize, search, tag, and favorite recipes. Users sign up and log in via FusionAuth; a FastAPI backend persists recipes in Postgres; a React frontend provides the UI for browsing, searching, and managing the recipe collection. Admins can view all recipes for moderation.",
+  "docker_compose": null
+}
