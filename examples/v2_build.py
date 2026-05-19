@@ -537,7 +537,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
             milestone_index=milestone_index,
         )
 
-    code_dispatcher = MilestoneCodeDispatcher(
+    v2_dispatcher = MilestoneCodeDispatcher(
         service_planner_factory=service_planner_factory,
         coder_factory=coder_factory,
         progression_factory=progression_factory,
@@ -553,6 +553,58 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         only_service=getattr(args, "retry_service", None),
         skip_planning=bool(getattr(args, "retry_failed", False)),
     )
+
+    # ── v3 IMPLEMENT dispatcher (Stage A) ──────────────────────────
+    # Opt-in via ``--use-v3-implement``. When set, IMPLEMENT phase
+    # runs a single ServicePlannerWithScaffold + CoderAgentV3 per
+    # service instead of today's per-issue Coder loop. Review/repair
+    # still uses the v2 dispatcher (delegated via .repair()) — that's
+    # Stage B's scope.
+    if getattr(args, "use_v3_implement", False):
+        from bizniz.coder.agent_v3 import CoderAgentV3
+        from bizniz.driver.v3_milestone_code_dispatcher import (
+            V3MilestoneCodeDispatcher,
+        )
+        from bizniz.service_planner.scaffolded import ServicePlannerWithScaffold
+
+        def v3_planner_factory(_service):
+            sp_v3_client = _client_for(
+                getattr(config, "service_planner_model", config.engineer_model),
+                f"service_planner_v3:{_service.name}",
+            )
+            return ServicePlannerWithScaffold(
+                client=sp_v3_client, on_status=on_status,
+            )
+
+        def v3_coder_factory(service):
+            # CoderAgentV3 takes a BaseAIClient via its config-based
+            # routing (claude-cli:<model>). Use the same tier list
+            # the v2 Coder used (tier 0 — Haiku by default per the
+            # post-2026-05-18 config). Escalation in the v3 path is
+            # handled by the agent's own retry on schema-validation
+            # failure, not the per-issue stall path.
+            tier0_model = coder_tiers[0] if coder_tiers else config.engineer_model
+            v3_client = _client_for(
+                tier0_model, f"coder_agent_v3:{service.name}",
+            )
+            return CoderAgentV3(client=v3_client, on_status=on_status)
+
+        code_dispatcher = V3MilestoneCodeDispatcher(
+            planner_factory=v3_planner_factory,
+            coder_factory=v3_coder_factory,
+            workspace_for_service=workspace_for_service,
+            issue_store=None,
+            on_status=on_status,
+            only_service=getattr(args, "retry_service", None),
+            repair_dispatcher=v2_dispatcher,
+        )
+        on_status(
+            "IMPLEMENT phase: v3 dispatcher ENABLED (--use-v3-implement). "
+            "Single ServicePlannerWithScaffold + CoderAgentV3 per service. "
+            "Review/repair still uses v2 dispatcher (Stage B will replace)."
+        )
+    else:
+        code_dispatcher = v2_dispatcher
 
     def http_tester_factory(workspace):
         return HTTPApiTester(
@@ -942,6 +994,18 @@ def main():
             "showed Decomposer is net-negative on Claude CLI "
             "(3-4× wall-clock penalty, no quality win). Use this flag "
             "for model-tier experiments or A/B comparison runs."
+        ),
+    )
+    p.add_argument(
+        "--use-v3-implement", action="store_true",
+        help=(
+            "Stage A of the v3 pipeline (shipped 2026-05-19). IMPLEMENT "
+            "phase swaps from per-issue Coder loops to a single "
+            "ServicePlannerWithScaffold + CoderAgentV3 dispatch per "
+            "service. Anchor: Phase 2c validated 9 issues filled in "
+            "7m 42s vs today's ~1h 35m for 12 issues. Review/repair, "
+            "integration, UX, refactor phases unchanged (Stage B is "
+            "those). Use this flag for v2-vs-v3 A/B comparisons."
         ),
     )
     p.add_argument(
