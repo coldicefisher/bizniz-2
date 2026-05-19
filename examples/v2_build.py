@@ -559,8 +559,18 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     # stages. Stage-specific flags also accepted independently:
     #   --use-v3-implement → Stage A only (IMPLEMENT dispatcher swap)
     #   --use-v3-review    → Stage B only (parallel review unit)
+    #
+    # ``--use-v3-1`` is the canonical post-2026-05-19 path: V3
+    # IMPLEMENT (Stage A) + parallel QE+CR review with V2 approval
+    # semantics + V2 per-issue repair dispatch. Implies Stage A;
+    # does NOT enable Stage B's lossy UnifiedFinding adapter path.
+    use_v3_1_flag = getattr(args, "use_v3_1", False)
     use_v3_shortcut = getattr(args, "use_v3", False)
-    use_v3_implement_flag = use_v3_shortcut or getattr(args, "use_v3_implement", False)
+    use_v3_implement_flag = (
+        use_v3_1_flag
+        or use_v3_shortcut
+        or getattr(args, "use_v3_implement", False)
+    )
     use_v3_review_flag = use_v3_shortcut or getattr(args, "use_v3_review", False)
 
     # ── v3 IMPLEMENT dispatcher (Stage A) ──────────────────────────
@@ -613,6 +623,14 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         )
     else:
         code_dispatcher = v2_dispatcher
+
+    if use_v3_1_flag:
+        on_status(
+            "REVIEW/REPAIR phase: v3.1 ENABLED (--use-v3-1). "
+            "Parallel QE+CR review (V3 fan-out) + native CoverageReport/"
+            "CodeReviewReport (no UnifiedFinding adapter) + V2 per-issue "
+            "repair dispatch."
+        )
 
     def http_tester_factory(workspace):
         return HTTPApiTester(
@@ -889,6 +907,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         engineer_escalation_factory=engineer_escalation_factory,
         code_dispatcher=code_dispatcher,
         use_v3_review_unit=use_v3_review_flag,
+        use_v3_1=use_v3_1_flag,
         issue_store_factory=issue_store_factory,
         cost_tracker=cost_tracker,
         workspace_summary=workspace_summary,
@@ -1035,8 +1054,21 @@ def main():
         "--use-v3", action="store_true",
         help=(
             "Shortcut for --use-v3-implement --use-v3-review. Enables "
-            "the full v3 pipeline (Stage A + Stage B). Use this for "
-            "the canonical v2-vs-v3 A/B comparison."
+            "the full v3 pipeline (Stage A + Stage B). DEPRECATED by "
+            "--use-v3-1 (Stage B's UnifiedFinding adapter has a known "
+            "approval-verdict bug; kept for archaeology only)."
+        ),
+    )
+    p.add_argument(
+        "--use-v3-1", dest="use_v3_1", action="store_true",
+        help=(
+            "v3.1 — canonical path as of 2026-05-19. V3 IMPLEMENT "
+            "(Stage A) + parallel QE+CR review (V3 fan-out) + native "
+            "CoverageReport/CodeReviewReport + V2 per-issue repair "
+            "dispatch. Combines V3's IMPLEMENT speedup (5×) and "
+            "review parallelism with V2's proven approval semantics "
+            "and 90%%/iter repair convergence. Implies --use-v3-implement; "
+            "does NOT enable Stage B's lossy UnifiedFinding adapter."
         ),
     )
     p.add_argument(

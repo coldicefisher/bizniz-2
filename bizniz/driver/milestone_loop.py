@@ -147,6 +147,15 @@ class MilestoneLoop:
         # delegates to ``ReviewUnitLoop``; the v2 path stays intact as
         # the default.
         use_v3_review_unit: bool = False,
+        # v3.1 review/repair (2026-05-19): keeps V3's parallel QE+CR
+        # fan-out but drops the UnifiedFinding adapter round-trip that
+        # caused Stage B to ignore QE.approved=True. Reports stay
+        # native; approval comes from QE.approved AND CR.approved;
+        # repair dispatches the V2 per-issue Coder loop (the existing
+        # ``_code_dispatcher.repair`` path) which has proven 90%/iter
+        # convergence. Takes precedence over ``use_v3_review_unit``
+        # when both are set.
+        use_v3_1: bool = False,
     ):
         self._engineer = engineer
         self._qe = quality_engineer
@@ -158,6 +167,7 @@ class MilestoneLoop:
         self._repair_stall_threshold = max(1, int(repair_stall_threshold))
         self._repair_max_iterations = max(1, int(repair_max_iterations))
         self._use_v3_review_unit = bool(use_v3_review_unit)
+        self._use_v3_1 = bool(use_v3_1)
         self._document_recovery = document_recovery
         self._document_recovery_stall_threshold = max(
             1, int(document_recovery_stall_threshold)
@@ -1567,15 +1577,30 @@ class MilestoneLoop:
 
         self._tag(state.milestone_index, SubPhase.REVIEW_REPAIR)
 
+        # v3.1 branch (preferred, 2026-05-19): parallel QE+CR review
+        # with V2 approval semantics + V2 per-issue repair dispatch.
+        # Takes precedence over the legacy v3 Stage B path below.
+        # ``getattr`` with default: existing tests construct MilestoneLoop
+        # via ``__new__`` without ``__init__``, so the attribute may be
+        # absent. Default False = v2 path, which preserves behavior.
+        if getattr(self, "_use_v3_1", False):
+            return self._phase_review_repair_loop_v3_1(
+                state=state,
+                milestone=milestone,
+                architecture=architecture,
+                spec=spec,
+                initial_result=initial_result,
+                auth_contract=auth_contract,
+                prior_list=prior_list,
+            )
+
         # v3 Stage B branch: parallel review unit + batch-fix debugger.
         # When enabled at construction, the entire iterative
         # review/repair path delegates to ``ReviewUnitLoop`` which runs
         # QE + CR concurrently and feeds the unified findings into a
         # batch-fix debugger. The v2 sequential path below is preserved
-        # as the default for backwards compatibility.
-        # ``getattr`` with default: existing tests construct MilestoneLoop
-        # via ``__new__`` without ``__init__``, so the attribute may be
-        # absent. Default False = v2 path, which preserves behavior.
+        # as the default for backwards compatibility. Deprecated by
+        # v3.1: kept for archaeology only.
         if getattr(self, "_use_v3_review_unit", False):
             return self._phase_review_repair_loop_v3(
                 state=state,
@@ -1691,6 +1716,217 @@ class MilestoneLoop:
             if repair_iterations >= self._repair_max_iterations:
                 self._log(
                     f"MilestoneLoop: review/repair hard cap "
+                    f"({self._repair_max_iterations}) reached — "
+                    f"halting loop"
+                )
+                return (
+                    coverage, code_review, result,
+                    repair_iterations, tracker.render_history(),
+                )
+
+    # ── v3.1 review/repair (parallel review + V2 repair) ────────────────
+
+    def _phase_review_parallel(
+        self, milestone, architecture, spec, result, auth_contract, prior_list,
+    ) -> tuple[CoverageReport, CodeReviewReport]:
+        """Run QE.review + CR.review concurrently and return their
+        native reports.
+
+        Same I/O contract as ``_phase_review`` — same inputs, same
+        ``(coverage, code_review)`` tuple. The only difference: QE
+        and CR run on a ThreadPoolExecutor instead of sequentially.
+        Both calls are LLM subprocesses (claude --print), I/O-bound,
+        so threads are fine.
+
+        If either source raises, the original exception is re-raised
+        so the caller's existing error handling kicks in. (No silent
+        UnifiedFinding adapter swallowing — that was the V3 Stage B
+        anti-pattern this loop replaces.)
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Same file-collection logic as _phase_review.
+        all_target: list = []
+        all_test: list = []
+        for issue in result.plan.issues:
+            all_target.extend(issue.target_files)
+            all_test.extend(issue.test_files)
+
+        code_files: Dict[str, str] = {}
+        test_files: Dict[str, str] = {}
+        for path in dict.fromkeys(all_target):
+            content = _safe_read(self._primary_workspace, path)
+            if content is not None:
+                code_files[path] = content
+        for path in dict.fromkeys(all_test):
+            content = _safe_read(self._primary_workspace, path)
+            if content is not None:
+                test_files[path] = content
+
+        def _qe_call() -> CoverageReport:
+            return self._qe.review(
+                milestone=milestone,
+                enriched_spec=spec,
+                engineer_plan=result.plan.model_dump(),
+                test_files=test_files,
+                auth_contract=auth_contract,
+            )
+
+        def _cr_call() -> CodeReviewReport:
+            return self._cr.review(
+                milestone=milestone,
+                enriched_spec=spec,
+                changed_files=code_files,
+                architecture=architecture,
+                auth_contract=auth_contract,
+                prior_specs=prior_list,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            qe_future = ex.submit(_qe_call)
+            cr_future = ex.submit(_cr_call)
+            # Surface exceptions: if QE fails, CR still completes (or
+            # not) — but the caller gets the QE exception, which is
+            # the same behavior as the sequential _phase_review.
+            coverage = qe_future.result()
+            code_review = cr_future.result()
+        return coverage, code_review
+
+    def _phase_review_repair_loop_v3_1(
+        self,
+        *,
+        state: MilestoneState,
+        milestone: Milestone,
+        architecture: SystemArchitecture,
+        spec: EnrichedSpec,
+        initial_result: EngineerResult,
+        auth_contract: Optional[str],
+        prior_list: List[EnrichedSpec],
+    ):
+        """v3.1 review/repair: parallel QE+CR review, V2 approval
+        semantics, V2 per-issue repair dispatch.
+
+        Mirrors ``_phase_review_repair_loop`` (v2) exactly EXCEPT the
+        QE+CR calls fan out via ``_phase_review_parallel``. Approval
+        comes from ``self._approved(coverage, code_review)`` — i.e.
+        ``QE.approved AND CR.approved`` — same as v2. Repair dispatch
+        uses the existing ``_code_dispatcher.repair`` path (which is
+        wired to the V2 per-issue Coder loop) so we keep the
+        90%/iter convergence rate V2 has in real builds.
+
+        Returns the same outer tuple v2 returns so callers see no
+        difference.
+        """
+        from bizniz.lib.progress_tracker import ProgressTracker
+
+        self._tag(state.milestone_index, SubPhase.REVIEW_REPAIR)
+
+        # Initial review (counts as iteration 0; no repair yet).
+        coverage, code_review = self._phase_review_parallel(
+            milestone, architecture, spec, initial_result,
+            auth_contract, prior_list,
+        )
+        result = initial_result
+        if self._approved(coverage, code_review):
+            self._log(
+                f"MilestoneLoop[v3.1]: review/repair approved on initial "
+                f"review (0 repair iterations)"
+            )
+            return coverage, code_review, result, 0, ""
+
+        tracker = ProgressTracker(
+            initial_failure_count=self._defect_count(coverage, code_review),
+            stall_threshold=self._repair_stall_threshold,
+        )
+        self._log(
+            f"MilestoneLoop[v3.1]: entering review/repair loop "
+            f"(initial defects={tracker.current_failure_count}, "
+            f"stall threshold={self._repair_stall_threshold}, "
+            f"hard cap={self._repair_max_iterations})"
+        )
+
+        repair_iterations = 0
+        while True:
+            repair_iterations += 1
+            iter_idx = repair_iterations - 1
+            self._log(
+                f"MilestoneLoop[v3.1]: repair iteration {repair_iterations} "
+                f"(escalation tier {iter_idx}, defects "
+                f"{tracker.current_failure_count})"
+            )
+
+            # Dispatch repair — same path v2 uses. v3.1 explicitly
+            # carries this forward because BatchFixDebugger stalled
+            # at 23%/iter while per-issue dispatch hits 90%/iter on
+            # real builds.
+            if self._code_dispatcher is not None:
+                store = (
+                    self._issue_store_factory(state.milestone_index)
+                    if self._issue_store_factory is not None else None
+                )
+                result = self._code_dispatcher.repair(
+                    architecture=architecture,
+                    enriched_spec=spec,
+                    coverage_report=coverage,
+                    code_review_report=code_review,
+                    repair_iteration=repair_iterations,
+                    auth_contract=auth_contract,
+                    workspace_summary=self._workspace_summary,
+                    issue_store=store,
+                )
+            else:
+                engineer_for_repair = self._engineer_for_repair(iter_idx)
+                report_for_repair = _merge_to_repair_report(
+                    milestone.name, coverage, code_review,
+                )
+                result = engineer_for_repair.repair(
+                    milestone=milestone,
+                    architecture=architecture,
+                    code_review_report=report_for_repair,
+                    enriched_spec=spec,
+                    auth_contract=auth_contract,
+                    prior_specs=prior_list,
+                )
+
+            # Re-review with the updated result — parallel.
+            coverage, code_review = self._phase_review_parallel(
+                milestone, architecture, spec, result,
+                auth_contract, prior_list,
+            )
+
+            if self._approved(coverage, code_review):
+                self._log(
+                    f"MilestoneLoop[v3.1]: review/repair approved after "
+                    f"{repair_iterations} repair iteration(s)"
+                )
+                return (
+                    coverage, code_review, result,
+                    repair_iterations, tracker.render_history(),
+                )
+
+            verdict = tracker.update(self._defect_count(coverage, code_review))
+            self._log(
+                f"MilestoneLoop[v3.1]: review/repair iter {repair_iterations}: "
+                f"verdict={verdict}, defects={tracker.current_failure_count}, "
+                f"stall_counter={tracker.consecutive_no_progress}/"
+                f"{self._repair_stall_threshold}"
+            )
+
+            if tracker.should_stop():
+                self._log(
+                    f"MilestoneLoop[v3.1]: review/repair stall threshold "
+                    f"reached after {repair_iterations} iteration(s) — "
+                    f"halting loop with {tracker.current_failure_count} "
+                    f"defect(s) remaining"
+                )
+                return (
+                    coverage, code_review, result,
+                    repair_iterations, tracker.render_history(),
+                )
+
+            if repair_iterations >= self._repair_max_iterations:
+                self._log(
+                    f"MilestoneLoop[v3.1]: review/repair hard cap "
                     f"({self._repair_max_iterations}) reached — "
                     f"halting loop"
                 )
