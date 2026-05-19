@@ -1,0 +1,1321 @@
+{
+  "milestone_name": "Tags and search",
+  "capabilities": [
+    {
+      "id": "tags_schema",
+      "name": "Tags + recipe_tags tables and indexes",
+      "description": "Postgres tables backing per-user tag namespaces and the many-to-many between recipes and tags. Created via startup migration. FKs cascade so deleting a user removes their tags, and deleting a recipe removes its tag links. Supports owner-scoped tag listing and the tag-filter join on the list query.",
+      "inputs": [
+        {
+          "name": "tags.id",
+          "type": "uuid",
+          "required": true,
+          "constraints": [
+            "primary key",
+            "server-generated (gen_random_uuid())",
+            "never client-supplied"
+          ],
+          "description": "Tag identifier."
+        },
+        {
+          "name": "tags.owner_id",
+          "type": "uuid",
+          "required": true,
+          "constraints": [
+            "FK references users(id) ON DELETE CASCADE",
+            "NOT NULL",
+            "indexed"
+          ],
+          "description": "Owning user — tags are per-user, never cross-user."
+        },
+        {
+          "name": "tags.name",
+          "type": "text",
+          "required": true,
+          "constraints": [
+            "NOT NULL",
+            "stored as the normalized form: trimmed + lowercased",
+            "CHECK length(name) BETWEEN 1 AND 50",
+            "CHECK name = lower(name)",
+            "CHECK name = trim(name)",
+            "CHECK name !~ '[\\n\\r]' (single-line)"
+          ],
+          "description": "Tag label in normalized form. Display casing is whatever the user typed; the canonical form is lowercase for matching."
+        },
+        {
+          "name": "tags.display_name",
+          "type": "text",
+          "required": false,
+          "constraints": [
+            "NOT NULL",
+            "preserves the first-typed casing for UI display",
+            "max 50 chars",
+            "trimmed"
+          ],
+          "description": "User-facing casing. 'Vegetarian' vs 'vegetarian' present as the same tag (matched on name) but render as 'Vegetarian'. Updates leave existing display_name alone."
+        },
+        {
+          "name": "tags.created_at",
+          "type": "timestamptz",
+          "required": true,
+          "constraints": [
+            "NOT NULL",
+            "DEFAULT now()"
+          ],
+          "description": "Audit column."
+        },
+        {
+          "name": "recipe_tags.recipe_id",
+          "type": "uuid",
+          "required": true,
+          "constraints": [
+            "FK references recipes(id) ON DELETE CASCADE",
+            "NOT NULL",
+            "part of composite PK (recipe_id, tag_id)"
+          ],
+          "description": "Owning recipe."
+        },
+        {
+          "name": "recipe_tags.tag_id",
+          "type": "uuid",
+          "required": true,
+          "constraints": [
+            "FK references tags(id) ON DELETE CASCADE",
+            "NOT NULL",
+            "part of composite PK"
+          ],
+          "description": "Linked tag."
+        },
+        {
+          "name": "recipe_tags.created_at",
+          "type": "timestamptz",
+          "required": true,
+          "constraints": [
+            "NOT NULL",
+            "DEFAULT now()"
+          ],
+          "description": "Audit column."
+        }
+      ],
+      "outputs": [],
+      "validation_rules": [
+        "Migration creates tables 'tags' and 'recipe_tags' with columns + constraints above; runs at startup AFTER the recipes migration (FK dependency).",
+        "UNIQUE constraint on tags(owner_id, name) enforces per-user tag uniqueness — same name across two users is two distinct rows.",
+        "Composite primary key on recipe_tags(recipe_id, tag_id) prevents duplicate links.",
+        "Index on tags(owner_id, name) supports user_tag listing + lookup-by-name during recipe save.",
+        "Index on recipe_tags(tag_id) supports the tag-filter join in the list query.",
+        "FK from recipe_tags.recipe_id to recipes(id) ON DELETE CASCADE ensures deleting a recipe removes its links; nothing in the application code needs to clean up.",
+        "FK from tags.owner_id to users(id) ON DELETE CASCADE removes tags when a user is removed; FKs from recipe_tags then cascade further.",
+        "Migration is idempotent (CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS).",
+        "DB-level CHECK constraints back the API normalization (defense-in-depth)."
+      ],
+      "error_cases": [
+        "Migration fails at startup (e.g., recipes table missing) → backend fails to start with a clear log line; do NOT silently mask.",
+        "CHECK violation from a bypassed-API write → 500 (should be impossible via the API; indicates a bug).",
+        "UNIQUE(owner_id, name) violation from a bypassed-API write → 500 (the API path uses INSERT ... ON CONFLICT DO NOTHING / SELECT and never collides)."
+      ],
+      "edge_cases": [
+        "Pre-existing tables from an earlier ad-hoc run with a different shape → migration must fail-loud, not silently coerce.",
+        "Cascade chain: deleting a user removes tags AND recipes (already cascading from milestone 2); recipe_tags rows are removed by both cascades — verify no double-FK errors.",
+        "Hot-path orphan: a tag with zero recipe_tags links is allowed (a user may have created a tag during edit then removed it; the row remains in their namespace). Cleanup of orphan tags is OUT OF SCOPE this milestone — document.",
+        "Tag at exactly 50 chars after trim → accepted; 51 → rejected.",
+        "Tag name that becomes empty after trim → rejected at API layer before reaching DB CHECK."
+      ],
+      "auth_required": false,
+      "allowed_roles": [],
+      "test_scenarios": [
+        "migration_creates_tables: fresh DB → 'tags' and 'recipe_tags' tables exist with columns, FKs (CASCADE), UNIQUE(owner_id, name), composite PK on recipe_tags, and the supporting indexes.",
+        "unique_owner_name_enforced: direct INSERT of two tags rows with same (owner_id, lower(name)) → second fails.",
+        "same_name_two_users_ok: insert 'dinner' for user A and 'dinner' for user B → both succeed (per-user namespace).",
+        "fk_cascade_user_delete: delete a users row → that user's tags and recipe_tags rows are removed.",
+        "fk_cascade_recipe_delete: delete a recipes row → its recipe_tags rows are removed; the tag rows themselves remain.",
+        "composite_pk_prevents_duplicate_link: INSERT same (recipe_id, tag_id) twice → second fails.",
+        "idempotent_migration: run twice → second is a no-op."
+      ]
+    },
+    {
+      "id": "set_tags_on_recipe_create",
+      "name": "Accept tags when creating a recipe",
+      "description": "Extends the create_recipe endpoint (from milestone 2) to accept an optional tags array on the request body. Tags are normalized (trim + lowercase), deduplicated, upserted into the user's tag namespace, and linked to the new recipe in a single transaction. The response includes the recipe's tags in their stored display form.",
+      "inputs": [
+        {
+          "name": "Authorization",
+          "type": "string (header)",
+          "required": true,
+          "constraints": [
+            "Bearer <JWT>",
+            "standard FA validation"
+          ],
+          "description": "Bearer token."
+        },
+        {
+          "name": "tags",
+          "type": "array<string>",
+          "required": false,
+          "constraints": [
+            "0-20 items (cap chosen to bound the tag-upsert loop and the row width on detail views)",
+            "each item: 1-50 chars after trim",
+            "each item: no embedded newline/carriage-return",
+            "each item: Unicode preserved",
+            "deduplication: case-insensitive (after trim + lowercase) — duplicates collapse silently",
+            "null and omitted both treated as empty array"
+          ],
+          "description": "Optional tag labels to associate with the new recipe. Empty array (or omitted) means no tags."
+        },
+        {
+          "name": "<other create_recipe fields>",
+          "type": "see milestone 2 spec",
+          "required": true,
+          "constraints": [
+            "unchanged from milestone 2 create_recipe — title/description/ingredients/instructions/prep_time/cook_time/servings"
+          ],
+          "description": "Existing create_recipe inputs carry forward unchanged."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "tags",
+          "type": "array<TagOut>",
+          "required": true,
+          "constraints": [
+            "each item: {id (uuid), name (lowercase normalized), display_name (original casing)}",
+            "order: alphabetical by display_name for stable rendering",
+            "empty array when no tags supplied"
+          ],
+          "description": "Tags as persisted, with both the canonical name and the display casing."
+        },
+        {
+          "name": "<other RecipeOut fields>",
+          "type": "see milestone 2",
+          "required": true,
+          "constraints": [
+            "unchanged from milestone 2"
+          ],
+          "description": "Existing RecipeOut fields carry forward; the response shape gains a 'tags' field."
+        },
+        {
+          "name": "http_status",
+          "type": "int",
+          "required": true,
+          "constraints": [
+            "201 Created"
+          ],
+          "description": "Status on success."
+        }
+      ],
+      "validation_rules": [
+        "Authenticate first; 401 on invalid token. owner_id derived from JWT sub.",
+        "Validate tags BEFORE any DB write; surface field errors on 'tags' with the index of the offending entry where useful.",
+        "Tag normalization: server-side trim + lowercase produces the canonical 'name'. The first-seen casing (post-trim, pre-lowercase) becomes 'display_name' for new tag rows.",
+        "Deduplication: after normalization, drop duplicates. ['Dinner','dinner','DINNER'] → one tag 'dinner' (display_name 'Dinner').",
+        "Upsert sequence inside the recipe transaction: for each unique normalized tag, INSERT INTO tags(owner_id, name, display_name) ... ON CONFLICT (owner_id, name) DO NOTHING RETURNING id; if no row returned, SELECT the existing id. Existing display_name is NOT overwritten — first writer wins on casing.",
+        "After all tag ids resolved, bulk-insert into recipe_tags(recipe_id, tag_id). No-op if tags=[].",
+        "All writes (recipe row, tag upserts, recipe_tags links) run in a single transaction; failure rolls back the recipe too.",
+        "RecipeCreate's extra='forbid' still applies — only the documented fields (now including 'tags') are accepted.",
+        "Tag count cap enforced server-side (20) even if the client UX allows more."
+      ],
+      "error_cases": [
+        "401 — missing/invalid JWT (same matrix as milestone 2)",
+        "403 — user lacks 'user' or 'admin' role",
+        "400 — tags is not an array",
+        "400 — tags exceeds 20 items",
+        "400 — any tag item is not a string",
+        "400 — any tag item is empty after trim",
+        "400 — any tag item exceeds 50 chars after trim",
+        "400 — any tag item contains a newline/carriage-return",
+        "400 — any other field validation failure (carries forward from milestone 2 create_recipe)",
+        "413 — request body exceeds size cap",
+        "415 — content-type not application/json",
+        "503 — DB readonly or unavailable (rolls back the whole transaction; no orphan tag rows left behind)"
+      ],
+      "edge_cases": [
+        "tags omitted entirely → treated as empty array; recipe created with no tags; no rows in recipe_tags.",
+        "tags=[] → same as omitted; valid.",
+        "tags=['  Dinner  ', 'dinner'] → normalized to a single 'dinner' tag with display_name 'Dinner' (first-seen casing wins).",
+        "tags=['Quick','VEGETARIAN','quick'] → two tags after dedup ('quick' and 'vegetarian').",
+        "Unicode tags (emoji, RTL, CJK, combining chars) → preserved; lowercase normalization uses Python str.lower() which is Unicode-aware. Document that case-fold semantics for tricky scripts (e.g., Turkish dotted/dotless I) match Python's str.lower().",
+        "Tag matching: 'Vegetarian' submitted by user A while 'vegetarian' already exists in A's namespace → reuses the existing tag row; display_name preserved as the original.",
+        "Same tag name in user B's namespace exists → ignored; user A's upsert creates A's own tag row.",
+        "Tag length at exactly 50 chars after trim → accepted; 51 → rejected.",
+        "Concurrent create with same new tag from same user → ON CONFLICT path handles cleanly; no duplicate-key 500.",
+        "Recipe save partially fails after some tag upserts — single transaction means everything rolls back including the tag rows. Verify by GET on /tags after a forced failure (no orphans).",
+        "DB readonly during the transaction → 503; no partial state."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "happy_path_with_tags: POST with tags=['Dinner','Vegetarian'] → 201; response.tags has 2 entries with names 'dinner'/'vegetarian' and display_names 'Dinner'/'Vegetarian'; GET /tags includes both.",
+        "happy_path_no_tags_omitted: POST without tags key → 201; response.tags == [].",
+        "happy_path_no_tags_empty: POST with tags=[] → 201; response.tags == [].",
+        "duplicate_tags_collapsed: POST with tags=['quick','Quick','QUICK'] → 201; response.tags has 1 entry.",
+        "whitespace_trimmed: POST with tags=['  dinner  '] → 201; persisted name 'dinner'.",
+        "existing_tag_reused: create recipe with tags=['dinner']; then create another recipe with tags=['Dinner'] → same tag id linked to both recipes; user's /tags shows one 'dinner' (display 'dinner' — first writer wins).",
+        "cross_user_tag_namespace_isolated: user A creates 'dinner'; user B creates 'dinner' → distinct tag rows; user A's /tags doesn't include B's row and vice versa.",
+        "empty_tag_string_400: tags=['  '] → 400 with tags in field_errors.",
+        "oversize_tag_400: tag with 51 chars → 400.",
+        "too_many_tags_400: tags with 21 entries → 400.",
+        "tag_with_newline_400: tags=['line1\\nline2'] → 400.",
+        "tag_not_string_400: tags=[123] → 400.",
+        "rollback_on_failure: force the recipe insert to fail after tags are upserted → no orphan tag rows exist for that user afterwards (transaction rolled back).",
+        "unicode_tag_preserved: tags=['Végétarien 🥗'] → persisted byte-identical (lowercased); detail view shows the original display casing.",
+        "extra_field_still_rejected: POST body with 'favorites' (out of scope) → 400."
+      ]
+    },
+    {
+      "id": "set_tags_on_recipe_update",
+      "name": "Replace tags when updating a recipe",
+      "description": "Extends update_recipe (PUT semantics) to manage the full tag set for a recipe. The submitted tags array is the new authoritative set: any current tag-links not in the new set are removed; new tags are added (with the same upsert path as create). Full replacement matches the PUT contract from milestone 2.",
+      "inputs": [
+        {
+          "name": "Authorization",
+          "type": "string (header)",
+          "required": true,
+          "constraints": [
+            "Bearer <JWT>"
+          ],
+          "description": "Bearer token."
+        },
+        {
+          "name": "recipe_id",
+          "type": "uuid (path)",
+          "required": true,
+          "constraints": [
+            "valid UUID"
+          ],
+          "description": "Recipe to update."
+        },
+        {
+          "name": "tags",
+          "type": "array<string>",
+          "required": false,
+          "constraints": [
+            "same constraints as set_tags_on_recipe_create: 0-20 items, 1-50 chars each after trim, no embedded newlines, Unicode preserved",
+            "omitted or null → treated as empty array (full replacement → drops all tags)"
+          ],
+          "description": "New authoritative tag set. PUT semantics: missing/omitted tags array clears all tags."
+        },
+        {
+          "name": "<other update_recipe fields>",
+          "type": "see milestone 2",
+          "required": true,
+          "constraints": [
+            "unchanged from milestone 2 update_recipe"
+          ],
+          "description": "Existing update_recipe inputs carry forward unchanged."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "tags",
+          "type": "array<TagOut>",
+          "required": true,
+          "constraints": [
+            "reflects the new persisted set",
+            "alphabetical by display_name"
+          ],
+          "description": "Recipe's tags after the update."
+        },
+        {
+          "name": "<other RecipeOut fields>",
+          "type": "see milestone 2",
+          "required": true,
+          "constraints": [
+            "unchanged"
+          ],
+          "description": "Existing update_recipe response shape carries forward with the added 'tags' field."
+        },
+        {
+          "name": "http_status",
+          "type": "int",
+          "required": true,
+          "constraints": [
+            "200 OK"
+          ],
+          "description": "Status on success."
+        }
+      ],
+      "validation_rules": [
+        "Authenticate first; 401 on invalid token. owner_id derived from JWT sub.",
+        "Ownership enforced: UPDATE/diff happens only if the recipe belongs to JWT.sub; otherwise 404 (collapsed with absent — carries forward existence-leak guard).",
+        "Same field validation as set_tags_on_recipe_create — apply identically; reject with a single 400 listing all field errors.",
+        "Diff algorithm (inside one transaction): compute the set of normalized tag names from the submitted array; resolve to tag ids via upsert; DELETE from recipe_tags WHERE recipe_id=? AND tag_id NOT IN (<resolved ids>); bulk INSERT new links via INSERT ... ON CONFLICT DO NOTHING.",
+        "updated_at refreshed server-side on the recipes row even if only tags changed.",
+        "Tag rows themselves are NOT deleted when unlinked — they remain in the user's tag namespace for reuse (and may be cleaned up by a future janitor).",
+        "Single transaction for the entire update (recipe row + tag diff)."
+      ],
+      "error_cases": [
+        "401 — missing/invalid JWT",
+        "403 — user lacks 'user' or 'admin' role",
+        "404 — recipe not found OR owned by another user (collapsed)",
+        "400 — same tag validation matrix as set_tags_on_recipe_create",
+        "400 — any other field validation failure (carries forward from milestone 2)",
+        "413 — body exceeds size cap",
+        "415 — wrong content-type",
+        "503 — DB readonly/unavailable (entire update rolled back)"
+      ],
+      "edge_cases": [
+        "tags omitted from PUT body → treated as empty array → ALL current tags removed from this recipe (PUT replacement semantics).",
+        "tags=[] → same as omitted.",
+        "Adding one tag to a recipe with two existing tags → DELETE removes none, INSERT adds the new link, end state: 3 links.",
+        "Replacing entire tag set ['a','b','c'] → ['d','e'] → DELETE removes a/b/c links, INSERT adds d/e links.",
+        "Submitting the same tags as currently persisted → diff results in zero DELETEs and zero INSERTs; updated_at still refreshes (carries milestone 2 contract).",
+        "User B PUTs user A's recipe with tags → 404, no DB writes performed.",
+        "Concurrent PUT and DELETE on same recipe — last writer wins; if DELETE commits first, PUT returns 404 (carries milestone 2 contract).",
+        "Tag previously linked to this recipe and ONLY this recipe gets unlinked → tag row remains in the user's namespace (orphan tag, intentional).",
+        "Race: same tag name added by two concurrent PUTs on different recipes → ON CONFLICT path makes this safe."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "happy_path_replace: recipe has tags ['a','b']; PUT with tags=['b','c'] → response tags = ['b','c']; GET shows ['b','c']; tag 'a' still exists in /tags (no janitor).",
+        "happy_path_clear: recipe has tags ['a','b']; PUT with tags=[] → response tags=[]; GET shows []; tags 'a','b' still in /tags.",
+        "happy_path_clear_omitted: same as above but tags field omitted from PUT body → tags=[].",
+        "add_one_tag: recipe has ['a']; PUT with tags=['a','b'] → response tags=['a','b']; user's /tags grew by one if 'b' was new.",
+        "cross_user_returns_404: user B PUTs user A's recipe → 404; A's recipe tags unchanged.",
+        "duplicate_tags_in_payload_collapsed: PUT with tags=['x','X'] → response tags has one entry.",
+        "invalid_tag_400: PUT with tags=['  '] → 400; recipe unchanged (no partial diff).",
+        "tag_namespace_isolation: PUT recipe owned by A with tags=['dinner'] does not touch B's 'dinner' tag.",
+        "reused_tag_id: link existing tag via PUT (same recipe twice, same tag) → idempotent; no duplicate-key error."
+      ]
+    },
+    {
+      "id": "get_recipe_includes_tags",
+      "name": "Include tags in GET recipe response",
+      "description": "Extends get_recipe to include the recipe's tags in the response payload, joined from recipe_tags + tags scoped to the owner. No new endpoint; existing GET /api/recipes/{id} gets a 'tags' field. Cross-user access still returns 404 (collapsed) — tags do not leak existence either.",
+      "inputs": [
+        {
+          "name": "Authorization",
+          "type": "string (header)",
+          "required": true,
+          "constraints": [
+            "Bearer <JWT>"
+          ],
+          "description": "Bearer token."
+        },
+        {
+          "name": "recipe_id",
+          "type": "uuid (path)",
+          "required": true,
+          "constraints": [
+            "valid UUID v4"
+          ],
+          "description": "Recipe to read."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "tags",
+          "type": "array<TagOut>",
+          "required": true,
+          "constraints": [
+            "each item: {id, name, display_name}",
+            "ordered alphabetically by display_name (consistent with create/update)",
+            "empty array when no tags linked"
+          ],
+          "description": "Recipe's tags."
+        },
+        {
+          "name": "<other RecipeOut fields>",
+          "type": "see milestone 2",
+          "required": true,
+          "constraints": [
+            "unchanged from milestone 2"
+          ],
+          "description": "Existing recipe representation."
+        },
+        {
+          "name": "http_status",
+          "type": "int",
+          "required": true,
+          "constraints": [
+            "200 OK"
+          ],
+          "description": "Status on success."
+        }
+      ],
+      "validation_rules": [
+        "Authenticate first; 401 on invalid token.",
+        "Combined WHERE id=:recipe_id AND owner_id=JWT.sub on the recipes table — milestone 2 ownership invariant.",
+        "Tag join restricted by recipe ownership (the recipe row gate already enforces it; the tag join is just on recipe_tags + tags). No additional owner_id filter needed on the tag tables because we only reach them via a recipe row that already passed the owner check.",
+        "Empty array (not null) when the recipe has no tags."
+      ],
+      "error_cases": [
+        "401 — missing/invalid/expired JWT",
+        "403 — user lacks 'user' or 'admin' role",
+        "400 — malformed UUID (carries milestone 2 contract)",
+        "404 — recipe not found OR owned by another user (collapsed)",
+        "503 — DB unavailable"
+      ],
+      "edge_cases": [
+        "Recipe with 0 tags → tags=[].",
+        "Recipe with 20 tags → all returned.",
+        "User B GETs user A's recipe → 404; never returns A's tag names even though they aren't sensitive (carries the milestone-2 existence-leak posture).",
+        "Tag display_name with Unicode → preserved.",
+        "Recipe loaded immediately after a tag rename via PUT → reflects the new state (no caching this milestone)."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "happy_path_with_tags: GET an owned recipe with 2 tags → response.tags has 2 entries.",
+        "happy_path_no_tags: GET an owned recipe with no tags → response.tags == [].",
+        "cross_user_404: user B GETs user A's tagged recipe → 404; response identical to absent-UUID 404.",
+        "alphabetical_ordering: recipe with tags ['Zucchini','apple','Mango'] (display_names) → response.tags ordered as 'apple','Mango','Zucchini' by case-insensitive display order (or whatever stable ordering is chosen — pin it).",
+        "unicode_display_preserved: recipe with tag display_name 'Café' → returned byte-identical."
+      ]
+    },
+    {
+      "id": "list_recipes_supports_search_and_tag_filter",
+      "name": "List recipes with optional search query and tag filter",
+      "description": "Extends list_my_recipes to accept optional ?q=<query> and ?tag=<tag_name> (or ?tag_id=<uuid>) query parameters. q matches recipes whose title, any ingredient line, or any linked tag's display_name/name contains the query (case-insensitive substring). tag narrows to recipes carrying that tag in the user's namespace. Both filters compose (AND). Ownership is still enforced; cross-user recipes are never returned even when a tag name matches.",
+      "inputs": [
+        {
+          "name": "Authorization",
+          "type": "string (header)",
+          "required": true,
+          "constraints": [
+            "Bearer <JWT>"
+          ],
+          "description": "Bearer token."
+        },
+        {
+          "name": "q",
+          "type": "string (query)",
+          "required": false,
+          "constraints": [
+            "1-200 chars after trim when present",
+            "trimmed before matching",
+            "case-insensitive substring match using ILIKE with escaped wildcards (% and _ in the user's query are treated as literals)",
+            "Unicode preserved",
+            "empty string or all-whitespace q is treated as 'no q filter' (NOT an error)"
+          ],
+          "description": "Free-text search query. Matches against recipe title OR any ingredient line OR any linked tag name/display_name."
+        },
+        {
+          "name": "tag",
+          "type": "string (query)",
+          "required": false,
+          "constraints": [
+            "1-50 chars after trim when present",
+            "case-insensitive match against the user's own tags (lowercased before comparison)",
+            "tag name not in the user's namespace → returns [] (NOT 404) — absence of matches, not an error",
+            "empty/whitespace value treated as 'no tag filter'",
+            "tag query param may be repeated; semantics: AND across all tags (recipe must carry every listed tag). Pick this and document; alternative OR semantics is not in scope."
+          ],
+          "description": "Filter to recipes carrying this tag in the requesting user's namespace."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "recipes",
+          "type": "array<RecipeSummary>",
+          "required": true,
+          "constraints": [
+            "sorted by created_at DESC, id DESC (carries milestone 2 ordering)",
+            "each item includes tags (extension to milestone 2's RecipeSummary so the UI can render tag chips on rows without a second fetch)",
+            "empty array when nothing matches"
+          ],
+          "description": "Matching recipes, newest first."
+        },
+        {
+          "name": "http_status",
+          "type": "int",
+          "required": true,
+          "constraints": [
+            "200 OK"
+          ],
+          "description": "Status on success — empty result is 200, not 404."
+        }
+      ],
+      "validation_rules": [
+        "Authenticate first; 401 on invalid token. owner_id derived from JWT sub.",
+        "All matching gated by owner_id = JWT.sub. NEVER search across owners, even if the query happens to match another user's tag.",
+        "q matching: ILIKE with escaped %/_ in the user-supplied string (or use Postgres position() / parameter-bound LIKE) against title, EXISTS over the ingredients JSONB array elements, EXISTS over joined tags. UNION-OR the three predicates and DISTINCT the recipe rows.",
+        "Ingredient match operates on the JSONB array elements. With ingredients stored as jsonb (milestone 2), use a lateral expansion (jsonb_array_elements_text) or a GIN index with the jsonb_path_ops opclass + appropriate operator. Document the chosen approach in the migration / repository module.",
+        "Tag-name filter: lowercase the param, look up the tag_id in tags WHERE owner_id=JWT.sub AND name=?. If no row, return [] without any join.",
+        "Multiple tag params: resolve each to a tag_id; require recipes to be linked to EVERY id (group-by-having-count or repeated EXISTS subqueries).",
+        "Combine filters with AND: q AND tag_id1 AND tag_id2 ...",
+        "Ignore unknown query params (forward-compat with milestone 2 contract); do not 400 on them.",
+        "Always 200 with [] on no matches; never 404.",
+        "Pagination remains out of scope; full filtered list returned."
+      ],
+      "error_cases": [
+        "401 — missing/invalid/expired JWT",
+        "403 — user lacks 'user' or 'admin' role",
+        "400 — q present and exceeds 200 chars",
+        "400 — tag present and exceeds 50 chars",
+        "400 — tag present with embedded newline/control characters",
+        "503 — DB unavailable"
+      ],
+      "edge_cases": [
+        "q matches recipe title → recipe returned.",
+        "q matches one of the ingredient lines (substring, case-insensitive) → recipe returned.",
+        "q matches a linked tag's display_name OR canonical name → recipe returned.",
+        "q matches multiple paths (title AND tag) → recipe appears once (DISTINCT).",
+        "q contains % or _ → treated as literal characters (escape before LIKE).",
+        "q contains SQL meta or quotes → safely parameterized; no injection.",
+        "q is empty string or whitespace-only → treated as no q filter (full list).",
+        "q is multi-word: matched as a single substring this milestone (no token splitting); document the limitation. Future milestones may add tokenized FTS.",
+        "tag param resolves to a tag the user does not own (someone else's namespace) → []; never leaks.",
+        "tag param resolves to a tag the user owns but no recipe carries → [].",
+        "Combined q + tag: q='soup' AND tag='dinner' → only recipes that match q AND carry the dinner tag.",
+        "Repeated tag params (?tag=a&tag=b): only recipes carrying BOTH a and b returned (AND).",
+        "User A and user B both have a tag named 'dinner'. user A's /mine?tag=dinner returns only A's recipes — never B's, even though the string matches.",
+        "Unicode q (emoji, RTL): ILIKE comparison is Unicode-safe; recipes with matching content are returned.",
+        "Query injection via tag like '%' → tag values are exact-match against the normalized name; no LIKE semantics applied.",
+        "Very long ingredients list per recipe (100 items) → match still works (lateral expansion is bounded).",
+        "Concurrent search while another request creates/deletes recipes — eventual consistency; any sane snapshot is acceptable."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "q_matches_title: create recipe with title 'Spaghetti Bolognese'; GET /mine?q=bolog → returns that recipe.",
+        "q_matches_ingredient: create recipe with ingredient 'fresh basil'; GET /mine?q=basil → returns it.",
+        "q_matches_tag: create recipe with tags=['vegetarian']; GET /mine?q=vegetarian → returns it.",
+        "q_no_matches_returns_empty_array: GET /mine?q=zzzzz → 200 with [].",
+        "q_case_insensitive: create recipe with title 'Curry'; GET /mine?q=CURRY → returns it.",
+        "q_with_percent_literal: create recipe with title '50% off'; GET /mine?q=50%25 → 400 invalid? No — query string %25 decodes to %; ILIKE escapes % so it matches the literal % character. Verify both with and without URL-encoded %.",
+        "tag_filter_returns_only_tagged: create 2 recipes, tag one with 'dinner'; GET /mine?tag=dinner → returns the tagged one.",
+        "tag_filter_case_insensitive: tag stored as 'dinner'; GET /mine?tag=Dinner → returns the same recipe.",
+        "tag_filter_unknown_returns_empty: GET /mine?tag=neverused → 200 with [].",
+        "combined_q_and_tag: recipe A title='Soup' tagged 'dinner'; recipe B title='Soup' untagged; GET /mine?q=soup&tag=dinner → returns only A.",
+        "empty_filters_full_list: GET /mine → all of the user's recipes, newest first (existing behavior preserved).",
+        "cross_user_isolation_with_matching_tag: user A has recipe with tag 'dinner'; user B logs in and GET /mine?tag=dinner → 200 [] (B has no 'dinner' tag of their own).",
+        "cross_user_isolation_with_matching_q: user A has recipe title 'Stew'; user B GET /mine?q=stew → 200 [] (never B sees A's recipe).",
+        "oversize_q_400: q with 201 chars → 400.",
+        "oversize_tag_400: tag with 51 chars → 400.",
+        "unknown_query_param_ignored: GET /mine?limit=1 → 200 with full list (forward-compat).",
+        "sort_order_preserved_under_filter: filter results still come back newest-first (sorted_desc invariant from milestone 2).",
+        "includes_after_create_excludes_after_delete: filtered list reflects create + delete events.",
+        "unicode_q: tag a recipe 'Curry' with 'spicy' and search q='Curry' → returned; q with emoji in title also matches.",
+        "multiple_tag_filters_AND: recipes with tags {a,b}, {a}, {b}; GET /mine?tag=a&tag=b → only the first.",
+        "tagged_recipe_list_includes_tags_field: each row in the list response carries tags=[...] (so the UI can render chips without a per-row GET)."
+      ]
+    },
+    {
+      "id": "list_my_tags",
+      "name": "List the authenticated user's tag namespace",
+      "description": "GET endpoint returning every tag the user owns. Feeds the tag-filter sidebar/dropdown on the My Recipes page so the user can pick from their own tags.",
+      "inputs": [
+        {
+          "name": "Authorization",
+          "type": "string (header)",
+          "required": true,
+          "constraints": [
+            "Bearer <JWT>"
+          ],
+          "description": "Bearer token."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "tags",
+          "type": "array<TagSummary>",
+          "required": true,
+          "constraints": [
+            "each item: {id, name, display_name, recipe_count}",
+            "recipe_count is the number of the user's recipes currently linked to this tag (>=0); zero is allowed (orphan tags from edits)",
+            "ordered alphabetically by display_name (case-insensitive)",
+            "empty array when user has no tags"
+          ],
+          "description": "User's tag namespace."
+        },
+        {
+          "name": "http_status",
+          "type": "int",
+          "required": true,
+          "constraints": [
+            "200 OK"
+          ],
+          "description": "Status on success."
+        }
+      ],
+      "validation_rules": [
+        "Authenticate first; 401 on invalid token.",
+        "Filter WHERE tags.owner_id = JWT.sub. NEVER include other users' tag rows.",
+        "recipe_count derived via LEFT JOIN on recipe_tags + recipes (the recipes table is already owner-filtered by tags.owner_id since tag_id FKs scope ownership), grouped by tag id. Document the count semantics: zero is valid for orphans.",
+        "Endpoint path: GET /api/recipes/tags (chosen to live under the recipes router for grouping; the milestone-1 list endpoint is /api/recipes/mine, so this slots in alongside).",
+        "Ignore query parameters (forward-compat); always 200."
+      ],
+      "error_cases": [
+        "401 — missing/invalid JWT",
+        "403 — user lacks 'user' or 'admin' role",
+        "503 — DB unavailable"
+      ],
+      "edge_cases": [
+        "User has zero tags → 200 with [].",
+        "User has orphan tag (created during an edit, never linked) → appears with recipe_count=0.",
+        "User has 100 tags → all returned; no pagination (document scaling limit, deferred).",
+        "Two users with same tag name → each sees only their own row.",
+        "Tag display_name with Unicode → preserved.",
+        "Concurrent tag upsert during the request → row may or may not appear depending on commit timing; both are acceptable."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "happy_path_empty: new user → 200 with [].",
+        "happy_path_after_create: create recipe with tags=['a','b'] → /tags returns 2 items, each recipe_count=1.",
+        "orphan_tag_present: create recipe with tags=['x']; edit recipe to tags=[] → /tags still includes 'x' with recipe_count=0.",
+        "cross_user_isolation: user A creates tag 'dinner'; user B's /tags is [].",
+        "alphabetical_order: tags ['Zucchini','apple','Mango'] → returned in case-insensitive alphabetical order by display_name.",
+        "recipe_count_accurate: 2 recipes tagged 'dinner' → /tags shows recipe_count=2 on 'dinner'.",
+        "unauthenticated_401: no Authorization → 401.",
+        "admin_only_sees_own: admin's /tags excludes other users' tags."
+      ]
+    },
+    {
+      "id": "frontend_tag_input_component",
+      "name": "Tag input component (shared by create + edit forms)",
+      "description": "React component that lets the user add tags via comma-separated entry or chip-style entry. Emits a controlled array of trimmed, deduplicated tag strings to the parent form. Renders existing tags as removable chips. Used by the create and edit recipe forms.",
+      "inputs": [
+        {
+          "name": "value",
+          "type": "string[]",
+          "required": true,
+          "constraints": [
+            "array of currently-entered tags (in display casing)"
+          ],
+          "description": "Controlled value."
+        },
+        {
+          "name": "onChange",
+          "type": "(next: string[]) => void",
+          "required": true,
+          "constraints": [
+            "called on add or remove"
+          ],
+          "description": "Change callback."
+        },
+        {
+          "name": "max_tags",
+          "type": "number",
+          "required": false,
+          "constraints": [
+            "default 20 (matches backend cap)"
+          ],
+          "description": "Upper bound; Add disabled at the cap."
+        },
+        {
+          "name": "max_tag_length",
+          "type": "number",
+          "required": false,
+          "constraints": [
+            "default 50 (matches backend cap)"
+          ],
+          "description": "Per-tag char cap; rejected with inline hint."
+        },
+        {
+          "name": "suggestions",
+          "type": "string[]",
+          "required": false,
+          "constraints": [
+            "optional list of the user's existing tags from /tags for typeahead — not strictly required this milestone but supported"
+          ],
+          "description": "Autocomplete options."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "rendered",
+          "type": "ReactNode",
+          "required": true,
+          "constraints": [
+            "each tag rendered as a chip with a Remove button (aria-label='Remove tag <name>')",
+            "text input accepts new tags; pressing Enter or comma commits the current text as a chip",
+            "backspace at empty input removes the last chip (standard chip UX)",
+            "comma-separated paste splits into multiple chips",
+            "duplicates (case-insensitive) silently collapse — second add is a no-op",
+            "input is cleared after each successful add",
+            "chip styling uses the M1 design system"
+          ],
+          "description": "Chip-style input."
+        }
+      ],
+      "validation_rules": [
+        "Trim on add; reject empty post-trim entries silently (no chip added, no error).",
+        "Reject entries > max_tag_length with an inline message; do not add the chip.",
+        "Reject reaching max_tags with an inline message; Add affordance disabled.",
+        "Deduplicate case-insensitively on add (compare lowercased forms).",
+        "Component does NOT call the API directly — pure controlled component; the parent form manages submit.",
+        "Each chip is keyboard-removable (Backspace when focused, or Enter/Space on the Remove button).",
+        "aria-live region announces add/remove for screen readers."
+      ],
+      "error_cases": [
+        "Entry > 50 chars → inline 'Tags can be at most 50 characters.'",
+        "At 20 tags → Add disabled; inline 'You can add at most 20 tags.'",
+        "Entry contains newline → strip the newline before commit (paste of multi-line content splits on newlines or commas)."
+      ],
+      "edge_cases": [
+        "Comma-separated paste 'a, b, c' → adds three chips (after dedup against existing).",
+        "Empty paste → no chips added; no error.",
+        "User types tag then navigates away without committing (no Enter) → the parent form's submit treats the half-typed input as a final unfocused commit (or discards; document the chosen behavior — recommended: commit on form submit to avoid surprising the user).",
+        "Backspace at empty input with chips present → removes the rightmost chip.",
+        "Rapid duplicate adds → silently coalesced.",
+        "Unicode chars in tag → preserved.",
+        "Removing the last chip leaves an empty array; form does not error (tags are optional).",
+        "Suggestion clicked → adds as a chip (deduped)."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "unit_add_via_enter: type 'dinner', press Enter → chip 'dinner' appears, input cleared.",
+        "unit_add_via_comma: type 'dinner,' → chip added, input cleared.",
+        "unit_paste_csv: paste 'a, b, c' → 3 chips added.",
+        "unit_remove_chip: click Remove on a chip → chip gone, value updated.",
+        "unit_backspace_removes_last: focus input with empty text, press Backspace → last chip removed.",
+        "unit_dedup_case_insensitive: add 'Dinner' then 'dinner' → only one chip ('Dinner', first-typed casing preserved).",
+        "unit_max_tag_length_blocks: type 51 chars and Enter → no chip, inline error visible.",
+        "unit_max_tags_blocks_add: at 20 chips, try to add a 21st → no chip, inline error, Add disabled.",
+        "unit_pending_text_committed_on_submit: type 'pending' without Enter, parent calls a flush helper → 'pending' included in submitted array (or documented alternative behavior).",
+        "unit_unicode_chip: add 'Végé' → chip displays 'Végé'."
+      ]
+    },
+    {
+      "id": "frontend_create_form_with_tags",
+      "name": "Tags field on the create-recipe form",
+      "description": "Mounts the tag input component (with empty initial value) inside the existing /recipes/new form. On submit, the submitted payload includes the tags array. Backend field errors on 'tags' surface inline next to the tag input.",
+      "inputs": [
+        {
+          "name": "tags_input",
+          "type": "string[]",
+          "required": false,
+          "constraints": [
+            "bound to the tag input component",
+            "empty array allowed (tags are optional)"
+          ],
+          "description": "Tag chips."
+        },
+        {
+          "name": "<other create form fields>",
+          "type": "see milestone 2",
+          "required": true,
+          "constraints": [
+            "unchanged from milestone 2"
+          ],
+          "description": "Existing create form inputs."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "navigation",
+          "type": "route",
+          "required": true,
+          "constraints": [
+            "on success: navigate to /recipes/:newId (carries milestone 2 behavior)"
+          ],
+          "description": "Post-submit route."
+        },
+        {
+          "name": "error_messages",
+          "type": "map<field,string>",
+          "required": false,
+          "constraints": [
+            "per-field inline errors; 'tags' field renders beneath the tag input"
+          ],
+          "description": "Validation surfaces."
+        }
+      ],
+      "validation_rules": [
+        "The tags field is OPTIONAL on the form (consistent with the backend default to empty array).",
+        "Submit serialization: include tags only if non-empty (omitted when empty is also acceptable since backend treats both the same).",
+        "Backend 400 with field_errors.tags → surface inline beneath the tag input; do not block form re-edit.",
+        "Carry forward all milestone-2 create-form behavior: disable submit while in-flight, cancel navigates to /my-recipes, no double-submit, on-success navigate to detail."
+      ],
+      "error_cases": [
+        "Backend 400 on tags → inline error; form remains editable.",
+        "Backend 400 on other fields → existing behavior.",
+        "Backend 401 → existing global redirect."
+      ],
+      "edge_cases": [
+        "User submits with no tags → recipe created with no tags.",
+        "User submits with tags that fail backend validation (e.g. somehow > 50 chars escaping the client) → backend error surfaces.",
+        "User adds tags via paste then submits immediately → all chips included.",
+        "Navigation away during in-flight create → existing milestone-2 behavior (ignore late response on unmount)."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "playwright_happy_path_tagged: fill form, add 2 tags via chips, submit → land on /recipes/:id; detail page shows both tags.",
+        "playwright_happy_path_no_tags: fill form without tags, submit → recipe created with no tags (carry-forward).",
+        "playwright_tag_chip_persists_across_submit: add 'dinner', submit → detail page shows 'dinner' chip; GET /tags includes it.",
+        "playwright_dedup_at_form_level: add 'Dinner' then 'dinner' → form shows one chip; backend receives one tag.",
+        "playwright_max_tags_blocks_more: add 20 tags → 21st attempt blocked inline."
+      ]
+    },
+    {
+      "id": "frontend_edit_form_with_tags",
+      "name": "Tags field on the edit-recipe form",
+      "description": "Pre-populates the tag input with the recipe's current tags on mount (from the GET response). User can add or remove chips. On submit, PUT carries the full new tag array (PUT replacement semantics matching the API).",
+      "inputs": [
+        {
+          "name": "recipe.tags",
+          "type": "TagOut[]",
+          "required": true,
+          "constraints": [
+            "projected to string[] (display_name) for the tag input"
+          ],
+          "description": "Existing tags from GET."
+        },
+        {
+          "name": "<other edit form fields>",
+          "type": "see milestone 2",
+          "required": true,
+          "constraints": [
+            "unchanged"
+          ],
+          "description": "Existing edit form inputs."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "prefilled_form",
+          "type": "ReactNode",
+          "required": true,
+          "constraints": [
+            "tag chips pre-populated from the recipe's current tags",
+            "other fields per milestone 2"
+          ],
+          "description": "Pre-filled form."
+        },
+        {
+          "name": "navigation",
+          "type": "route",
+          "required": true,
+          "constraints": [
+            "on success: navigate to /recipes/:id (carries milestone 2)"
+          ],
+          "description": "Post-submit route."
+        }
+      ],
+      "validation_rules": [
+        "On mount, project recipe.tags → string[] of display_names for the tag input.",
+        "Submit sends the FULL tag array (PUT replacement semantics — adds/removes diff on the server).",
+        "Backend 400 on tags surfaces inline.",
+        "Carry forward all milestone-2 edit-form behavior (race-on-delete → 'Recipe was deleted', validation, in-flight disabled, etc.)."
+      ],
+      "error_cases": [
+        "GET 404 → 'Recipe not found' (existing).",
+        "PUT 400 with tag errors → inline next to tag input.",
+        "PUT 404 (race) → 'Recipe was deleted' (existing).",
+        "PUT 5xx → 'Unable to save recipe.' (existing)."
+      ],
+      "edge_cases": [
+        "User opens edit, removes all tags, submits → recipe ends up with no tags; detail view reflects empty tags.",
+        "User opens edit, adds a brand-new tag → tag appears in /tags after save.",
+        "Tags display_name preserved through the round-trip (first-writer-wins on casing — so existing tag re-typed in different case keeps the original display_name).",
+        "Race: user removes a tag, another tab deletes the recipe, user submits → 404 on PUT → 'Recipe was deleted'.",
+        "User unchanges all tag chips (no tag edits) → PUT sends the existing array; server diff is a no-op; updated_at refreshes (existing milestone-2 contract)."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "playwright_prefill_with_tags: seed recipe with tags ['a','b']; open edit → chips for 'a' and 'b' visible.",
+        "playwright_remove_tag_save: seed with ['a','b']; remove 'b'; save → detail shows only 'a'.",
+        "playwright_add_tag_save: seed with ['a']; add 'c'; save → detail shows ['a','c'].",
+        "playwright_clear_all_tags_save: seed with ['a']; remove 'a'; save → detail shows no tags.",
+        "playwright_dedup_against_prefill: seed with ['Dinner']; add 'dinner' → chip count remains 1 (case-insensitive dedup against existing chips)."
+      ]
+    },
+    {
+      "id": "frontend_detail_shows_tags",
+      "name": "Show tags on the recipe detail page",
+      "description": "Recipe detail page renders the recipe's tags as a row of chips (display_name) above or below the metadata. Clicking a tag chip navigates to /my-recipes filtered by that tag.",
+      "inputs": [
+        {
+          "name": "recipe.tags",
+          "type": "TagOut[]",
+          "required": true,
+          "constraints": [
+            "from the GET /api/recipes/:id response"
+          ],
+          "description": "Tags to render."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "rendered",
+          "type": "ReactNode",
+          "required": true,
+          "constraints": [
+            "each tag rendered as a chip with display_name",
+            "chip is a <Link to=\"/my-recipes?tag=<encoded display_name>\"> for SPA navigation",
+            "no chips visible when tags is empty (no 'No tags' placeholder this milestone — keep the detail surface clean)",
+            "XSS-safe: React default escaping (no dangerouslySetInnerHTML)"
+          ],
+          "description": "Tags row."
+        }
+      ],
+      "validation_rules": [
+        "Tag chip text uses display_name verbatim (Unicode-safe).",
+        "Chip link URL-encodes the tag name to handle spaces, &, etc.",
+        "Carry forward all milestone-2 detail-page behavior (edit/delete affordances, lists, no XSS)."
+      ],
+      "error_cases": [],
+      "edge_cases": [
+        "Recipe with no tags → no tag chip row rendered.",
+        "Tag with very long display_name → chip wraps or truncates with ellipsis; full text accessible via title attr.",
+        "Tag display_name with emoji/RTL → rendered correctly.",
+        "Tag display_name '<script>...</script>' → rendered as literal text; no script execution (carry forward XSS guard).",
+        "Detail page reached via tag click → URL is /my-recipes?tag=<name> and list reflects the filter."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "playwright_tags_visible: detail page for a recipe with 2 tags → 2 chips visible with the right display_names.",
+        "playwright_no_tags_no_chip_row: detail for a tagless recipe → no chip row rendered.",
+        "playwright_tag_chip_links_to_filtered_list: click a tag chip → URL becomes /my-recipes?tag=<name>; list narrows.",
+        "playwright_tag_unicode_rendered: tag display_name '🍕 pizza' → chip text visible.",
+        "playwright_tag_xss_safe: tag display_name '<script>alert(1)</script>' → rendered literally; no dialog."
+      ]
+    },
+    {
+      "id": "frontend_list_shows_tags",
+      "name": "Show tags on the My Recipes list rows",
+      "description": "Each row on /my-recipes renders the recipe's tags as small chips (read-only — clicking the tag could optionally apply the filter but is not required this milestone). Carries forward the existing list row content (title, metadata).",
+      "inputs": [
+        {
+          "name": "recipe.tags",
+          "type": "TagOut[]",
+          "required": true,
+          "constraints": [
+            "from the GET /api/recipes/mine response (now extended)"
+          ],
+          "description": "Tags per row."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "rendered",
+          "type": "ReactNode",
+          "required": true,
+          "constraints": [
+            "chip badges next to or below the title",
+            "at most N visible chips with a '+M more' overflow when the count exceeds N (pick N, e.g. 5; document)",
+            "no chip area when tags is empty"
+          ],
+          "description": "List row with tags."
+        }
+      ],
+      "validation_rules": [
+        "List row stays a single <Link> to the detail page; tag chips inside the link MUST not steal the click. Either render chips outside the link's clickable area or stop event propagation on the chip element if it has its own navigation behavior.",
+        "Carry forward milestone-2 list behavior (newest-first, click-through, empty state)."
+      ],
+      "error_cases": [],
+      "edge_cases": [
+        "Row with 0 tags → no chip area.",
+        "Row with many tags → first N rendered + '+M more'.",
+        "Very long tag name in a row → ellipsis.",
+        "Tag chip click (if interactive) navigates to /my-recipes?tag=<name> WITHOUT firing the row's detail link."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "playwright_row_shows_tags: list page with a recipe that has 2 tags → 2 chip badges visible on that row.",
+        "playwright_row_no_tags_no_chip: row with 0 tags → no chip badges (just title + metadata).",
+        "playwright_row_click_still_navigates_to_detail: click anywhere on the row (not a chip) → URL becomes /recipes/:id (regression check on the click target).",
+        "playwright_row_overflow: row with 7 tags → 5 chips + '+2 more'."
+      ]
+    },
+    {
+      "id": "frontend_search_box",
+      "name": "Search box on the My Recipes page",
+      "description": "Text input at the top of /my-recipes that filters the list by title / ingredient / tag. Debounced fetch to GET /api/recipes/mine?q=...; results update the visible list in place. URL reflects the current q (so a refresh or shared link preserves the search).",
+      "inputs": [
+        {
+          "name": "input",
+          "type": "string",
+          "required": false,
+          "constraints": [
+            "controlled by React state",
+            "max length attr=200 to mirror backend cap",
+            "placeholder text describes what the search covers ('Search title, ingredient, or tag')"
+          ],
+          "description": "Search query."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "rendered",
+          "type": "ReactNode",
+          "required": true,
+          "constraints": [
+            "input with a clear-button when non-empty",
+            "loading indicator while a debounced fetch is in-flight",
+            "results in the list area below",
+            "empty-state copy 'No recipes match your search.' when q is non-empty and results=[]",
+            "URL search param ?q=<encoded> kept in sync (replaceState, not push, so browser back doesn't accumulate every keystroke)"
+          ],
+          "description": "Search UI."
+        }
+      ],
+      "validation_rules": [
+        "Debounce input changes (~250-400ms) before firing a new fetch — pick a value and document.",
+        "On every fetch trigger, also include the current tag filter (combined filtering).",
+        "Cancel in-flight fetches when a new one starts (AbortController or staleness token) so stale responses don't overwrite the latest.",
+        "On 401: shared interceptor (carries forward).",
+        "On 5xx: inline 'Unable to load your recipes right now.' with a Retry button (carries forward).",
+        "Clear button empties the input AND removes ?q from the URL AND triggers a refetch.",
+        "URL sync: read ?q on mount and prefill the input; subsequent edits update the URL.",
+        "Empty trimmed q → URL omits the q param entirely (do not leave '?q=' empty)."
+      ],
+      "error_cases": [
+        "q > 200 chars (defensive client cap) → trim or block; do not send the request.",
+        "Backend 400 on q → render 'Unable to search right now.' inline (should be rare given client caps).",
+        "Backend 5xx → inline retry banner (carries forward)."
+      ],
+      "edge_cases": [
+        "User types fast then stops → only one fetch fires after the debounce window.",
+        "User clears input while a fetch is in-flight → in-flight fetch aborted; full list refetched.",
+        "Search returns [] → 'No recipes match your search.' visible; clearing input restores list.",
+        "Search box and tag filter both active → both surfaced in URL (?q=...&tag=...).",
+        "Shared link: open /my-recipes?q=soup → input pre-filled, results fetched immediately.",
+        "Unicode in search box (emoji, RTL) → URL-encoded properly; backend matches.",
+        "Special chars in q (%, _, &) → preserved through URL encoding; backend treats LIKE meta as literals.",
+        "User searches then navigates to detail then back via browser back → search state restored from URL.",
+        "Stale response: race where a slow response for q='soup' arrives after a fast response for q='soupy' → the stale response is discarded (AbortController or staleness check)."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "playwright_search_matches_title: seed recipes; type a title fragment → list narrows to matches.",
+        "playwright_search_matches_ingredient: type an ingredient word → matching recipe appears.",
+        "playwright_search_matches_tag: type a tag name → matching recipe appears.",
+        "playwright_search_no_matches: type 'zzzz' → 'No recipes match your search.' visible.",
+        "playwright_clear_restores_list: type then click clear → full list re-rendered.",
+        "playwright_url_reflects_q: type 'soup' → URL contains ?q=soup.",
+        "playwright_load_with_query_in_url: navigate to /my-recipes?q=soup → input pre-filled and filtered results shown.",
+        "playwright_debounce: type rapidly → only one network request observed after the debounce delay.",
+        "playwright_stale_response_discarded: simulate slow response for q='a' then fast for q='ab' → final visible list matches q='ab' (no flash of 'a' results).",
+        "playwright_combined_with_tag: with tag filter active, type a query → both filters applied; clearing q keeps the tag filter; clearing tag keeps q."
+      ]
+    },
+    {
+      "id": "frontend_tag_filter",
+      "name": "Tag filter on the My Recipes page",
+      "description": "UI affordance for narrowing the list by one of the user's own tags. Renders the user's tag namespace from GET /api/recipes/tags as clickable chips (sidebar or dropdown — pick one; sidebar recommended for visibility). Selecting a tag filters; clicking the selected tag again clears the filter. Combines with the search box. URL reflects the current tag.",
+      "inputs": [
+        {
+          "name": "my_tags",
+          "type": "TagSummary[]",
+          "required": true,
+          "constraints": [
+            "fetched on mount from /api/recipes/tags",
+            "empty array hides the filter UI (no tags to pick from)"
+          ],
+          "description": "User's tag list."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "rendered",
+          "type": "ReactNode",
+          "required": true,
+          "constraints": [
+            "each tag rendered as a selectable chip (display_name + recipe_count)",
+            "selected tag visually highlighted",
+            "'Clear filter' affordance visible when a tag is selected",
+            "URL search param ?tag=<encoded display_name> in sync",
+            "empty-state copy 'No recipes match this tag.' (or the combined 'No recipes match your search.' when q also active)"
+          ],
+          "description": "Tag filter UI."
+        }
+      ],
+      "validation_rules": [
+        "Selecting a tag triggers a fetch with the tag (and current q) parameters and updates the URL.",
+        "Clicking the currently-selected tag clears the filter (replaceState removing ?tag).",
+        "Filter UI does NOT show another user's tags — never (fetched from /tags which is per-user).",
+        "On 401 from /tags: shared interceptor handles.",
+        "On 5xx from /tags: hide the filter UI but keep the search/list functional; show a small inline 'Tag list unavailable'.",
+        "Read ?tag from URL on mount and pre-select if it matches an existing tag (case-insensitive)."
+      ],
+      "error_cases": [
+        "Backend 400 on tag → render 'Unable to apply tag filter.' inline; clear the URL ?tag.",
+        "Backend 5xx on /tags → hide tag-filter UI; main list still usable."
+      ],
+      "edge_cases": [
+        "User has zero tags → tag-filter UI hidden entirely (no empty sidebar shell).",
+        "User creates a new tag elsewhere → not reflected until next /tags fetch (no live polling this milestone).",
+        "Selected tag was deleted via cascade or edit → no recipes match; empty-state copy renders.",
+        "URL pre-selects a tag the user does not own → filter ignored (NOT 404, NOT error); UI shows full list with no selected chip (avoid showing a bogus selected state).",
+        "Combined with search: clearing one does not clear the other.",
+        "Unicode tag names → URL-encoded properly.",
+        "Tag chip click does not double-submit if the same tag is clicked twice rapidly (debounce or noop)."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "playwright_tag_filter_visible: log in as a user with at least one tag → tag chips visible in the filter UI.",
+        "playwright_tag_filter_hidden_when_empty: log in as a user with no tags → tag filter UI hidden.",
+        "playwright_select_tag_narrows_list: click a tag chip → list narrows to recipes carrying that tag; URL contains ?tag=<name>.",
+        "playwright_clear_tag_restores_list: click selected tag → filter cleared; URL no longer has ?tag.",
+        "playwright_combine_tag_and_q: select tag, then type a query → both filters active in URL and list.",
+        "playwright_url_pre_select: open /my-recipes?tag=dinner → chip 'dinner' shown as selected and list filtered.",
+        "playwright_isolation: log in as user B who has no 'dinner' tag → opening /my-recipes?tag=dinner (URL crafted manually) shows full list, no error.",
+        "playwright_tag_no_matches_empty: select a tag with zero recipes → 'No recipes match this tag.' visible.",
+        "playwright_clear_all_restores_list: with both q and tag set, click 'Clear filters' (combined) → URL has neither q nor tag; full list visible."
+      ]
+    },
+    {
+      "id": "frontend_combined_filter_empty_state",
+      "name": "Combined search + tag-filter empty state and clear-all",
+      "description": "When q and/or tag are active but the list is empty, render a clear empty-state with a 'Clear filters' affordance that restores the full list. Combined with the existing 'No recipes yet' (truly empty user) — those are different states.",
+      "inputs": [
+        {
+          "name": "current_filters",
+          "type": "{q?: string, tag?: string}",
+          "required": true,
+          "constraints": [
+            "derived from URL"
+          ],
+          "description": "Active filters."
+        },
+        {
+          "name": "results",
+          "type": "RecipeSummary[]",
+          "required": true,
+          "constraints": [],
+          "description": "Current list contents."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "rendered",
+          "type": "ReactNode",
+          "required": true,
+          "constraints": [
+            "if results=[] AND any filter active: 'No recipes match your filters.' with a 'Clear filters' button",
+            "if results=[] AND no filter active: existing 'No recipes yet' empty state (carry-forward from milestone 1/2)",
+            "'Clear filters' empties q AND tag from state and URL, triggers a refetch"
+          ],
+          "description": "Combined empty-state UI."
+        }
+      ],
+      "validation_rules": [
+        "Empty-state copy MUST distinguish 'user has no recipes' from 'filters returned nothing' (different actions for the user).",
+        "Clear filters removes both ?q and ?tag from URL in one update.",
+        "Carry forward 'New Recipe' button always-visible behavior even in the filtered-empty state."
+      ],
+      "error_cases": [],
+      "edge_cases": [
+        "User has 0 recipes and applies a filter → empty filtered state shown; clearing filters shows the 'No recipes yet' state.",
+        "User has recipes but the filter excludes all → filtered empty state.",
+        "Clear filters when only one filter is active → clears just that one (effectively).",
+        "Rapid filter toggling settles on the latest URL state."
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin"
+      ],
+      "test_scenarios": [
+        "playwright_filtered_empty_state: with recipes present but q='zzzz' → 'No recipes match your filters.' visible plus a Clear button.",
+        "playwright_clear_filters_button: click Clear filters → URL has neither ?q nor ?tag; full list re-renders.",
+        "playwright_truly_empty_vs_filtered_empty: distinct text strings for 'No recipes yet' vs 'No recipes match your filters.'",
+        "playwright_new_recipe_button_still_visible: empty filtered state still shows 'New Recipe' affordance."
+      ]
+    }
+  ],
+  "cross_cutting": {
+    "error_envelope": [
+      "All backend 4xx/5xx responses continue to use the shape: {\"error\": \"<machine_code>\", \"message\": \"<human readable>\", \"field_errors\"?: {<field>: <msg>}}.",
+      "Tag validation failures use field_errors.tags (single key, since the API treats the array as a whole)."
+    ],
+    "logging": [
+      "Audit log gains events: {event: 'recipe_tags_changed', user_id, recipe_id, added_count, removed_count, request_id, ts} on create-with-tags and update-with-tag-diff. NEVER log raw tag values — tag names are user input and may be sensitive in some contexts; log counts only.",
+      "Search queries (q values) MUST NOT be logged verbatim in production logs — they can include PII or sensitive search terms. Log presence + length + hash if useful, never the literal q string.",
+      "Carry forward milestone-2 logging invariants (no JWT bodies, no auth headers, no full recipe bodies)."
+    ],
+    "auth_validation": [
+      "Reuse milestone-1 JWT validation unchanged.",
+      "All tag endpoints (read, write, search) require role 'user' or 'admin'; missing roles → 403.",
+      "Admin role does NOT confer cross-user tag/search reads this milestone."
+    ],
+    "ownership_enforcement": [
+      "Tags + recipe_tags writes always derive owner_id from JWT.sub. Tag lookups for filters MUST be scoped to the requesting user's namespace.",
+      "Search queries MUST never UNION across users or include WHERE clauses that omit the owner filter (regression risk: an EXISTS join on tags without the owner_id constraint would expose other users' recipes if a tag name matches).",
+      "Cross-user 404 collapse continues to apply to get/update/delete; never differentiate 'tag not in your namespace' as a special error vs 'no results'."
+    ],
+    "cors_and_security_headers": [
+      "No changes from milestone 2."
+    ],
+    "frontend_state": [
+      "URL query string is the source of truth for the active search/filter combination. AuthContext, fetch client, and 401 interceptor unchanged.",
+      "No client-side cache of /tags or /recipes/mine — refetch on mount and on filter change."
+    ],
+    "resilience": [
+      "DB readonly → 503 (carries forward); the transaction rollback semantics for tag upserts ensure no orphan tag rows.",
+      "Search query times: no explicit timeout this milestone, but document that pathological combined ILIKE + JSONB scans on very large datasets may degrade — a future milestone can add full-text search with tsvector. Cap q length to 200 to bound the worst case."
+    ],
+    "observability": [
+      "X-Request-Id propagation continues. Tag-mutation audit lines and search-request lines both carry request_id."
+    ],
+    "pagination_defaults": [
+      "Still out of scope. /tags returns the full tag list; /recipes/mine?q=... returns the full filtered list. Document the scaling limit (>1000 tags or matched recipes) as deferred."
+    ],
+    "data_integrity": [
+      "Tag upsert + recipe link must happen in a single transaction. A partial-success state (recipe saved, tags missing) is forbidden — roll back on any failure.",
+      "DB-level UNIQUE(owner_id, name) backs the application-level dedup; the API uses ON CONFLICT to make races safe.",
+      "FK CASCADE chain: users → tags → recipe_tags AND users → recipes → recipe_tags — verify no double-cascade errors on user deletion."
+    ],
+    "search_correctness": [
+      "q matching uses ILIKE with escaped % and _ in the user-supplied substring. NEVER concatenate q directly into SQL — always parameterize and use a helper like `'%' || replace(replace(:q, '%', '\\\\%'), '_', '\\\\_') || '%'` (or the postgres position() approach).",
+      "Tag matching uses exact name comparison (lowercased) within the user's tag namespace.",
+      "Ingredient match expands the JSONB ingredients array via jsonb_array_elements_text and applies ILIKE per element; the join is gated by recipes.owner_id = JWT.sub.",
+      "Combine search predicates with UNION-DISTINCT on recipe_id (or equivalent EXISTS subqueries) so a recipe matching by multiple paths is returned exactly once."
+    ]
+  },
+  "anti_patterns": [
+    "NEVER allow tag filtering or search to UNION across users. Every query MUST gate on owner_id = JWT.sub at the recipes level. A regression that drops the owner filter is a cross-tenant leak.",
+    "NEVER concatenate the user's q value into SQL. Always parameterize AND escape ILIKE meta characters (% and _) before pattern matching. SQL injection AND search-result manipulation are both blocked by this.",
+    "NEVER share tag rows across users. Tag namespaces are per-user; two users typing 'dinner' produce two distinct tag rows. Querying a tag in user A's namespace must never return user B's tags, even when the names are identical.",
+    "NEVER return 404 on a search query that simply produced no results — that's a 200 with []. 404 is reserved for routes that don't exist or single-resource fetches.",
+    "NEVER return 400 on an unknown filter tag (the user's namespace lookup for a non-existent tag yields []). Carries forward the unknown-query-param-tolerance contract from milestone 1/2.",
+    "NEVER auto-clean orphan tag rows in this milestone. A separate janitor (out of scope) can prune them later; in-flight cleanup mid-transaction would create surprising user-visible behavior.",
+    "NEVER overwrite an existing tag's display_name on subsequent saves. First writer wins on casing; otherwise simultaneous edits would race over display strings.",
+    "NEVER auto-delete tag rows when recipes are unlinked from them. Tags belong to the user's namespace and may be reused.",
+    "NEVER use dangerouslySetInnerHTML when rendering tag display_names. React's default escaping is the XSS guard; tag content is arbitrary user input.",
+    "NEVER log raw q values or raw tag values in production audit logs. Counts and hashes only.",
+    "NEVER trust client-supplied normalization (e.g. 'lowercased': true flags). Backend lowercases authoritatively.",
+    "NEVER expose another user's tag list, recipe_count, or tag ids — /tags is strictly per-user.",
+    "NEVER differentiate 'unknown tag in your namespace' from 'no recipes match' in the user-visible search UI — both are the same empty state to keep the security posture clean.",
+    "NEVER let the tag-filter UI render any tags that came from an unscoped or admin endpoint. Only /tags (per-user) feeds it.",
+    "NEVER let the search box send requests without debouncing — every keystroke is a backend hit otherwise, and the stale-response race would flicker the list.",
+    "NEVER drop the existence-leak guard on get/update/delete just because tags are exposed. Cross-user access still collapses to 404 with the same body."
+  ],
+  "confidence": 0.82
+}
