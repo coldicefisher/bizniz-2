@@ -50,9 +50,30 @@ def _check_ast(content: str, label: str) -> Dict[str, Any]:
     return {"ok": True, "top_level_defs": top_level}
 
 
-def _materialize_seed(workspace: Path, seeded_files: List[Dict]) -> None:
-    """Write every seeded file to disk under ``workspace/`` so the
-    symbol-validator can resolve cross-file references."""
+def _materialize_seed(
+    workspace: Path,
+    seeded_files: List[Dict],
+    skeleton_root: Path,
+) -> None:
+    """Realistic seed materialization: copy the FastAPI skeleton into
+    workspace first (so requirements.txt + skeleton-shipped files
+    exist), then layer the seeded scaffold on top. This mirrors what
+    happens in production — the seed lands on a provisioned
+    skeleton-based workspace, not bare ground."""
+    if skeleton_root.exists():
+        import shutil as _shutil
+        for entry in skeleton_root.iterdir():
+            dst = workspace / entry.name
+            if entry.is_dir():
+                _shutil.copytree(
+                    entry, dst,
+                    ignore=_shutil.ignore_patterns(
+                        "__pycache__", ".pytest_cache", "*.pyc", ".git",
+                    ),
+                    dirs_exist_ok=True,
+                )
+            else:
+                _shutil.copy2(entry, dst)
     for sf in seeded_files:
         rel = sf["path"]
         dest = workspace / rel
@@ -170,10 +191,13 @@ def run(workspace: Path, fixture_root: Path) -> Dict[str, Any]:
             ast_pass += 1
     ast_pct = ast_pass / len(seeded_data) * 100.0 if seeded_data else 0.0
 
-    # 5. Materialize the seed to disk so symbol_validator sees a
-    #    cohesive workspace.
+    # 5. Materialize the seed onto a real skeleton-based workspace so
+    #    symbol_validator can resolve external deps via requirements.txt
+    #    and skeleton-shipped symbols.
     backend_root = workspace / "backend"
-    _materialize_seed(backend_root, seeded_data)
+    backend_root.mkdir(parents=True, exist_ok=True)
+    skeleton_root = Path.home() / "bizniz-skeleton-fastapi"
+    _materialize_seed(backend_root, seeded_data, skeleton_root)
 
     # 6. Symbol check every Python file in the seed.
     symbol_results: Dict[str, Any] = {}
