@@ -500,20 +500,38 @@ def compute_progress_verdict(
 ) -> ProgressVerdict:
     """Decide whether the latest iteration made progress, stalled, or
     regressed. Stall counter resets on progress, increments on
-    stall/regress."""
-    prior_count = prior.count if prior is not None else current.count
+    stall/regress.
+
+    Special case: when ``prior is None`` (first iteration), we can't
+    judge progress yet. Emit ``initial`` verdict that lets the loop
+    keep going without incrementing the stall counter.
+    """
     cur_count = current.count
 
     if cur_count == 0:
         return ProgressVerdict(
             verdict="clean",
-            prior_count=prior_count,
+            prior_count=prior.count if prior is not None else 0,
             current_count=cur_count,
             stall_counter=0,
             stall_threshold=stall_threshold,
             should_continue=False,
             should_escalate_tier=False,
         )
+
+    if prior is None:
+        # No prior to compare — first iteration with findings present.
+        return ProgressVerdict(
+            verdict="initial",
+            prior_count=cur_count,
+            current_count=cur_count,
+            stall_counter=0,
+            stall_threshold=stall_threshold,
+            should_continue=True,
+            should_escalate_tier=False,
+        )
+
+    prior_count = prior.count
     if cur_count < prior_count:
         return ProgressVerdict(
             verdict="progress",

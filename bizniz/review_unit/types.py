@@ -176,9 +176,10 @@ class FindingsReport(BaseModel):
 class ProgressVerdict(BaseModel):
     """ProgressTracker output for one transition between iterations."""
 
-    verdict: Literal["progress", "stall", "regress", "clean"] = Field(
+    verdict: Literal["initial", "progress", "stall", "regress", "clean"] = Field(
         ...,
         description=(
+            "initial = first iteration, no prior to compare against; "
             "progress = findings dropped; stall = same/similar count; "
             "regress = findings increased; clean = zero findings."
         ),

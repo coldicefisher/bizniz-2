@@ -554,13 +554,21 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         skip_planning=bool(getattr(args, "retry_failed", False)),
     )
 
+    # ── v3 pipeline flags (Stages A + B) ───────────────────────────
+    # ``--use-v3`` is the convenience shortcut that enables both
+    # stages. Stage-specific flags also accepted independently:
+    #   --use-v3-implement → Stage A only (IMPLEMENT dispatcher swap)
+    #   --use-v3-review    → Stage B only (parallel review unit)
+    use_v3_shortcut = getattr(args, "use_v3", False)
+    use_v3_implement_flag = use_v3_shortcut or getattr(args, "use_v3_implement", False)
+    use_v3_review_flag = use_v3_shortcut or getattr(args, "use_v3_review", False)
+
     # ── v3 IMPLEMENT dispatcher (Stage A) ──────────────────────────
-    # Opt-in via ``--use-v3-implement``. When set, IMPLEMENT phase
-    # runs a single ServicePlannerWithScaffold + CoderAgentV3 per
-    # service instead of today's per-issue Coder loop. Review/repair
-    # still uses the v2 dispatcher (delegated via .repair()) — that's
-    # Stage B's scope.
-    if getattr(args, "use_v3_implement", False):
+    # When ``use_v3_implement_flag``, IMPLEMENT phase runs a single
+    # ServicePlannerWithScaffold + CoderAgentV3 per service instead of
+    # today's per-issue Coder loop. Review/repair still uses the v2
+    # dispatcher (delegated via .repair()) — that's Stage B's scope.
+    if use_v3_implement_flag:
         from bizniz.coder.agent_v3 import CoderAgentV3
         from bizniz.driver.v3_milestone_code_dispatcher import (
             V3MilestoneCodeDispatcher,
@@ -861,6 +869,9 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     # Legacy v2 mode used len(repair_tiers); kept inline for the fallback.
     repair_budget_v25 = 2
 
+    # ``use_v3_implement_flag`` / ``use_v3_review_flag`` already
+    # computed above where the dispatcher swap happens.
+
     milestone_loop = MilestoneLoop(
         engineer=engineer,
         quality_engineer=qe,
@@ -877,6 +888,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         repair_engineer_factory=repair_engineer_factory,
         engineer_escalation_factory=engineer_escalation_factory,
         code_dispatcher=code_dispatcher,
+        use_v3_review_unit=use_v3_review_flag,
         issue_store_factory=issue_store_factory,
         cost_tracker=cost_tracker,
         workspace_summary=workspace_summary,
@@ -1003,9 +1015,28 @@ def main():
             "phase swaps from per-issue Coder loops to a single "
             "ServicePlannerWithScaffold + CoderAgentV3 dispatch per "
             "service. Anchor: Phase 2c validated 9 issues filled in "
-            "7m 42s vs today's ~1h 35m for 12 issues. Review/repair, "
-            "integration, UX, refactor phases unchanged (Stage B is "
-            "those). Use this flag for v2-vs-v3 A/B comparisons."
+            "7m 42s vs today's ~1h 35m for 12 issues. Use with "
+            "--use-v3-review for the full v3 pipeline."
+        ),
+    )
+    p.add_argument(
+        "--use-v3-review", action="store_true",
+        help=(
+            "Stage B of the v3 pipeline (shipped 2026-05-19). Review/"
+            "repair phase swaps from sequential QE → CR → "
+            "ServicePlanner.repair → Coder × N loop to parallel "
+            "ReviewUnitOrchestrator (QE + CR concurrent) + BatchFixDebugger "
+            "consuming unified findings. ProgressTracker bounds the "
+            "outer loop. Pairs with --use-v3-implement for the full "
+            "v3 pipeline; can also be used standalone with v2 IMPLEMENT."
+        ),
+    )
+    p.add_argument(
+        "--use-v3", action="store_true",
+        help=(
+            "Shortcut for --use-v3-implement --use-v3-review. Enables "
+            "the full v3 pipeline (Stage A + Stage B). Use this for "
+            "the canonical v2-vs-v3 A/B comparison."
         ),
     )
     p.add_argument(

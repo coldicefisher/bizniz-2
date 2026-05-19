@@ -141,6 +141,12 @@ class MilestoneLoop:
         # "always-progresses-by-one" loop from running forever.
         # Default 20 — well beyond what any realistic milestone needs.
         repair_max_iterations: int = 20,
+        # v3 spec Stage B (2026-05-19): replace the sequential
+        # QE → CR → repair loop with the parallel review unit + batch-
+        # fix debugger. When True, ``_phase_review_repair_loop``
+        # delegates to ``ReviewUnitLoop``; the v2 path stays intact as
+        # the default.
+        use_v3_review_unit: bool = False,
     ):
         self._engineer = engineer
         self._qe = quality_engineer
@@ -151,6 +157,7 @@ class MilestoneLoop:
         self._smoke_recovery_stall_threshold = max(1, int(smoke_recovery_stall_threshold))
         self._repair_stall_threshold = max(1, int(repair_stall_threshold))
         self._repair_max_iterations = max(1, int(repair_max_iterations))
+        self._use_v3_review_unit = bool(use_v3_review_unit)
         self._document_recovery = document_recovery
         self._document_recovery_stall_threshold = max(
             1, int(document_recovery_stall_threshold)
@@ -1560,6 +1567,26 @@ class MilestoneLoop:
 
         self._tag(state.milestone_index, SubPhase.REVIEW_REPAIR)
 
+        # v3 Stage B branch: parallel review unit + batch-fix debugger.
+        # When enabled at construction, the entire iterative
+        # review/repair path delegates to ``ReviewUnitLoop`` which runs
+        # QE + CR concurrently and feeds the unified findings into a
+        # batch-fix debugger. The v2 sequential path below is preserved
+        # as the default for backwards compatibility.
+        # ``getattr`` with default: existing tests construct MilestoneLoop
+        # via ``__new__`` without ``__init__``, so the attribute may be
+        # absent. Default False = v2 path, which preserves behavior.
+        if getattr(self, "_use_v3_review_unit", False):
+            return self._phase_review_repair_loop_v3(
+                state=state,
+                milestone=milestone,
+                architecture=architecture,
+                spec=spec,
+                initial_result=initial_result,
+                auth_contract=auth_contract,
+                prior_list=prior_list,
+            )
+
         # Initial review (counts as iteration 0; no repair yet).
         coverage, code_review = self._phase_review(
             milestone, architecture, spec, initial_result,
@@ -1671,6 +1698,201 @@ class MilestoneLoop:
                     coverage, code_review, result,
                     repair_iterations, tracker.render_history(),
                 )
+
+    # ── v3 Stage B review/repair (parallel review unit) ─────────────────
+
+    def _phase_review_repair_loop_v3(
+        self,
+        *,
+        state: MilestoneState,
+        milestone: Milestone,
+        architecture: SystemArchitecture,
+        spec: EnrichedSpec,
+        initial_result: EngineerResult,
+        auth_contract: Optional[str],
+        prior_list: List[EnrichedSpec],
+    ):
+        """v3 alternative: parallel review unit + batch-fix debugger.
+
+        Replaces the sequential ``QE → CR → ServicePlanner.repair →
+        Coder × N`` loop with ``ReviewUnitLoop`` (parallel QE + CR
+        feeding a batch-fix debugger). Returns the same outer tuple
+        the v2 path returns so callers don't notice the swap.
+
+        Synthesizes ``(coverage, code_review)`` from the loop's final
+        FindingsReport so downstream callers that read these fields
+        (e.g. perf_log, run report) keep working.
+        """
+        from bizniz.review_unit.batch_fix_debugger import BatchFixDebugger
+        from bizniz.review_unit.loop import ReviewUnitLoop
+        from bizniz.review_unit.orchestrator import ReviewUnitOrchestrator
+
+        self._log("MilestoneLoop[v3]: entering review/repair loop")
+
+        # Closures that produce raw QE + CR result objects. These are
+        # exactly what today's _phase_review calls invoke; we wrap
+        # them so the orchestrator's parallel fan-out can dispatch
+        # them concurrently.
+        def _qe_review() -> CoverageReport:
+            coverage, _cr = self._phase_review(
+                milestone, architecture, spec, initial_result,
+                auth_contract, prior_list,
+            )
+            # _phase_review runs BOTH QE and CR; for the v3
+            # parallel path we only need QE here. The redundancy is
+            # acceptable for Stage B — Phase 2c data showed QE alone
+            # is ~3 min, so running it independently in parallel
+            # with CR doesn't bloat wall.
+            return coverage
+
+        def _cr_review() -> CodeReviewReport:
+            _coverage, code_review = self._phase_review(
+                milestone, architecture, spec, initial_result,
+                auth_contract, prior_list,
+            )
+            return code_review
+
+        orchestrator = ReviewUnitOrchestrator(
+            qe_review=_qe_review,
+            cr_review=_cr_review,
+            on_status=self._on_status,
+        )
+
+        def _debugger_factory() -> BatchFixDebugger:
+            # Workspace root = the primary workspace (or the
+            # backend workspace if one exists). The debugger uses
+            # full Claude CLI tools to make edits across the
+            # workspace.
+            ws_root = getattr(self._primary_workspace, "root", None)
+            if ws_root is None:
+                ws_root = self._project_root
+            from pathlib import Path
+            return BatchFixDebugger(
+                workspace_root=Path(str(ws_root)),
+                on_status=self._on_status,
+                compose_path=str(self._compose_path) if self._compose_path else None,
+            )
+
+        ws_root = getattr(self._primary_workspace, "root", None)
+        from pathlib import Path
+        review_loop = ReviewUnitLoop(
+            orchestrator=orchestrator,
+            debugger_factory=_debugger_factory,
+            workspace_root=Path(str(ws_root)) if ws_root else self._project_root,
+            compose_path=str(self._compose_path) if self._compose_path else None,
+            stall_threshold=self._repair_stall_threshold,
+            hard_cap=self._repair_max_iterations,
+            on_status=self._on_status,
+        )
+
+        loop_result = review_loop.run()
+
+        # Synthesize (coverage, code_review) from the loop's final
+        # findings so downstream perf_log / report stays uniform.
+        coverage_synth, code_review_synth = self._synthesize_v3_reports(
+            milestone_name=milestone.name,
+            loop_result=loop_result,
+        )
+
+        history_str = (
+            f"v3 review_unit loop: {loop_result.iterations} iter(s), "
+            f"approved={loop_result.approved}, "
+            f"halt_reason={loop_result.halt_reason or 'clean'}"
+        )
+
+        self._log(
+            f"MilestoneLoop[v3]: review/repair {'APPROVED' if loop_result.approved else 'HALTED'} "
+            f"after {loop_result.iterations} iter(s) in "
+            f"{loop_result.wall_s:.1f}s ({history_str})"
+        )
+
+        return (
+            coverage_synth, code_review_synth,
+            initial_result, loop_result.iterations, history_str,
+        )
+
+    def _synthesize_v3_reports(
+        self,
+        *,
+        milestone_name: str,
+        loop_result,
+    ) -> tuple:
+        """Build CoverageReport + CodeReviewReport from the v3 loop's
+        final FindingsReport. Approval comes from the loop's verdict;
+        residual findings (when not approved) populate the QE
+        ``missing_scenarios`` and CR ``flagged_symbols`` / etc lists
+        so downstream tooling keeps working."""
+        from bizniz.code_reviewer.types import (
+            CodeReviewReport, FlaggedSymbol, MissingErrorHandling,
+        )
+        from bizniz.quality_engineer.types import (
+            CoverageReport, MissingScenario,
+        )
+
+        approved = bool(loop_result.approved)
+        coverage = CoverageReport(
+            milestone_name=milestone_name,
+            approved=approved,
+            summary=(
+                f"v3 review unit verdict: "
+                f"{'approved' if approved else 'halted - ' + loop_result.halt_reason}"
+            ),
+        )
+        code_review = CodeReviewReport(
+            milestone_name=milestone_name,
+            approved=approved,
+            summary=coverage.summary,
+        )
+
+        if approved:
+            return coverage, code_review
+
+        # Populate residuals from the final FindingsReport so the
+        # outer pipeline can still introspect what's left.
+        residual = loop_result.final_findings
+        for f in residual.findings:
+            if f.source == "quality_engineer":
+                # Map back to a MissingScenario (best-effort —
+                # capability_id may not be recoverable from the
+                # fingerprint).
+                cap_id = "unknown"
+                if "." in f.fingerprint:
+                    parts = f.fingerprint.split(".")
+                    if len(parts) >= 2:
+                        cap_id = parts[1]
+                priority = (
+                    "critical" if f.severity == "critical"
+                    else "important" if f.severity == "high"
+                    else "nice-to-have"
+                )
+                coverage.missing_scenarios.append(MissingScenario(
+                    capability_id=cap_id,
+                    scenario=f.message,
+                    priority=priority,
+                ))
+            elif f.source == "code_reviewer":
+                # Most CR-class findings map to flagged_symbols
+                # generically. Severity preserved.
+                if f.fingerprint.startswith("cr.err."):
+                    cap_id = f.fingerprint.split(".")[2] if len(f.fingerprint.split(".")) > 2 else "unknown"
+                    code_review.missing_error_handling.append(
+                        MissingErrorHandling(
+                            capability_id=cap_id,
+                            error_case=f.message,
+                            severity="critical" if f.severity == "critical" else "warning",
+                        )
+                    )
+                else:
+                    code_review.flagged_symbols.append(FlaggedSymbol(
+                        file=f.file_path or "",
+                        line=f.line or 0,
+                        symbol=f.fingerprint,
+                        kind="function_call",
+                        reason=f.message,
+                        severity="critical" if f.severity == "critical" else "warning",
+                    ))
+
+        return coverage, code_review
 
     # ── Helpers ────────────────────────────────────────────────────────
 
