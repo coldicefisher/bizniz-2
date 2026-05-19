@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -92,9 +93,29 @@ cutting root causes:
 # Output format
 
 After applying fixes via Edit/Write, return ONE valid JSON object
-matching the provided schema. Summarize what you changed and which
-findings each change addresses. The fixes themselves are already
-on disk — the JSON is the audit trail.
+matching this exact shape:
+
+  {
+    "summary": "one-paragraph audit log of what you fixed",
+    "fixes_applied": [
+      {
+        "files_touched": ["path/relative/to/workspace.py"],
+        "description": "one-line description of the fix",
+        "addresses_fingerprints": ["fingerprint1", "fingerprint2"]
+      }
+    ],
+    "skipped_fingerprints": ["fp_not_addressed"]
+  }
+
+Rules:
+- Output ONLY the JSON object. No prose before or after.
+- No markdown code fences (no ```json wrappers).
+- Use the field names above exactly: ``summary``, ``fixes_applied``,
+  ``files_touched``, ``description``, ``addresses_fingerprints``,
+  ``skipped_fingerprints``.
+- ``addresses_fingerprints`` MUST cite fingerprints from the report
+  you were given. This is the audit trail — the deterministic
+  post-fix re-run validates whether the fixes actually landed.
 """
 
 
@@ -367,36 +388,103 @@ class BatchFixDebugger:
         return "\n".join(sections)
 
     def _parse_result_text(self, text: str) -> BatchFixResult:
-        """Pull the structured JSON out of Claude's final response."""
-        text = text.strip()
-        # Try the optimistic path first: text IS the JSON object.
-        try:
-            obj = json.loads(text)
-            return self._envelope_to_result(obj)
-        except json.JSONDecodeError:
-            pass
-        # Fallback: extract the last {...} block.
-        start = text.rfind("{")
+        """Pull the structured JSON out of Claude's final response.
+
+        Permissive: Claude sometimes wraps in ```json fences, sometimes
+        emits the fields under different names, sometimes prefixes with
+        narrative prose. We try multiple extraction paths because the
+        agent's structured summary is an audit trail — the REAL
+        validation is the deterministic post-fix checks (AST, import
+        smoke, pytest collect). Don't fail the agent just because its
+        audit JSON wasn't pristine.
+        """
+        text = (text or "").strip()
+        candidates: List[str] = []
+        # 1. Whole text as JSON.
+        candidates.append(text)
+        # 2. Fenced JSON blocks: ```json ... ``` or ``` ... ```
+        for m in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL):
+            candidates.append(m.group(1))
+        # 3. Last {...} balanced extraction.
+        start = text.find("{")
         end = text.rfind("}")
         if start != -1 and end > start:
-            chunk = text[start:end + 1]
+            candidates.append(text[start:end + 1])
+
+        for c in candidates:
             try:
-                obj = json.loads(chunk)
-                return self._envelope_to_result(obj)
-            except json.JSONDecodeError:
-                pass
-        raise BatchFixDebuggerError(
-            f"could not parse structured JSON from Claude's response. "
-            f"Head: {text[:400]}"
+                obj = json.loads(c)
+                if isinstance(obj, dict):
+                    return self._envelope_to_result(obj)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        # Last resort: return an empty audit envelope but DON'T raise.
+        # The deterministic post-fix checks tell us if the agent's
+        # work actually landed; the audit summary is just diagnostic.
+        return BatchFixResult(
+            summary=(
+                "(parser could not extract structured JSON — see raw "
+                f"response head: {text[:300]!r})"
+            ),
+            fixes_applied=[],
+            skipped_fingerprints=[],
         )
 
     @staticmethod
     def _envelope_to_result(obj: dict) -> BatchFixResult:
-        fixes = [AppliedFix(**f) for f in (obj.get("fixes_applied") or [])]
+        """Accept either the documented schema OR Claude's variants."""
+        # Normalize fix entries from any of:
+        #   {"files_touched": [...], "description": ..., "addresses_fingerprints": [...]}
+        #   {"file": ..., "change": ..., "fingerprints": [...]}
+        #   {"path": ..., "summary": ...}
+        raw_fixes = (
+            obj.get("fixes_applied")
+            or obj.get("fixes")
+            or []
+        )
+        fixes: List[AppliedFix] = []
+        for f in raw_fixes:
+            if not isinstance(f, dict):
+                continue
+            files = (
+                f.get("files_touched")
+                or ([f["file"]] if "file" in f else None)
+                or ([f["path"]] if "path" in f else None)
+                or []
+            )
+            desc = (
+                f.get("description")
+                or f.get("change")
+                or f.get("summary")
+                or ""
+            )
+            fps = (
+                f.get("addresses_fingerprints")
+                or f.get("fingerprints")
+                or f.get("addresses")
+                or []
+            )
+            try:
+                fixes.append(AppliedFix(
+                    files_touched=list(files),
+                    description=str(desc),
+                    addresses_fingerprints=list(fps),
+                ))
+            except Exception:
+                continue
         return BatchFixResult(
-            summary=obj.get("summary", ""),
+            summary=str(
+                obj.get("summary")
+                or obj.get("notes")
+                or ""
+            ),
             fixes_applied=fixes,
-            skipped_fingerprints=list(obj.get("skipped_fingerprints") or []),
+            skipped_fingerprints=list(
+                obj.get("skipped_fingerprints")
+                or obj.get("skipped")
+                or []
+            ),
         )
 
 
