@@ -1,0 +1,875 @@
+{
+  "milestone_name": "Auth and authenticated shell",
+  "capabilities": [
+    {
+      "id": "signup_user",
+      "name": "Sign up new user with email and password",
+      "description": "Frontend signup form collects email, password, and full name; backend proxies to FusionAuth's POST /api/user/registration (no path arg) to create a new user with the 'user' role on the primary application. On success the user is either auto-logged-in (token issued/stored) or redirected to the login page.",
+      "inputs": [
+        {
+          "name": "email",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "RFC 5322 email format",
+            "trimmed",
+            "lowercased before submission",
+            "max length 254 chars",
+            "unique within FusionAuth tenant"
+          ],
+          "description": "User's login identifier."
+        },
+        {
+          "name": "password",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "min length 8 characters",
+            "must include mixed case",
+            "must include at least one digit",
+            "must include at least one symbol",
+            "never logged",
+            "never echoed in any response body"
+          ],
+          "description": "Plaintext password sent over TLS to backend, forwarded once to FusionAuth, never persisted locally."
+        },
+        {
+          "name": "full_name",
+          "type": "string",
+          "required": false,
+          "constraints": [
+            "trimmed",
+            "1-100 characters when provided",
+            "no leading/trailing whitespace",
+            "Unicode allowed"
+          ],
+          "description": "Display name used in the authenticated header."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "user_id",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "UUID v4 string from FusionAuth"
+          ],
+          "description": "FusionAuth-issued user id (claims sub)."
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "required": true,
+          "constraints": [],
+          "description": "Echoed email of the created account."
+        },
+        {
+          "name": "next",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "one of: 'logged_in' | 'login_required'"
+          ],
+          "description": "Hints the frontend whether a token was returned or the user should be redirected to login."
+        }
+      ],
+      "validation_rules": [
+        "Email must match RFC 5322 syntax client-side AND server-side before forwarding to FusionAuth",
+        "Password must meet FusionAuth policy (8+ chars, mixed case, digit, symbol) — surface field-level errors when FusionAuth returns fieldErrors.user.password",
+        "Reject requests where email or password is missing/empty/whitespace-only before contacting FusionAuth",
+        "Always assign role exactly ['user'] for self-signup — client-supplied role is ignored",
+        "applicationId must be the primary app id (85a03867-dccf-4882-adde-1a79aeec50df) — never accepted from client"
+      ],
+      "error_cases": [
+        "Missing required field (email or password) → 400 with field-level error envelope",
+        "Malformed email → 400 with field 'email' marked invalid",
+        "Weak password rejected by FusionAuth → 400 with field 'password' and FusionAuth's fieldErrors echoed",
+        "Duplicate email (FusionAuth returns [duplicate] fieldError) → 409 with field 'email' marked taken",
+        "FusionAuth unreachable / 5xx → 503 with generic 'identity provider unavailable'",
+        "Network timeout to FusionAuth (>10s) → 504",
+        "Backend missing FUSIONAUTH_API_KEY env var → 500, log clear startup-config error",
+        "Client attempts to pass role='admin' → role is silently overridden to 'user', no privilege escalation"
+      ],
+      "edge_cases": [
+        "Email with uppercase characters — normalize to lowercase before lookup",
+        "Email containing '+alias' — must be allowed",
+        "Unicode in fullName (emoji, CJK characters, accented chars)",
+        "Trailing/leading whitespace in email or fullName",
+        "Concurrent signup with same email — second request must get 409, not race-condition 500",
+        "Very long full_name (>100 chars) — reject with 400 before forwarding",
+        "Password exactly 8 chars meeting all classes — must succeed",
+        "Empty fullName explicitly provided — treat as not provided",
+        "FusionAuth returns 200 but without user.id (defensive) — treat as 502"
+      ],
+      "auth_required": false,
+      "allowed_roles": [],
+      "test_scenarios": [
+        "happy_path: new email + Password123! + name 'Alex Cook' returns 200 with user_id; user can immediately log in",
+        "duplicate_email: signing up with user@example.com returns 409 with field 'email'",
+        "weak_password: 'password' (no caps/digit/symbol) returns 400 with field 'password'",
+        "malformed_email: 'not-an-email' returns 400 with field 'email'",
+        "missing_password: empty password returns 400",
+        "role_escalation_attempt: client posts roles=['admin'], result account has only ['user']",
+        "fusionauth_down: stub 502 from auth, backend returns 503",
+        "unicode_name: fullName='Renée 👩🍳' is accepted and round-trips through /me"
+      ]
+    },
+    {
+      "id": "login_user",
+      "name": "Log in with email and password",
+      "description": "Frontend login form submits credentials to backend (or directly to FusionAuth via proxy); backend posts to FusionAuth /api/login and returns a JWT plus user identity. Token is stored client-side for use on subsequent protected requests.",
+      "inputs": [
+        {
+          "name": "email",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "trimmed",
+            "lowercased",
+            "non-empty",
+            "max 254 chars"
+          ],
+          "description": "Login identifier (FusionAuth loginId)."
+        },
+        {
+          "name": "password",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "non-empty",
+            "never logged",
+            "never echoed in responses"
+          ],
+          "description": "Plaintext password forwarded once to FusionAuth."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "access_token",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "RS256 JWT issued by FusionAuth",
+            "iss=acme.com",
+            "aud=85a03867-dccf-4882-adde-1a79aeec50df"
+          ],
+          "description": "JWT bearer token used on protected requests."
+        },
+        {
+          "name": "refresh_token",
+          "type": "string",
+          "required": false,
+          "constraints": [
+            "opaque string from FusionAuth"
+          ],
+          "description": "Refresh token used to obtain a new access token without re-login. Omitted if FusionAuth refresh tokens are not enabled — frontend then relies on re-login for session continuity."
+        },
+        {
+          "name": "user",
+          "type": "object",
+          "required": true,
+          "constraints": [
+            "{id, email, full_name, roles[]}"
+          ],
+          "description": "Minimal identity payload for immediate UI rendering."
+        }
+      ],
+      "validation_rules": [
+        "Both email and password required, non-empty after trim",
+        "applicationId injected server-side as the primary app id — never trusted from client",
+        "Backend never persists the password",
+        "Token returned to client must be the unmodified JWT from FusionAuth"
+      ],
+      "error_cases": [
+        "Missing email or password → 400",
+        "Invalid credentials (FusionAuth 404/200 with non-2xx response code) → 401 with generic 'invalid email or password' (do NOT leak whether email exists)",
+        "Locked/disabled account (FusionAuth 423/410) → 403 with generic 'account unavailable'",
+        "User not registered for primary application → 401 (same generic message — do not enumerate)",
+        "FusionAuth unreachable → 503",
+        "Timeout (>10s) → 504",
+        "Rate limit exceeded (if implemented) → 429 with Retry-After"
+      ],
+      "edge_cases": [
+        "Email submitted with different case than stored — must match (FusionAuth is case-insensitive on loginId)",
+        "Whitespace-padded email — trim before sending",
+        "Repeated rapid failed logins from same IP — log and consider rate limit",
+        "Successful login while another session is active — both should remain valid (no forced single-session)",
+        "Clock skew between backend and FusionAuth — accept default leeway (60s) when validating JWT",
+        "Admin user logging in — token must include roles=['admin'] (verify via /me)"
+      ],
+      "auth_required": false,
+      "allowed_roles": [],
+      "test_scenarios": [
+        "happy_path_user: user@example.com / password returns 200 with JWT whose roles contains 'user'",
+        "happy_path_admin: admin@example.com / password returns 200 with JWT whose roles contains 'admin'",
+        "bad_password: returns 401 with generic message and no JWT",
+        "unknown_email: returns 401 with same generic message (no enumeration)",
+        "missing_field: empty password → 400",
+        "fusionauth_unreachable: stubbed 502 → backend returns 503",
+        "jwt_round_trip: token returned from /login successfully validates against /me"
+      ]
+    },
+    {
+      "id": "logout_user",
+      "name": "Log out current session",
+      "description": "Clears the client-side token(s) and (if refresh tokens are used) revokes them with FusionAuth. The browser is returned to the login page, and subsequent attempts to reach protected pages redirect to login.",
+      "inputs": [
+        {
+          "name": "refresh_token",
+          "type": "string",
+          "required": false,
+          "constraints": [
+            "opaque string"
+          ],
+          "description": "If present, will be revoked via FusionAuth's logout/revoke endpoint."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "status",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "literal 'logged_out'"
+          ],
+          "description": "Confirmation that the session has been cleared."
+        }
+      ],
+      "validation_rules": [
+        "Endpoint is idempotent — calling logout when already logged out returns 200",
+        "Frontend MUST clear all stored tokens regardless of backend response",
+        "Logout should not require a valid JWT — accept the call even if access token is expired"
+      ],
+      "error_cases": [
+        "FusionAuth revoke fails → still return 200 to client (best-effort revocation), log the failure server-side",
+        "Malformed refresh_token → 200 with status='logged_out' (no information disclosure)"
+      ],
+      "edge_cases": [
+        "Token already expired — logout must still succeed",
+        "Multiple browser tabs — logging out in one tab should propagate (frontend listens to storage events) so other tabs also redirect to login",
+        "Logout while offline — frontend must still clear local tokens",
+        "Race: logout submitted twice — both return 200"
+      ],
+      "auth_required": false,
+      "allowed_roles": [],
+      "test_scenarios": [
+        "happy_path: authenticated user logs out, token storage is cleared, GET /my-recipes redirects to /login",
+        "double_logout: calling logout twice both return 200",
+        "logout_with_expired_token: succeeds without error",
+        "cross_tab_logout: tab A logs out, tab B detects and redirects to /login on next navigation"
+      ]
+    },
+    {
+      "id": "get_current_user",
+      "name": "GET /me — return identity of caller from JWT",
+      "description": "Protected backend endpoint. Reads the Bearer JWT, validates it (RS256, JWKS, issuer=acme.com, audience=primary app id), and returns the user's id, email, full name, and roles array extracted from the validated claims.",
+      "inputs": [
+        {
+          "name": "Authorization",
+          "type": "header",
+          "required": true,
+          "constraints": [
+            "format 'Bearer <jwt>'",
+            "JWT signed RS256 with kid present in JWKS"
+          ],
+          "description": "JWT bearer token issued by FusionAuth."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "id",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "UUID, value of JWT 'sub' claim"
+          ],
+          "description": "FusionAuth user id."
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "from JWT 'email' claim"
+          ],
+          "description": "User's email."
+        },
+        {
+          "name": "full_name",
+          "type": "string",
+          "required": false,
+          "constraints": [
+            "null when not set on profile"
+          ],
+          "description": "Display name."
+        },
+        {
+          "name": "roles",
+          "type": "array<string>",
+          "required": true,
+          "constraints": [
+            "subset of {'user', 'admin', 'super_admin'}",
+            "may be empty"
+          ],
+          "description": "Roles for the primary application from the JWT."
+        }
+      ],
+      "validation_rules": [
+        "JWT signature verified against JWKS fetched from http://auth:9011/.well-known/jwks.json (cached, with periodic refresh — default 10 min — and on kid miss)",
+        "issuer claim MUST equal 'acme.com'",
+        "audience claim MUST equal '85a03867-dccf-4882-adde-1a79aeec50df'",
+        "alg MUST be RS256 — reject 'none' and HS*",
+        "exp claim MUST be in the future (allow default 60s leeway)",
+        "User identity is read from JWT claims — NEVER from request body or query params"
+      ],
+      "error_cases": [
+        "Missing Authorization header → 401 with WWW-Authenticate: Bearer",
+        "Authorization header not starting with 'Bearer ' → 401",
+        "Malformed JWT (not three segments) → 401",
+        "Signature mismatch → 401",
+        "Expired token (exp in past) → 401 with error='token_expired'",
+        "Wrong issuer → 401",
+        "Wrong audience → 401",
+        "alg=none or HS256 token → 401 (defense against algorithm confusion)",
+        "kid not found in JWKS, even after refresh → 401",
+        "JWKS endpoint unreachable on cold start → 503"
+      ],
+      "edge_cases": [
+        "Token validates but has empty roles array — return 200 with roles=[] (no implicit role)",
+        "Token has roles=['super_admin'] — return as-is; treat as having admin-level access where roles permit",
+        "Concurrent requests during JWKS rotation — must accept old and new kids during rotation window",
+        "Very long JWT (large claims) — accept up to 8 KB",
+        "Clock skew slightly negative — within 60s leeway accept",
+        "Trailing whitespace in Authorization header — reject (strict parsing)"
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin",
+        "super_admin"
+      ],
+      "test_scenarios": [
+        "happy_path_user: valid user JWT returns 200 with email='user@example.com' and 'user' in roles",
+        "happy_path_admin: valid admin JWT returns 200 with 'admin' in roles",
+        "missing_auth_header: 401",
+        "expired_token: 401",
+        "wrong_audience: token issued for a different app → 401",
+        "alg_none_attack: token with alg=none → 401",
+        "hs256_attack: token signed HS256 with public key as secret → 401",
+        "tampered_signature: 401",
+        "jwks_rotation: token signed with previous kid validates during rotation window"
+      ]
+    },
+    {
+      "id": "refresh_session",
+      "name": "Refresh access token / persist session across page reload",
+      "description": "On page load, the frontend determines whether a valid session exists. If a refresh token is available, the frontend (or backend) exchanges it with FusionAuth for a new access token. If only an access token is available and not expired, it is reused. If neither, the user is redirected to login.",
+      "inputs": [
+        {
+          "name": "refresh_token",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "opaque string previously issued by FusionAuth",
+            "stored client-side per token-storage policy"
+          ],
+          "description": "Refresh token from prior login."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "access_token",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "new RS256 JWT"
+          ],
+          "description": "Fresh access token."
+        },
+        {
+          "name": "refresh_token",
+          "type": "string",
+          "required": false,
+          "constraints": [
+            "may be rotated"
+          ],
+          "description": "New refresh token if FusionAuth issues one (rotation)."
+        }
+      ],
+      "validation_rules": [
+        "Refresh token MUST be sent over TLS",
+        "Backend must not echo refresh tokens in logs",
+        "Rotated refresh token (if FusionAuth issues a new one) MUST replace the stored one"
+      ],
+      "error_cases": [
+        "Missing refresh_token → 401",
+        "Refresh token invalid/expired/revoked → 401 with error='refresh_failed' so frontend can redirect to /login",
+        "FusionAuth unreachable → 503",
+        "Network timeout → 504"
+      ],
+      "edge_cases": [
+        "Browser reload immediately after login — refresh token is present, session continues without re-auth",
+        "Refresh token reuse after rotation (FusionAuth flags reuse) — treat all sessions for that user as compromised: redirect to login and surface a generic 'please log in again'",
+        "Refresh while another tab is also refreshing — frontend should serialize refresh attempts (e.g., single-flight) to avoid double-spend of one-time refresh tokens",
+        "Clock skew on the client — do not rely on client clock to decide if access token is expired; let the backend respond 401 and trigger refresh",
+        "Long-idle session — refresh fails after FusionAuth's configured refresh-token TTL; user must log in again"
+      ],
+      "auth_required": false,
+      "allowed_roles": [],
+      "test_scenarios": [
+        "happy_path: reload page while logged in, new access token issued, user stays on /my-recipes",
+        "expired_refresh: refresh token past TTL → 401 → redirected to /login",
+        "rotated_refresh: old refresh token now invalid; new one works exactly once",
+        "concurrent_refresh: two simultaneous refresh attempts from same client do not both succeed; second waits for first"
+      ]
+    },
+    {
+      "id": "render_my_recipes_shell",
+      "name": "Render authenticated 'My Recipes' shell",
+      "description": "Frontend route /my-recipes renders the authenticated landing page. Shows: header with app name, the user's display name (or email if no name), and a logout button. Body shows an empty-state message ('No recipes yet') since recipe features do not exist in this milestone.",
+      "inputs": [
+        {
+          "name": "session",
+          "type": "client-state",
+          "required": true,
+          "constraints": [
+            "valid in-memory access token + identity from /me"
+          ],
+          "description": "Authenticated session state held by the frontend."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "page",
+          "type": "react-view",
+          "required": true,
+          "constraints": [
+            "header includes app brand and user name/email",
+            "body includes empty-state message",
+            "logout control visible"
+          ],
+          "description": "Rendered 'My Recipes' shell."
+        }
+      ],
+      "validation_rules": [
+        "If session is missing or invalid, MUST redirect to /login before rendering",
+        "Display name fallback order: full_name → email → 'Cook'",
+        "Empty-state copy must clearly state there are no recipes yet (no fake content)",
+        "Header must show that the user is signed in (e.g., name + logout)"
+      ],
+      "error_cases": [
+        "Initial /me call returns 401 → clear session, redirect to /login",
+        "Initial /me call returns 5xx → show retry UI ('Could not load your account, try again'), do not crash",
+        "Network error fetching /me → show retry UI"
+      ],
+      "edge_cases": [
+        "Very long full_name — truncate in header with ellipsis, full name visible via hover/title",
+        "User with no full_name set — show email",
+        "User with both 'user' and 'admin' roles (or only 'admin') — page still renders; admin lands on same shell since no admin UI exists yet",
+        "Slow /me response — show skeleton, not blank screen",
+        "Token expires while on the page — next protected fetch triggers refresh; if refresh fails, redirect to /login"
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin",
+        "super_admin"
+      ],
+      "test_scenarios": [
+        "happy_path_user: logged-in user visits /my-recipes, sees name and empty-state",
+        "happy_path_admin: admin visits /my-recipes, sees admin name and empty-state",
+        "unauthenticated_redirect: visiting /my-recipes with no token redirects to /login",
+        "refresh_persists: reload on /my-recipes keeps user on /my-recipes",
+        "logout_from_shell: clicking logout clears session and redirects to /login",
+        "fallback_display: user without full_name shows their email in header",
+        "me_5xx: backend /me returns 500, page shows retry UI not blank screen"
+      ]
+    },
+    {
+      "id": "protect_routes_redirect_unauthenticated",
+      "name": "Route guard — redirect unauthenticated visitors to login",
+      "description": "Frontend route-guard component. For any protected route (e.g., /my-recipes), if no valid session is present and a refresh attempt did not produce one, redirect to /login. Preserves the originally requested path so post-login redirect lands there.",
+      "inputs": [
+        {
+          "name": "target_path",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "URL path being requested"
+          ],
+          "description": "The protected route the user attempted to load."
+        },
+        {
+          "name": "session",
+          "type": "client-state",
+          "required": false,
+          "constraints": [],
+          "description": "Current session, may be absent."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "redirect",
+          "type": "navigation",
+          "required": true,
+          "constraints": [
+            "to /login with ?next=<original path> when unauthenticated"
+          ],
+          "description": "Browser navigation."
+        }
+      ],
+      "validation_rules": [
+        "While session is being initialized (e.g., refresh in progress) show a loading state — do NOT flash-redirect to /login",
+        "After login completes, redirect to ?next path if it is a same-origin, relative path; otherwise default to /my-recipes",
+        "?next must be URL-decoded and validated to prevent open-redirect attacks (must start with '/' and not '//')"
+      ],
+      "error_cases": [
+        "Refresh attempt in flight — render loading, do not redirect prematurely",
+        "Refresh fails → redirect to /login",
+        "Malicious ?next='https://evil.example' → ignore, default to /my-recipes"
+      ],
+      "edge_cases": [
+        "Token present but expired on first paint — guard awaits refresh before deciding",
+        "Browser back button to a protected page after logout — guard catches it and redirects",
+        "Deep link (e.g., /my-recipes/anything) — preserved in ?next; if route doesn't exist post-login, fall back to /my-recipes",
+        "Open-redirect attempt via ?next=//evil.com — must be rejected"
+      ],
+      "auth_required": false,
+      "allowed_roles": [],
+      "test_scenarios": [
+        "unauthenticated_visit: GET /my-recipes (no token) → redirects to /login?next=%2Fmy-recipes",
+        "post_login_redirect: log in from /login?next=%2Fmy-recipes lands user on /my-recipes",
+        "open_redirect_blocked: /login?next=https%3A%2F%2Fevil.com → after login lands on /my-recipes, not evil",
+        "back_button_after_logout: after logout, browser-back to /my-recipes redirects to /login",
+        "loading_no_flash: while refresh is in flight, no flash redirect to /login"
+      ]
+    },
+    {
+      "id": "validate_jwt_middleware",
+      "name": "Backend JWT validation dependency",
+      "description": "FastAPI dependency injected into every protected route. Extracts the Bearer token, validates RS256 signature via cached JWKS, checks issuer/audience/exp, extracts {sub, email, roles, full_name} and attaches them to the request scope as the current user.",
+      "inputs": [
+        {
+          "name": "Authorization",
+          "type": "header",
+          "required": true,
+          "constraints": [
+            "'Bearer <jwt>'"
+          ],
+          "description": "Bearer JWT from FusionAuth."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "current_user",
+          "type": "object",
+          "required": true,
+          "constraints": [
+            "{id, email, roles[], full_name?}"
+          ],
+          "description": "Identity attached to request scope; consumed by route handlers."
+        }
+      ],
+      "validation_rules": [
+        "JWKS fetched once at startup AND lazily on kid miss",
+        "JWKS cache TTL must default to ~10 minutes; refresh on kid miss",
+        "All algorithm allowlists must be exactly ['RS256']",
+        "Audience MUST equal the primary application id",
+        "Issuer MUST equal 'acme.com'",
+        "exp/nbf/iat are honored with default 60s leeway",
+        "Roles are taken from the JWT claim and are NEVER mutated server-side"
+      ],
+      "error_cases": [
+        "Missing header → 401 with body {error:'unauthenticated'}",
+        "Malformed token → 401",
+        "Invalid signature → 401",
+        "Expired → 401 {error:'token_expired'}",
+        "Wrong iss/aud → 401",
+        "alg=none / HS256 attempt → 401 (algorithm confusion defense)",
+        "JWKS fetch fails on cold start → 503 with body {error:'auth_unavailable'}"
+      ],
+      "edge_cases": [
+        "Token with extra unknown claims — accept, ignore the extras",
+        "Roles claim missing — treat as empty array, not as 'user'",
+        "Capitalization of 'Bearer' — case-insensitive scheme allowed",
+        "Multiple Authorization headers — reject 400",
+        "JWKS endpoint temporarily slow — block at most 2s, then return 503"
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin",
+        "super_admin"
+      ],
+      "test_scenarios": [
+        "valid_user_token_passes: dependency yields current_user with role 'user'",
+        "valid_admin_token_passes: yields role 'admin'",
+        "missing_header_rejects: 401",
+        "alg_none_rejects: 401",
+        "wrong_audience_rejects: 401",
+        "expired_token_rejects: 401 with token_expired error",
+        "jwks_cached_across_calls: only one network fetch over 100 sequential validations"
+      ]
+    },
+    {
+      "id": "require_role_authorization",
+      "name": "Role-based authorization helper",
+      "description": "Reusable backend helper (FastAPI dependency) that, given the current_user from JWT validation, enforces that the caller holds one of the required roles. Used to lock down admin-only routes in later milestones; in this milestone only /me uses the auth dependency, but the helper must be in place and tested.",
+      "inputs": [
+        {
+          "name": "required_roles",
+          "type": "list<string>",
+          "required": true,
+          "constraints": [
+            "subset of {'user', 'admin', 'super_admin'}"
+          ],
+          "description": "Roles permitted to call the wrapped route."
+        },
+        {
+          "name": "current_user",
+          "type": "object",
+          "required": true,
+          "constraints": [
+            "from validate_jwt_middleware"
+          ],
+          "description": "Authenticated principal."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "current_user",
+          "type": "object",
+          "required": true,
+          "constraints": [],
+          "description": "Pass-through current_user when authorized."
+        }
+      ],
+      "validation_rules": [
+        "Caller must hold at least one of required_roles (intersection non-empty)",
+        "'super_admin' implicitly satisfies 'admin' checks",
+        "Role names must match exactly (case-sensitive) to FusionAuth role names",
+        "Admins MUST NOT be granted implicit 'user' role unless they actually have it — moderators are not owners"
+      ],
+      "error_cases": [
+        "current_user has no overlapping role → 403 {error:'forbidden'}",
+        "current_user missing (somehow reached the helper without auth) → 401 (defensive)"
+      ],
+      "edge_cases": [
+        "User with both 'user' and 'admin' — passes either check",
+        "Empty required_roles list — programmer error, raise at import/registration time, not at request time",
+        "Role list arrives uppercase from JWT — reject; only canonical lowercase from auth contract"
+      ],
+      "auth_required": true,
+      "allowed_roles": [
+        "user",
+        "admin",
+        "super_admin"
+      ],
+      "test_scenarios": [
+        "user_can_access_user_route: required=['user'] with user token → 200",
+        "user_blocked_from_admin: required=['admin'] with user token → 403",
+        "admin_passes_admin: required=['admin'] with admin token → 200",
+        "super_admin_passes_admin: super_admin satisfies admin requirement",
+        "no_overlap_forbidden: required=['admin'] with token roles=['user'] → 403"
+      ]
+    },
+    {
+      "id": "frontend_token_storage",
+      "name": "Frontend token storage and lifecycle",
+      "description": "Frontend module responsible for storing the access token (and refresh token if used), attaching it as Authorization: Bearer on outgoing requests, refreshing on 401, and clearing on logout. Tokens persist across reload so the user remains signed in.",
+      "inputs": [
+        {
+          "name": "tokens",
+          "type": "object",
+          "required": true,
+          "constraints": [
+            "{access_token, refresh_token?}"
+          ],
+          "description": "Issued by login or refresh."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "authorized_fetch",
+          "type": "function",
+          "required": true,
+          "constraints": [
+            "attaches Authorization header, handles 401-refresh-retry once"
+          ],
+          "description": "Wrapper used by all data calls."
+        }
+      ],
+      "validation_rules": [
+        "Refresh token MUST NOT be stored in document-accessible localStorage unless mitigations are present (httpOnly cookie preferred); access token MAY live in memory + a survivable store for reload",
+        "On 401 from a protected call, attempt refresh once; if refresh succeeds, retry original request once; if not, clear session and redirect to /login",
+        "Single-flight: concurrent 401s during refresh share one refresh attempt",
+        "Storage changes (logout in other tab) must trigger session clear in this tab",
+        "Never log token contents"
+      ],
+      "error_cases": [
+        "Refresh returns 401 → clear all tokens, redirect to /login",
+        "Refresh network error → leave existing access token in place if still valid; on next 401 retry refresh",
+        "Storage quota exceeded → fall back to in-memory only, user must re-login after reload",
+        "Storage disabled (private mode strict) → in-memory only, document the limitation"
+      ],
+      "edge_cases": [
+        "Two tabs, one logs out — other tab detects via storage event and redirects to /login on next interaction",
+        "Two tabs, both 401 simultaneously — only one refresh fires",
+        "Page reload mid-refresh — on next load, repeat refresh from stored refresh token",
+        "Access token close to expiry — proactive refresh is OPTIONAL; reactive 401-then-refresh must work",
+        "XSS attempt reads token — outside scope of this module but tokens must not be embedded in DOM or logged"
+      ],
+      "auth_required": false,
+      "allowed_roles": [],
+      "test_scenarios": [
+        "attach_bearer: authorized_fetch adds Authorization: Bearer <token>",
+        "refresh_on_401: 401 from /me triggers refresh and retry; second call succeeds",
+        "logout_clears_storage: after logout, no token remains in storage",
+        "single_flight_refresh: two simultaneous 401s cause only one /refresh call",
+        "reload_persists: token survives a full page reload",
+        "cross_tab_logout: logout in tab A triggers session clear in tab B"
+      ]
+    },
+    {
+      "id": "provision_admin_account",
+      "name": "Provision admin test user",
+      "description": "Operational capability: ensure admin@example.com exists in FusionAuth with the 'admin' role on the primary application so that admin login can be exercised in this milestone. Idempotent — safe to run repeatedly.",
+      "inputs": [
+        {
+          "name": "email",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "literal 'admin@example.com' for the test fixture"
+          ],
+          "description": "Admin login email per auth contract."
+        },
+        {
+          "name": "password",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "meets policy",
+            "literal 'password' for dev per auth contract"
+          ],
+          "description": "Bootstrap password (dev convention only)."
+        },
+        {
+          "name": "roles",
+          "type": "list<string>",
+          "required": true,
+          "constraints": [
+            "must include 'admin'"
+          ],
+          "description": "Roles to grant."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "user_id",
+          "type": "string",
+          "required": true,
+          "constraints": [
+            "UUID"
+          ],
+          "description": "Created or existing FusionAuth user id."
+        }
+      ],
+      "validation_rules": [
+        "Use POST /api/user/registration (no path arg) when creating",
+        "Use PATCH /api/user/registration/{userId} to update roles on an existing user",
+        "Header: Authorization: <FUSIONAUTH_API_KEY> (raw key, NOT 'Bearer ...')",
+        "Idempotent: existing admin user must not be duplicated or have password reset"
+      ],
+      "error_cases": [
+        "Duplicate registration error from FusionAuth → treat as success, fetch user_id and ensure roles include 'admin'",
+        "FusionAuth unreachable → fail provisioning loudly so the deployment doesn't proceed",
+        "Missing FUSIONAUTH_API_KEY → fail with clear error"
+      ],
+      "edge_cases": [
+        "Admin user already exists with only 'user' role — PATCH to add 'admin'",
+        "Admin user exists with extra roles — preserve them, just ensure 'admin' is included",
+        "Repeated provisioning runs — must be a no-op after first success"
+      ],
+      "auth_required": false,
+      "allowed_roles": [],
+      "test_scenarios": [
+        "first_run_creates: admin user does not exist, provisioning creates it with role 'admin'",
+        "rerun_is_noop: second run does not error and does not duplicate the user",
+        "existing_user_gets_role: admin user existed with role 'user'; provisioning ensures 'admin' is added without removing 'user'",
+        "admin_can_login: after provisioning, POST /api/login with admin creds returns a JWT containing 'admin' in roles"
+      ]
+    }
+  ],
+  "cross_cutting": {
+    "error_envelope": [
+      "All backend errors return JSON shape: {\"error\": \"<machine_code>\", \"message\": \"<human readable>\", \"fields\": {<optional field-level errors>}}",
+      "HTTP status reflects the failure class — do not return 200 with an error body",
+      "Machine codes are stable, lowercase_snake_case (e.g., 'invalid_credentials', 'token_expired', 'forbidden')"
+    ],
+    "logging": [
+      "Log structured records with request_id, user_id (when known), route, status, duration_ms",
+      "NEVER log passwords, full JWTs, refresh tokens, or Authorization headers (redact)",
+      "Log auth failures with reason code (expired, bad_sig, wrong_aud) for ops visibility",
+      "Use INFO for auth success, WARN for 4xx auth failures, ERROR for 5xx and FusionAuth outages"
+    ],
+    "cors": [
+      "Backend CORS allows the frontend origin (http://localhost:5173 in dev) with credentials and Authorization header",
+      "Allowed methods: GET, POST, PATCH, DELETE, OPTIONS",
+      "Preflight OPTIONS must succeed without auth"
+    ],
+    "transport": [
+      "All inter-service auth flows require TLS in production; localhost http permitted only in dev",
+      "Tokens never appear in URLs or query parameters",
+      "Backend reads FUSIONAUTH_API_KEY from env, fails fast at startup if missing"
+    ],
+    "jwks_handling": [
+      "Cache JWKS in-process; refresh every 10 minutes and on kid miss",
+      "Hard timeout on JWKS HTTP fetch: 2 seconds",
+      "On JWKS fetch failure with stale cache present: continue using stale cache and log WARN"
+    ],
+    "rate_limiting": [
+      "Login endpoint should be rate-limited (e.g., 10 attempts/min/IP) to slow brute force — soft requirement, may be deferred but documented",
+      "Signup endpoint should be rate-limited per IP (e.g., 5/min) to slow account spam"
+    ],
+    "audit": [
+      "Login successes and failures emit an audit log entry with email (not password), IP, user-agent, and outcome",
+      "Signup successes emit an audit entry with user_id and email",
+      "Logout emits an audit entry with user_id when known"
+    ],
+    "i18n_copy": [
+      "Empty-state copy on /my-recipes: 'No recipes yet — once milestone two lands, you can save your first recipe here.' or equivalent (must clearly communicate empty state, not 'loading')",
+      "Generic auth failure copy: 'Invalid email or password.' (never reveal which is wrong)"
+    ],
+    "session_continuity": [
+      "Reloading any authenticated page MUST attempt session restore via stored tokens before deciding to redirect to /login",
+      "A loading state is shown during session restore — no flash of unauthenticated content (FOUC)"
+    ],
+    "config": [
+      "All FusionAuth coordinates (host, app id, issuer) sourced from env or a single config module — never hardcoded scattered",
+      "Backend env: FUSIONAUTH_URL, FUSIONAUTH_APP_ID, FUSIONAUTH_ISSUER, FUSIONAUTH_API_KEY",
+      "Frontend env: VITE_FUSIONAUTH_URL or VITE_API_BASE (whichever is used) — set per environment"
+    ]
+  },
+  "anti_patterns": [
+    "Never store plaintext passwords in the backend or frontend; backend forwards once to FusionAuth and discards",
+    "Never log JWTs, refresh tokens, Authorization headers, or password fields — redact at logger level",
+    "Never trust client-supplied user_id, email, or roles — always derive from the validated JWT 'sub' / 'roles' claims",
+    "Never accept a JWT with alg=none or any non-RS256 algorithm — pin algorithms=['RS256']",
+    "Never skip audience and issuer validation — both are required even if signature is valid",
+    "Never call POST /api/user/registration/{userId} to create a new user; use POST /api/user/registration with no path arg",
+    "Never send the FusionAuth API key as 'Bearer <key>' — it must be the raw key in the Authorization header",
+    "Never expose the FusionAuth API key to the frontend or browser",
+    "Never use localStorage for refresh tokens without explicit risk acceptance; prefer httpOnly cookie or in-memory + short access TTL",
+    "Never reveal whether an email exists during login failures — use a single generic 'invalid email or password' message",
+    "Never put tokens in URLs, query strings, or referer-leaking locations",
+    "Never auto-promote users to 'admin' from client-supplied input; admin role is provisioned via the privileged backend path only",
+    "Never assume a user with role 'admin' also has role 'user' — moderators are not owners; check roles explicitly",
+    "Never use the role names 'user'/'admin'/'super_admin' with different casing or synonyms (e.g., 'User', 'ADMIN', 'moderator') — exact match to FusionAuth roles",
+    "Never block UI indefinitely on JWKS fetch — short timeout with cached fallback",
+    "Never flash-redirect to /login during session restore on reload — show loading until refresh attempt resolves",
+    "Never follow ?next= values that are not same-origin relative paths — open-redirect risk",
+    "Never reuse a rotated refresh token — treat reuse as session compromise"
+  ],
+  "confidence": 0.82
+}

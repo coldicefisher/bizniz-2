@@ -1,0 +1,313 @@
+{
+  "test_slug": "service_planner_seeded_scaffold",
+  "run_index": 1,
+  "run_id": "20260519_030504",
+  "started_at_utc": "2026-05-19T03:08:53.442916+00:00",
+  "wall_clock_s": 228.48409056663513,
+  "status": "ok",
+  "git_rev": "a1e57e4b9cfabd3b4f0e33c951f9867be7d06ff3",
+  "env": {
+    "bizniz_git_rev": "a1e57e4b9cfabd3b4f0e33c951f9867be7d06ff3",
+    "bizniz_git_status": {
+      "dirty": false,
+      "files": []
+    },
+    "claude_cli_version": "2.1.143 (Claude Code)",
+    "pip_freeze": {
+      "sha256": "6b8df9ff53647825e4fdac621001aed28db5a5416a159e238c71aa0bf7f12679",
+      "package_count": 54
+    },
+    "fixture_sha256": "a6594f8438ea6a4c8066b22612ebbee15fc926b7654a760f82a4ddd4ad342817",
+    "python_version": "3.14.4",
+    "platform": "Linux 6.18.21-1-lts"
+  },
+  "scenario_result": {
+    "mode": "service_planner_seeded_scaffold",
+    "service": "backend",
+    "wall_s": 228.35968732833862,
+    "model": "claude-cli:claude-opus-4-7",
+    "issue_count": 7,
+    "seeded_file_count": 8,
+    "py_file_count": 8,
+    "verdict": {
+      "pass": false,
+      "wall_ok": true,
+      "ast_ok": true,
+      "symbol_ok": false,
+      "coverage_ok": true
+    },
+    "ast": {
+      "pass_count": 8,
+      "pass_pct": 100.0,
+      "results": {
+        "app/schemas/me.py": {
+          "ok": true,
+          "top_level_defs": [
+            "UserMeResponse"
+          ]
+        },
+        "app/api/routes/me.py": {
+          "ok": true,
+          "top_level_defs": [
+            "get_me"
+          ]
+        },
+        "tests/integration/test_me.py": {
+          "ok": true,
+          "top_level_defs": [
+            "_login",
+            "user_token",
+            "admin_token",
+            "test_me_returns_identity_for_user",
+            "test_me_includes_admin_role_for_admin_user",
+            "test_me_missing_authorization_header_returns_401",
+            "test_me_non_bearer_scheme_returns_401",
+            "test_me_malformed_jwt_returns_401",
+            "test_me_alg_none_token_rejected_401",
+            "test_me_expired_token_returns_401"
+          ]
+        },
+        "tests/integration/test_signup.py": {
+          "ok": true,
+          "top_level_defs": [
+            "_fresh_email",
+            "test_signup_creates_user_and_returns_id",
+            "test_signup_missing_email_returns_400",
+            "test_signup_missing_password_returns_400",
+            "test_signup_malformed_email_returns_400",
+            "test_signup_weak_password_returns_400_with_fielderrors",
+            "test_signup_duplicate_email_returns_409",
+            "test_signup_client_supplied_role_admin_is_ignored"
+          ]
+        },
+        "tests/integration/test_login.py": {
+          "ok": true,
+          "top_level_defs": [
+            "test_login_with_valid_credentials_returns_access_token",
+            "test_login_missing_email_returns_400",
+            "test_login_missing_password_returns_400",
+            "test_login_wrong_password_returns_401_generic",
+            "test_login_unknown_email_returns_401_generic",
+            "test_login_client_supplied_applicationid_is_ignored"
+          ]
+        },
+        "tests/integration/test_logout.py": {
+          "ok": true,
+          "top_level_defs": [
+            "test_logout_with_valid_refresh_token_returns_200",
+            "test_logout_with_no_token_returns_200_idempotent",
+            "test_logout_with_malformed_refresh_token_returns_200",
+            "test_logout_does_not_require_valid_access_jwt"
+          ]
+        },
+        "tests/integration/test_refresh.py": {
+          "ok": true,
+          "top_level_defs": [
+            "_login_and_get_refresh_token",
+            "test_refresh_with_valid_token_returns_new_access_token",
+            "test_refresh_missing_token_returns_401",
+            "test_refresh_invalid_token_returns_401_refresh_failed"
+          ]
+        },
+        "tests/integration/test_require_roles.py": {
+          "ok": true,
+          "top_level_defs": [
+            "test_require_roles_allows_user_with_matching_role",
+            "test_require_roles_rejects_user_without_role_403",
+            "test_require_roles_super_admin_satisfies_admin_check",
+            "test_require_roles_admin_does_not_imply_user_role",
+            "test_require_roles_missing_current_user_returns_401"
+          ]
+        }
+      }
+    },
+    "symbols": {
+      "pass_count": 0,
+      "pass_pct": 0.0,
+      "results": {
+        "app/schemas/me.py": {
+          "passed": false,
+          "resolved_count": 1,
+          "unresolved_count": 1,
+          "unresolved_attr_count": 0,
+          "syntax_error_count": 0,
+          "unresolved_first_5": [
+            "line 4 [from-import] from pydantic import BaseModel, Field: unresolved \u2014 not in stdlib, not in declared dependencies, not a local module"
+          ]
+        },
+        "app/api/routes/me.py": {
+          "passed": false,
+          "resolved_count": 4,
+          "unresolved_count": 1,
+          "unresolved_attr_count": 0,
+          "syntax_error_count": 0,
+          "unresolved_first_5": [
+            "line 4 [from-import] from fastapi import APIRouter, Depends: unresolved \u2014 not in stdlib, not in declared dependencies, not a local module"
+          ]
+        },
+        "tests/integration/test_me.py": {
+          "passed": false,
+          "resolved_count": 1,
+          "unresolved_count": 2,
+          "unresolved_attr_count": 0,
+          "syntax_error_count": 0,
+          "unresolved_first_5": [
+            "line 4 [import] httpx: unresolved \u2014 not in stdlib, not in declared dependencies, not a local module",
+            "line 5 [import] pytest: unresolved \u2014 not in stdlib, not in declared dependencies, not a local module"
+          ]
+        },
+        "tests/integration/test_signup.py": {
+          "passed": false,
+          "resolved_count": 2,
+          "unresolved_count": 1,
+          "unresolved_attr_count": 0,
+          "syntax_error_count": 0,
+          "unresolved_first_5": [
+            "line 10 [import] httpx: unresolved \u2014 not in stdlib, not in declared dependencies, not a local module"
+          ]
+        },
+        "tests/integration/test_login.py": {
+          "passed": false,
+          "resolved_count": 1,
+          "unresolved_count": 1,
+          "unresolved_attr_count": 0,
+          "syntax_error_count": 0,
+          "unresolved_first_5": [
+            "line 8 [import] httpx: unresolved \u2014 not in stdlib, not in declared dependencies, not a local module"
+          ]
+        },
+        "tests/integration/test_logout.py": {
+          "passed": false,
+          "resolved_count": 1,
+          "unresolved_count": 1,
+          "unresolved_attr_count": 0,
+          "syntax_error_count": 0,
+          "unresolved_first_5": [
+            "line 8 [import] httpx: unresolved \u2014 not in stdlib, not in declared dependencies, not a local module"
+          ]
+        },
+        "tests/integration/test_refresh.py": {
+          "passed": false,
+          "resolved_count": 1,
+          "unresolved_count": 1,
+          "unresolved_attr_count": 0,
+          "syntax_error_count": 0,
+          "unresolved_first_5": [
+            "line 8 [import] httpx: unresolved \u2014 not in stdlib, not in declared dependencies, not a local module"
+          ]
+        },
+        "tests/integration/test_require_roles.py": {
+          "passed": false,
+          "resolved_count": 3,
+          "unresolved_count": 2,
+          "unresolved_attr_count": 0,
+          "syntax_error_count": 0,
+          "unresolved_first_5": [
+            "line 11 [import] pytest: unresolved \u2014 not in stdlib, not in declared dependencies, not a local module",
+            "line 12 [from-import] from fastapi import HTTPException: unresolved \u2014 not in stdlib, not in declared dependencies, not a local module"
+          ]
+        }
+      }
+    },
+    "coverage": {
+      "total_target_files": 8,
+      "covered": 8,
+      "missing_by_issue": {},
+      "coverage_pct": 100.0
+    },
+    "issues_preview": [
+      {
+        "id": "BE-001",
+        "title": "Add /me endpoint and response schema",
+        "target_files": [
+          "app/schemas/me.py",
+          "app/api/routes/me.py"
+        ]
+      },
+      {
+        "id": "BE-002",
+        "title": "Integration tests for /me endpoint",
+        "target_files": [
+          "tests/integration/test_me.py"
+        ]
+      },
+      {
+        "id": "BE-003",
+        "title": "Integration tests for signup proxy",
+        "target_files": [
+          "tests/integration/test_signup.py"
+        ]
+      },
+      {
+        "id": "BE-004",
+        "title": "Integration tests for login proxy",
+        "target_files": [
+          "tests/integration/test_login.py"
+        ]
+      },
+      {
+        "id": "BE-005",
+        "title": "Integration tests for logout proxy",
+        "target_files": [
+          "tests/integration/test_logout.py"
+        ]
+      },
+      {
+        "id": "BE-006",
+        "title": "Integration tests for refresh-session proxy",
+        "target_files": [
+          "tests/integration/test_refresh.py"
+        ]
+      },
+      {
+        "id": "BE-007",
+        "title": "Tests for require_roles authorization helper",
+        "target_files": [
+          "tests/integration/test_require_roles.py"
+        ]
+      }
+    ],
+    "seeded_files_preview": [
+      {
+        "path": "app/schemas/me.py",
+        "bytes": 755,
+        "rationale": "Exports UserMeResponse used by the /me route handler in app/api/routes/me.py. Filled by BE-001."
+      },
+      {
+        "path": "app/api/routes/me.py",
+        "bytes": 892,
+        "rationale": "Exports `router` so the skeleton auto-mounts GET /api/v1/me. Body filled by BE-001."
+      },
+      {
+        "path": "tests/integration/test_me.py",
+        "bytes": 1677,
+        "rationale": "Test scaffolding for GET /me happy + error paths. Filled by BE-002."
+      },
+      {
+        "path": "tests/integration/test_signup.py",
+        "bytes": 1483,
+        "rationale": "Test scaffolding for the signup proxy capability. Filled by BE-003."
+      },
+      {
+        "path": "tests/integration/test_login.py",
+        "bytes": 1359,
+        "rationale": "Test scaffolding for the login proxy capability. Filled by BE-004."
+      },
+      {
+        "path": "tests/integration/test_logout.py",
+        "bytes": 908,
+        "rationale": "Test scaffolding for the logout proxy capability. Filled by BE-005."
+      },
+      {
+        "path": "tests/integration/test_refresh.py",
+        "bytes": 1081,
+        "rationale": "Test scaffolding for the refresh proxy capability. Filled by BE-006."
+      },
+      {
+        "path": "tests/integration/test_require_roles.py",
+        "bytes": 1328,
+        "rationale": "Test scaffolding for the require_roles helper. Imports skeleton-shipped require_roles + User. Filled by BE-007."
+      }
+    ]
+  }
+}
