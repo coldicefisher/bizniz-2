@@ -564,7 +564,8 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     # IMPLEMENT (Stage A) + parallel QE+CR review with V2 approval
     # semantics + V2 per-issue repair dispatch. Implies Stage A;
     # does NOT enable Stage B's lossy UnifiedFinding adapter path.
-    use_v4_flag = getattr(args, "use_v4", False)
+    use_v5_flag = getattr(args, "use_v5", False)
+    use_v4_flag = use_v5_flag or getattr(args, "use_v4", False)
     use_v3_1_flag = use_v4_flag or getattr(args, "use_v3_1", False)
     use_v3_shortcut = getattr(args, "use_v3", False)
     use_v3_implement_flag = (
@@ -976,6 +977,43 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     # ``use_v3_implement_flag`` / ``use_v3_review_flag`` already
     # computed above where the dispatcher swap happens.
 
+    # ── v5 ResolutionCheckers + ProjectGit wiring ─────────────────
+    # When --use-v5 is set, build per-source ResolutionCheckers (one
+    # for QE flavor, one for CR flavor) plus the ProjectGit handle
+    # the loop uses for snapshot + rollback.
+    v5_qe_checker = None
+    v5_cr_checker = None
+    project_git_for_v5 = None
+    if use_v5_flag:
+        from bizniz.resolution_checker.checker import ResolutionChecker
+        from bizniz.driver.project_git import ProjectGit
+
+        # Per-source: same agent class, separate clients so cost
+        # attribution + status logging stay clean.
+        qe_check_client = _client_for(
+            getattr(config, "qe_model", config.engineer_model),
+            "resolution_checker:qe",
+        )
+        cr_check_client = _client_for(
+            getattr(config, "cr_model", config.engineer_model),
+            "resolution_checker:cr",
+        )
+        v5_qe_checker = ResolutionChecker(
+            client=qe_check_client, on_status=on_status,
+        )
+        v5_cr_checker = ResolutionChecker(
+            client=cr_check_client, on_status=on_status,
+        )
+        project_git_for_v5 = ProjectGit(
+            root=project_root, on_status=on_status,
+        )
+        on_status(
+            "REVIEW/REPAIR phase: v5 ENABLED (--use-v5). "
+            "Iter 1 = full review frozen as CanonicalReport; "
+            "iter 2+ = ResolutionChecker (no fresh review). "
+            "Regressions trigger ProjectGit rollback."
+        )
+
     milestone_loop = MilestoneLoop(
         engineer=engineer,
         quality_engineer=qe,
@@ -994,6 +1032,10 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         code_dispatcher=code_dispatcher,
         use_v3_review_unit=use_v3_review_flag,
         use_v3_1=use_v3_1_flag,
+        use_v5=use_v5_flag,
+        v5_qe_checker=v5_qe_checker if use_v5_flag else None,
+        v5_cr_checker=v5_cr_checker if use_v5_flag else None,
+        project_git=project_git_for_v5 if use_v5_flag else None,
         issue_store_factory=issue_store_factory,
         cost_tracker=cost_tracker,
         workspace_summary=workspace_summary,
@@ -1169,6 +1211,17 @@ def main():
             "Haiku escalation chain). Implies --use-v3-1 (parallel "
             "review + V2 approval semantics). max_parallel_coders "
             "from bizniz.yaml (default 6)."
+        ),
+    )
+    p.add_argument(
+        "--use-v5", dest="use_v5", action="store_true",
+        help=(
+            "v5 — canonical-findings monotone convergence. Iter 1 = "
+            "full review frozen as CanonicalReport; iter 2+ = "
+            "ResolutionChecker (no fresh review, no new findings "
+            "invented). Regressions trigger ProjectGit rollback. "
+            "Eliminates reviewer-drift as a regression source. "
+            "Implies --use-v4."
         ),
     )
     p.add_argument(

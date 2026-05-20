@@ -156,6 +156,16 @@ class MilestoneLoop:
         # convergence. Takes precedence over ``use_v3_review_unit``
         # when both are set.
         use_v3_1: bool = False,
+        # v5 canonical-findings convergence loop (2026-05-19). When
+        # set, iter 1 freezes review output as a CanonicalReport;
+        # iter 2+ runs ResolutionChecker (no fresh review). Eliminates
+        # reviewer drift as a regression source. Requires
+        # ``v5_qe_checker``, ``v5_cr_checker``, and ``project_git``
+        # to also be wired.
+        use_v5: bool = False,
+        v5_qe_checker=None,  # Optional[ResolutionChecker]
+        v5_cr_checker=None,  # Optional[ResolutionChecker]
+        project_git=None,    # Optional[ProjectGit] — for snapshot/rollback
     ):
         self._engineer = engineer
         self._qe = quality_engineer
@@ -168,6 +178,10 @@ class MilestoneLoop:
         self._repair_max_iterations = max(1, int(repair_max_iterations))
         self._use_v3_review_unit = bool(use_v3_review_unit)
         self._use_v3_1 = bool(use_v3_1)
+        self._use_v5 = bool(use_v5)
+        self._v5_qe_checker = v5_qe_checker
+        self._v5_cr_checker = v5_cr_checker
+        self._project_git = project_git
         self._document_recovery = document_recovery
         self._document_recovery_stall_threshold = max(
             1, int(document_recovery_stall_threshold)
@@ -1577,6 +1591,24 @@ class MilestoneLoop:
 
         self._tag(state.milestone_index, SubPhase.REVIEW_REPAIR)
 
+        # v5 branch (preferred, 2026-05-19): canonical-findings
+        # monotone convergence. Iter 1 = full review frozen as
+        # CanonicalReport; iter 2+ = ResolutionChecker against the
+        # frozen list. Requires v5_qe_checker + v5_cr_checker to be
+        # wired; falls through to v3.1 if not.
+        if getattr(self, "_use_v5", False) and (
+            self._v5_qe_checker is not None and self._v5_cr_checker is not None
+        ):
+            return self._phase_review_repair_loop_v5(
+                state=state,
+                milestone=milestone,
+                architecture=architecture,
+                spec=spec,
+                initial_result=initial_result,
+                auth_contract=auth_contract,
+                prior_list=prior_list,
+            )
+
         # v3.1 branch (preferred, 2026-05-19): parallel QE+CR review
         # with V2 approval semantics + V2 per-issue repair dispatch.
         # Takes precedence over the legacy v3 Stage B path below.
@@ -1934,6 +1966,71 @@ class MilestoneLoop:
                     coverage, code_review, result,
                     repair_iterations, tracker.render_history(),
                 )
+
+    # ── v5 canonical-findings review/repair (2026-05-19) ────────────────
+
+    def _phase_review_repair_loop_v5(
+        self,
+        *,
+        state: MilestoneState,
+        milestone: Milestone,
+        architecture: SystemArchitecture,
+        spec: EnrichedSpec,
+        initial_result: EngineerResult,
+        auth_contract: Optional[str],
+        prior_list: List[EnrichedSpec],
+    ):
+        """v5 monotone convergence: full review at iter 1 freezes a
+        CanonicalReport; iter 2+ runs ResolutionChecker (no fresh
+        review) and rolls back on regression via ProjectGit.
+
+        Same outer tuple shape as v3.1 so MilestoneLoop's downstream
+        consumers don't care which loop ran."""
+        from bizniz.driver.review_repair_v5 import ReviewRepairV5Loop
+
+        self._tag(state.milestone_index, SubPhase.REVIEW_REPAIR)
+        self._log("MilestoneLoop[v5]: entering review/repair loop")
+
+        # Read-current-files closure for the ResolutionChecker.
+        def _snapshot_files(paths):
+            files: Dict[str, str] = {}
+            for path in paths:
+                content = _safe_read(self._primary_workspace, path)
+                if content is not None:
+                    files[path] = content
+            return files
+
+        # Canonical report path — persist alongside milestone state.
+        canonical_path = None
+        try:
+            milestone_dir = getattr(state, "milestone_dir", None)
+            if milestone_dir is not None:
+                from pathlib import Path
+                canonical_path = Path(str(milestone_dir)) / "canonical_findings.json"
+        except Exception:
+            canonical_path = None
+
+        loop = ReviewRepairV5Loop(
+            phase_review_parallel=self._phase_review_parallel,
+            repair_dispatcher=self._code_dispatcher,
+            qe_resolution_checker=self._v5_qe_checker,
+            cr_resolution_checker=self._v5_cr_checker,
+            project_git=self._project_git,
+            canonical_path=canonical_path,
+            snapshot_workspace_files=_snapshot_files,
+            stall_threshold=self._repair_stall_threshold,
+            hard_cap=self._repair_max_iterations,
+            on_status=self._on_status,
+        )
+        return loop.run(
+            milestone=milestone,
+            architecture=architecture,
+            spec=spec,
+            initial_result=initial_result,
+            auth_contract=auth_contract,
+            prior_list=prior_list,
+            milestone_index=state.milestone_index,
+        )
 
     # ── v3 Stage B review/repair (parallel review unit) ─────────────────
 
