@@ -83,9 +83,12 @@ class V4MilestoneCodeDispatcher:
         # (tool-loop with Edit/Write/Read/Bash, sequential, context-
         # truncating). Default True — the whole point of Option 3.
         enable_per_issue_debugger: bool = True,
-        # Wall budget per debugger invocation. Default 10 min — the
-        # debugger is meant to be slow but bounded.
-        debugger_timeout_seconds: int = 600,
+        # Wall budget per debugger invocation. Bumped 600 → 3000
+        # (2026-05-19 evening) after recipe_v4_v8 saw BA-fix1-1 hit
+        # the 10-min timeout mid-investigation. Deep cases routinely
+        # need 30+ min of tool-loop iteration; 50 min is a safety net
+        # not a target.
+        debugger_timeout_seconds: int = 3000,
     ):
         self._planner_factory = planner_factory
         self._coder_tester_factory = coder_tester_factory

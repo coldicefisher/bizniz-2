@@ -135,7 +135,15 @@ class PerIssueDebugger:
         workspace: BaseWorkspace,
         compose_path: Optional[str] = None,
         service_name: Optional[str] = None,
-        timeout_seconds: int = 600,
+        # Bumped 600 → 3000 (2026-05-19 evening). recipe_v4_v8 saw
+        # BA-fix1-1 timeout at 10 min mid-investigation, leaving
+        # partial work that AST-passed but was semantically incomplete
+        # — contributed to the iter-3 regression. Real debugging cases
+        # (deep dep wiring, integration test repair) routinely need
+        # 30+ min of tool-loop iteration. 50 min ceiling is generous
+        # but bounded; the agent decides when it's done via
+        # DEBUGGER_DONE line, this is just the safety net.
+        timeout_seconds: int = 3000,
         on_status: Optional[Callable[[str], None]] = None,
         command: str = "claude",
         additional_args: Optional[List[str]] = None,
