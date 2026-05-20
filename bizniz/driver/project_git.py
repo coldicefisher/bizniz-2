@@ -218,6 +218,68 @@ class ProjectGit:
                 return True
         return False
 
+    # ── v5 per-iter snapshots (2026-05-19) ─────────────────────────
+
+    def snapshot_for_repair_iter(
+        self,
+        milestone_index: int,
+        iter_idx: int,
+    ) -> Optional[str]:
+        """Commit current workspace state + tag it as the pre-state of
+        ``milestone_index``'s repair iter ``iter_idx``. Returns the tag
+        name on success, None on failure or no-op.
+
+        Tag shape: ``m<milestone>-repair<iter>-pre``. Stable so v5's
+        rollback can find it deterministically.
+
+        v5 wires this before each repair iter so a regressing iter's
+        changes can be rolled back via ``rollback_repair_iter``.
+        """
+        tag = f"m{milestone_index}-repair{iter_idx}-pre"
+        # Commit only if the workspace has uncommitted changes; otherwise
+        # the prior state is already the snapshot — just (re)apply the
+        # tag pointing at HEAD.
+        if self.is_dirty():
+            ok = self.commit_all(
+                message=f"v5 snapshot before m{milestone_index} repair iter {iter_idx}",
+                tag=tag,
+                allow_empty=True,
+            )
+            if not ok:
+                # commit_all already logged; still try to apply the tag.
+                if (self._root / ".git").is_dir():
+                    self._run(["tag", "-f", tag])
+            return tag
+        if (self._root / ".git").is_dir():
+            self._run(["tag", "-f", tag])
+            self._log(
+                f"ProjectGit: snapshot tag {tag} applied to HEAD "
+                f"(workspace already clean)"
+            )
+            return tag
+        return None
+
+    def rollback_repair_iter(
+        self,
+        milestone_index: int,
+        iter_idx: int,
+    ) -> bool:
+        """Reset the workspace to the snapshot tag for the start of
+        ``milestone_index``'s repair iter ``iter_idx``. Destructive —
+        discards any commits + working-tree changes since the snapshot.
+        Returns True on success.
+
+        v5 calls this when the resolution-check shows a regression:
+        the repair iter is undone and the loop tries again with a
+        different fix-issue scope.
+        """
+        tag = f"m{milestone_index}-repair{iter_idx}-pre"
+        self._log(
+            f"ProjectGit: rolling back to snapshot {tag} (regression "
+            f"recovery)"
+        )
+        return self.revert_to_tag(tag)
+
     def revert_to_tag(self, tag: str) -> bool:
         """``git reset --hard <tag>`` — destructive but bounded. Used
         by the refactorer (roadmap item 5) when an extraction breaks

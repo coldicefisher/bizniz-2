@@ -179,6 +179,67 @@ class TestRevert:
         assert not (tmp_path / "file_b.txt").exists()
 
 
+class TestRepairIterSnapshots:
+    """v5 per-iter snapshot/rollback wrappers around git tag + reset."""
+
+    def test_snapshot_creates_tag_when_workspace_dirty(self, tmp_path):
+        pg = ProjectGit(tmp_path)
+        pg.init_if_needed()
+        (tmp_path / "f.txt").write_text("baseline\n")
+        pg.commit_all("baseline", tag="m0")
+        # Dirty change → snapshot should commit + tag.
+        (tmp_path / "f.txt").write_text("mid-iter\n")
+        tag = pg.snapshot_for_repair_iter(milestone_index=1, iter_idx=1)
+        assert tag == "m1-repair1-pre"
+        # Tag exists.
+        out = _run_git(tmp_path, "tag", "-l", tag)
+        assert tag in out
+
+    def test_snapshot_clean_workspace_just_applies_tag(self, tmp_path):
+        pg = ProjectGit(tmp_path)
+        pg.init_if_needed()
+        (tmp_path / "f.txt").write_text("baseline\n")
+        pg.commit_all("baseline", tag="m0")
+        # Clean workspace.
+        assert pg.is_dirty() is False
+        tag = pg.snapshot_for_repair_iter(milestone_index=1, iter_idx=2)
+        assert tag == "m1-repair2-pre"
+        out = _run_git(tmp_path, "tag", "-l", tag)
+        assert tag in out
+
+    def test_rollback_reverts_to_snapshot(self, tmp_path):
+        pg = ProjectGit(tmp_path)
+        pg.init_if_needed()
+        (tmp_path / "f.txt").write_text("pre-iter\n")
+        pg.commit_all("pre-iter", tag="m0")
+        # Snapshot the pre-iter state.
+        pg.snapshot_for_repair_iter(milestone_index=1, iter_idx=1)
+        # Repair iter makes BAD changes + commits them.
+        (tmp_path / "f.txt").write_text("regression\n")
+        (tmp_path / "new.txt").write_text("garbage\n")
+        pg.commit_all("regression iter")
+        # Rollback.
+        assert pg.rollback_repair_iter(milestone_index=1, iter_idx=1) is True
+        # File restored to pre-iter; new garbage gone.
+        assert (tmp_path / "f.txt").read_text() == "pre-iter\n"
+        assert not (tmp_path / "new.txt").exists()
+
+    def test_snapshot_tag_overwrites_when_called_twice_for_same_iter(self, tmp_path):
+        """Idempotent — re-running an iter (e.g., resume) should re-tag,
+        not fail."""
+        pg = ProjectGit(tmp_path)
+        pg.init_if_needed()
+        (tmp_path / "f.txt").write_text("v1")
+        pg.commit_all("v1", tag="m0")
+        pg.snapshot_for_repair_iter(milestone_index=1, iter_idx=1)
+        # Workspace dirty again, snapshot again same name.
+        (tmp_path / "f.txt").write_text("v2")
+        pg.snapshot_for_repair_iter(milestone_index=1, iter_idx=1)
+        # No crash; tag still exists.
+        out = _run_git(tmp_path, "tag", "-l", "m1-repair1-pre")
+        assert "m1-repair1-pre" in out
+
+
 class TestCurrentHeadSha:
     def test_returns_sha_after_commit(self, tmp_path):
         pg = ProjectGit(tmp_path)
