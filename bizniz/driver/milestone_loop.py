@@ -166,6 +166,9 @@ class MilestoneLoop:
         v5_qe_checker=None,  # Optional[ResolutionChecker]
         v5_cr_checker=None,  # Optional[ResolutionChecker]
         project_git=None,    # Optional[ProjectGit] — for snapshot/rollback
+        # v5 escalation: PerMilestoneDebugger fires when the
+        # structured loop is about to stall. Optional.
+        milestone_debugger=None,
     ):
         self._engineer = engineer
         self._qe = quality_engineer
@@ -182,6 +185,7 @@ class MilestoneLoop:
         self._v5_qe_checker = v5_qe_checker
         self._v5_cr_checker = v5_cr_checker
         self._project_git = project_git
+        self._milestone_debugger = milestone_debugger
         self._document_recovery = document_recovery
         self._document_recovery_stall_threshold = max(
             1, int(document_recovery_stall_threshold)
@@ -2018,6 +2022,7 @@ class MilestoneLoop:
             project_git=self._project_git,
             canonical_path=canonical_path,
             snapshot_workspace_files=_snapshot_files,
+            milestone_debugger=self._milestone_debugger,
             stall_threshold=self._repair_stall_threshold,
             hard_cap=self._repair_max_iterations,
             on_status=self._on_status,

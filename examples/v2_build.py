@@ -984,12 +984,12 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
     v5_qe_checker = None
     v5_cr_checker = None
     project_git_for_v5 = None
+    milestone_debugger_for_v5 = None
     if use_v5_flag:
         from bizniz.resolution_checker.checker import ResolutionChecker
         from bizniz.driver.project_git import ProjectGit
+        from bizniz.per_milestone_debugger.debugger import PerMilestoneDebugger
 
-        # Per-source: same agent class, separate clients so cost
-        # attribution + status logging stay clean.
         qe_check_client = _client_for(
             getattr(config, "qe_model", config.engineer_model),
             "resolution_checker:qe",
@@ -1007,11 +1007,26 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         project_git_for_v5 = ProjectGit(
             root=project_root, on_status=on_status,
         )
+        try:
+            milestone_debugger_for_v5 = PerMilestoneDebugger(
+                project_root=project_root,
+                compose_path=str(compose_path) if compose_path else None,
+                timeout_seconds=3000,
+                on_status=on_status,
+            )
+        except Exception as e:
+            on_status(
+                f"PerMilestoneDebugger init failed ({type(e).__name__}: "
+                f"{e}) — v5 loop will run without escalation"
+            )
+            milestone_debugger_for_v5 = None
         on_status(
             "REVIEW/REPAIR phase: v5 ENABLED (--use-v5). "
             "Iter 1 = full review frozen as CanonicalReport; "
             "iter 2+ = ResolutionChecker (no fresh review). "
-            "Regressions trigger ProjectGit rollback."
+            "Regressions trigger ProjectGit rollback. "
+            f"Milestone debugger: "
+            f"{'wired' if milestone_debugger_for_v5 else 'unavailable'}."
         )
 
     milestone_loop = MilestoneLoop(
@@ -1036,6 +1051,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         v5_qe_checker=v5_qe_checker if use_v5_flag else None,
         v5_cr_checker=v5_cr_checker if use_v5_flag else None,
         project_git=project_git_for_v5 if use_v5_flag else None,
+        milestone_debugger=milestone_debugger_for_v5 if use_v5_flag else None,
         issue_store_factory=issue_store_factory,
         cost_tracker=cost_tracker,
         workspace_summary=workspace_summary,

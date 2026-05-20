@@ -64,6 +64,11 @@ class ReviewRepairV5Loop:
         # the resolution checker should examine. v2_build wires this
         # to read from the live workspace.
         snapshot_workspace_files: Optional[Callable[[List[str]], Dict[str, str]]] = None,
+        # Optional escalation: PerMilestoneDebugger fires when the
+        # loop is about to stall (stall_counter +1 with no progress).
+        # If the debugger produces meaningful changes, the loop
+        # re-checks before incrementing the stall counter further.
+        milestone_debugger=None,  # Optional[PerMilestoneDebugger]
         stall_threshold: int = 3,
         hard_cap: int = 20,
         on_status: Optional[Callable[[str], None]] = None,
@@ -75,6 +80,7 @@ class ReviewRepairV5Loop:
         self._project_git = project_git
         self._canonical_path = canonical_path
         self._snapshot_workspace_files = snapshot_workspace_files
+        self._milestone_debugger = milestone_debugger
         self._stall_threshold = max(1, int(stall_threshold))
         self._hard_cap = max(1, int(hard_cap))
         self._on_status = on_status
@@ -255,6 +261,76 @@ class ReviewRepairV5Loop:
 
             # Progress check.
             if delta.progress_count == 0:
+                # Before incrementing stall counter, try the milestone
+                # debugger (if wired). It sees the whole milestone and
+                # has full Bash/Edit access — may resolve what the
+                # structured loop couldn't.
+                if self._milestone_debugger is not None:
+                    self._log(
+                        f"MilestoneLoop[v5]: no progress at iter "
+                        f"{repair_iter} — escalating to PerMilestoneDebugger"
+                    )
+                    try:
+                        debug_result = self._milestone_debugger.debug(
+                            milestone_name=canonical.milestone_name,
+                            findings=list(canonical.unresolved()),
+                            current_files=self._collect_files_for_check(canonical),
+                        )
+                    except Exception as e:
+                        self._log(
+                            f"MilestoneLoop[v5]: milestone debugger raised: "
+                            f"{type(e).__name__}: {e}"
+                        )
+                        debug_result = None
+
+                    if debug_result and debug_result.files_touched:
+                        # Re-run the resolution check against the
+                        # post-debug workspace. If progress, reset stall.
+                        try:
+                            post_resolution = check_both_sources_parallel(
+                                qe_checker=self._qe_checker,
+                                cr_checker=self._cr_checker,
+                                canonical=canonical,
+                                iter_idx=repair_iter,
+                                current_files=self._collect_files_for_check(canonical),
+                                on_status=self._on_status,
+                            )
+                            post_delta = canonical.apply_resolution(
+                                post_resolution, iter_idx=repair_iter,
+                            )
+                            history_lines.append(
+                                f"iter {repair_iter} [post-debug]: delta "
+                                f"resolved={post_delta.progress_count}; "
+                                f"{canonical.summary_line()}"
+                            )
+                            if post_delta.progress_count > 0:
+                                # Debugger rescued progress — don't stall.
+                                stall_counter = 0
+                                if canonical.all_blockers_resolved():
+                                    self._log(
+                                        f"MilestoneLoop[v5]: APPROVED after "
+                                        f"debugger rescue at iter {repair_iter}"
+                                    )
+                                    coverage_synth, code_review_synth = (
+                                        self._synthesize_reports(
+                                            milestone=milestone,
+                                            canonical=canonical, approved=True,
+                                        )
+                                    )
+                                    wall = time.time() - t0
+                                    return (
+                                        coverage_synth, code_review_synth,
+                                        result, repair_iter,
+                                        "\n".join(history_lines + [f"wall={wall:.1f}s"]),
+                                    )
+                                # Progress made but not approved — next iter.
+                                continue
+                        except Exception as e:
+                            self._log(
+                                f"MilestoneLoop[v5]: post-debug resolution "
+                                f"check raised: {type(e).__name__}: {e}"
+                            )
+
                 stall_counter += 1
                 if stall_counter >= self._stall_threshold:
                     self._log(
