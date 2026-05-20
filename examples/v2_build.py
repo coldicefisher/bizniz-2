@@ -1003,8 +1003,12 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
         smoke_recovery_stall_threshold=getattr(
             config, "debugger_stall_threshold", 5,
         ),
+        # repair_stall_threshold now has its own config key (default
+        # 3, down from 5 — see BiznizConfig.repair_stall_threshold).
+        # Fall back to debugger_stall_threshold for back-compat.
         repair_stall_threshold=getattr(
-            config, "debugger_stall_threshold", 5,
+            config, "repair_stall_threshold",
+            getattr(config, "debugger_stall_threshold", 3),
         ),
         document_recovery=document_recovery,
         document_recovery_stall_threshold=getattr(

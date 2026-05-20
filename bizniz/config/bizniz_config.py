@@ -121,6 +121,13 @@ class BiznizConfig(BaseModel):
     # issues in tonight's v3.1 run (BA-fix1-1: Haiku 7m + Opus 11m = 18m
     # vs Opus-direct ~11m, -39%). IMPLEMENT keeps the Haiku-default.
     use_v4_repair_tiers: List[str] = ["claude-cli:claude-opus-4-7"]
+    # Review/repair stall threshold (v3.1 outer loop + v5 future).
+    # Default 3 (was 5, tuned down 2026-05-19 after recipe_v4_v8 ran
+    # 3 iters with one regression and didn't recover). v5 canonical
+    # findings re-interprets "stall" as "no findings resolved this iter"
+    # — tighter signal — so 3 is the right default there too.
+    # Override via bizniz.yaml or env BIZNIZ_REPAIR_STALL_THRESHOLD.
+    repair_stall_threshold: int = 3
 
     @classmethod
     def from_yaml(cls, path: str) -> "BiznizConfig":
