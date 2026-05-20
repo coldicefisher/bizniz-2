@@ -75,11 +75,13 @@ class V4MilestoneCodeDispatcher:
         issue_store: Optional[IssueStateStore] = None,
         on_status: Optional[Callable[[str], None]] = None,
         only_service: Optional[str] = None,
-        # repair_planner_factory is optional — used only by ``repair()``
-        # to build fix-issues from coverage + code_review reports. v3.1
-        # injects this from the v2 ServicePlanner (which has a repair()
-        # method). When None, .repair() raises.
         repair_planner_factory: Optional[Callable[[ServiceDefinition], object]] = None,
+        # When set, the per-issue validator runs pytest --collect-only
+        # inside the target service's docker container instead of on
+        # the host. v4 Option 1 (2026-05-19). compose_path is the
+        # docker-compose.yml path; service_name comes from the
+        # ServiceDefinition.name at dispatch time.
+        compose_path: Optional[str] = None,
     ):
         self._planner_factory = planner_factory
         self._coder_tester_factory = coder_tester_factory
@@ -92,6 +94,7 @@ class V4MilestoneCodeDispatcher:
         self._on_status = on_status
         self._only_service = only_service
         self._repair_planner_factory = repair_planner_factory
+        self._compose_path = compose_path
 
     # ── IMPLEMENT phase ────────────────────────────────────────────
 
@@ -507,6 +510,8 @@ class V4MilestoneCodeDispatcher:
             agent=agent,
             workspace=workspace,
             on_status=self._on_status,
+            compose_path=self._compose_path,
+            service_name=service.name,
         )
 
         # Pre-compute per-issue seeded file slices + sibling summaries

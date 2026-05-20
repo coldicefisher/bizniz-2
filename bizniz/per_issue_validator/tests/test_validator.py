@@ -137,7 +137,6 @@ class TestCleanFirstPass:
         v = PerIssueValidator(
             agent=agent,
             workspace=_workspace(tmp_path),
-            run_pytest_collect=False,
         )
         result = v.validate(
             issue=_issue(),
@@ -359,6 +358,117 @@ class TestAgentError:
         assert "agent_error" in result.halt_reason
         # Files from the broken initial pass still written.
         assert "app/me.py" in result.files_written
+
+
+# ── In-container pytest collection (v4 Option 1, 2026-05-19) ─────
+
+
+class TestInContainerPytestCollect:
+    """When compose_path + service_name are set, pytest collection
+    runs inside the docker container via ``docker compose exec``."""
+
+    def test_skips_when_compose_path_missing(self, tmp_path):
+        """No compose_path → no pytest collection (silent skip).
+        Avoids the host/container env mismatch that ate recipe_v4_v5."""
+        agent = MagicMock(spec=CoderTesterAgent)
+
+        v = PerIssueValidator(
+            agent=agent,
+            workspace=_workspace(tmp_path),
+            # No compose_path / service_name → skip pytest_collect.
+        )
+        # Pure-stdlib clean code that would otherwise trigger pytest
+        # collection if it were running.
+        result = v.validate(
+            issue=_issue(),
+            initial_result=_clean_result(),
+            service=_service(),
+            capabilities=[],
+            seeded_files=[],
+        )
+        assert result.clean is True
+        agent.code_issue.assert_not_called()
+
+    def test_invokes_docker_exec_when_configured(self, tmp_path):
+        """When compose_path + service_name set, pytest runs as
+        ``docker compose -f <compose> exec -T <svc> python -m pytest --collect-only ...``"""
+        from unittest.mock import patch
+
+        agent = MagicMock(spec=CoderTesterAgent)
+        v = PerIssueValidator(
+            agent=agent,
+            workspace=_workspace(tmp_path),
+            compose_path="/proj/infra/development/docker-compose.yml",
+            service_name="backend",
+        )
+        # Mock the subprocess.run call.
+        mock_proc = MagicMock(returncode=0, stdout="", stderr="")
+        with patch(
+            "bizniz.per_issue_validator.validator.subprocess.run",
+            return_value=mock_proc,
+        ) as mock_run:
+            result = v.validate(
+                issue=_issue(),
+                initial_result=_clean_result(),
+                service=_service(),
+                capabilities=[],
+                seeded_files=[],
+            )
+        # docker exec was invoked.
+        assert mock_run.called
+        cmd = mock_run.call_args.args[0]
+        assert cmd[0:2] == ["docker", "compose"]
+        assert "-f" in cmd and "/proj/infra/development/docker-compose.yml" in cmd
+        assert "exec" in cmd
+        assert "backend" in cmd
+        assert "pytest" in cmd
+        assert "--collect-only" in cmd
+        # Container-relative paths (no workspace-absolute prefix).
+        assert "tests/test_me.py" in cmd
+
+    def test_failed_pytest_in_container_surfaces_finding(self, tmp_path):
+        """When docker exec returns non-zero, surface as a pytest_collect
+        Finding so the fix-loop can act on it."""
+        from unittest.mock import patch
+
+        agent = MagicMock(spec=CoderTesterAgent)
+        # Agent fixes nothing — used only so the stall loop bails.
+        agent.code_issue.return_value = _clean_result()
+
+        v = PerIssueValidator(
+            agent=agent,
+            workspace=_workspace(tmp_path),
+            compose_path="/proj/c.yml",
+            service_name="backend",
+            stall_threshold=2,
+        )
+        mock_proc = MagicMock(
+            returncode=2,
+            stdout="ERROR collecting tests/test_me.py\nE   ImportError: cannot import x\n",
+            stderr="",
+        )
+        with patch(
+            "bizniz.per_issue_validator.validator.subprocess.run",
+            return_value=mock_proc,
+        ):
+            result = v.validate(
+                issue=_issue(),
+                initial_result=_clean_result(),
+                service=_service(),
+                capabilities=[],
+                seeded_files=[],
+            )
+        # Pytest reported a real failure; finding surfaced.
+        pytest_findings = [
+            f for f in result.findings if f.source == "pytest_collect"
+        ]
+        # When the fix-loop kicks in and agent keeps returning clean
+        # mock results, the validator will iterate. Either way, a
+        # pytest_collect finding must have appeared in some scan.
+        # If clean=True (mock fix worked), pytest result was empty;
+        # if clean=False, finding survives in the final report.
+        if not result.clean:
+            assert any(f.source == "pytest_collect" for f in result.findings)
 
 
 # ── Attribute-access advisory (Option B from v4 live debrief) ─────

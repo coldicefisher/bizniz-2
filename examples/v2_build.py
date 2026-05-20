@@ -649,6 +649,8 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
             on_status=on_status,
             only_service=getattr(args, "retry_service", None),
             repair_planner_factory=v4_repair_planner_factory,
+            # Option 1: in-container pytest collection.
+            compose_path=str(compose_path) if compose_path else None,
         )
         on_status(
             f"IMPLEMENT + REPAIR phase: v4 dispatcher ENABLED (--use-v4). "

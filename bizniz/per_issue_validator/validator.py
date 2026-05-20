@@ -43,25 +43,28 @@ class PerIssueValidator:
         agent: CoderTesterAgent,
         workspace: BaseWorkspace,
         on_status: Optional[Callable[[str], None]] = None,
-        # Default OFF (2026-05-19 hotfix from recipe_v4_v5 live debrief).
-        # pytest --collect-only runs on the HOST and can't resolve
-        # workspace imports (the project's deps live in the docker
-        # container, not in the host's venv). Every per-issue
-        # collection attempt therefore fails with import errors that
-        # the agent CAN'T fix — sending it into a futile shuffle of
-        # type hints and decorators. The SMOKE phase runs tests
-        # in-container later in the pipeline; per-issue trusts
-        # symbol_validator (AST + import resolution against the
-        # workspace's declared deps) and skips pytest collection.
-        # Opt-in via True for perf-test sandboxes where the workspace
-        # deps are host-installed.
-        run_pytest_collect: bool = False,
+        # When ``compose_path`` + ``service_name`` are BOTH set,
+        # pytest collection runs INSIDE the target service's docker
+        # container via ``docker compose exec`` — where the workspace's
+        # declared deps are actually installed. Without those, pytest
+        # collection runs on the host and routinely false-fails because
+        # host venv ≠ container venv. The container-validation path
+        # is the v4 Option 1 fix (2026-05-19).
+        compose_path: Optional[str] = None,
+        service_name: Optional[str] = None,
+        # If True, attempt pytest collection. Effective only when the
+        # container args above are set (host-mode pytest collection is
+        # too noisy in practice). Default True — when the container
+        # config is missing, the scan just silently skips pytest.
+        run_pytest_collect: bool = True,
         stall_threshold: int = 3,
         hard_cap: int = 10,
     ):
         self._agent = agent
         self._workspace = workspace
         self._on_status = on_status
+        self._compose_path = compose_path
+        self._service_name = service_name
         self._run_pytest_collect = run_pytest_collect
         self._stall_threshold = stall_threshold
         self._hard_cap = hard_cap
@@ -274,49 +277,60 @@ class PerIssueValidator:
     def _pytest_collect(
         self, issue: Issue, files_written: List[str],
     ) -> List[Finding]:
-        """Run ``pytest --collect-only`` on the issue's test files to
-        catch import-level / fixture-level brokenness that
-        symbol_validator can't detect (e.g. missing fixtures, decorator
-        usage errors). Runs on host Python — same env the workspace
-        already uses for the rest of the pipeline.
+        """Run ``pytest --collect-only`` on the issue's test files.
+
+        When ``compose_path`` + ``service_name`` are configured,
+        collection runs INSIDE the target service's docker container
+        via ``docker compose exec`` — where the project's actual
+        Python deps are installed. This is the v4 Option 1 fix
+        (2026-05-19) for the host/container env mismatch that caused
+        recipe_v4_v5 to chase phantom import errors.
+
+        When the container args are missing, skip collection entirely
+        (host-mode pytest is unreliable for the same reason).
         """
         if (issue.language or "python").lower() != "python":
             return []
+        if not (self._compose_path and self._service_name):
+            return []  # container args missing → host mode disabled
+        # Container-relative paths: the docker compose service mounts
+        # the workspace at its WORKDIR (typically ``/workspace``).
+        # The issue's test_files are already workspace-relative, so
+        # they map 1:1 to container-visible paths.
         test_paths = [
-            self._workspace.path(p) for p in files_written
+            p for p in files_written
             if p in issue.test_files and p.endswith(".py")
         ]
         if not test_paths:
             return []
-        workspace_root = self._workspace.path(".")
+        cmd = [
+            "docker", "compose", "-f", self._compose_path,
+            "exec", "-T", self._service_name,
+            "python", "-m", "pytest", "--collect-only", "-q",
+            *test_paths,
+        ]
         try:
             proc = subprocess.run(
-                [
-                    "python", "-m", "pytest",
-                    "--collect-only", "-q",
-                    *[str(p) for p in test_paths],
-                ],
-                cwd=str(workspace_root),
-                capture_output=True,
-                text=True,
-                timeout=60,
+                cmd, capture_output=True, text=True, timeout=120,
             )
         except subprocess.TimeoutExpired:
             return [Finding(
                 source="pytest_collect",
-                message="pytest --collect-only timed out (>60s)",
+                message="pytest --collect-only timed out (>120s)",
             )]
         except FileNotFoundError:
-            # No pytest on the host PATH — skip silently.
+            # docker not on PATH — skip silently rather than crash.
             return []
         if proc.returncode == 0:
             return []
         tail = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        # Trim aggressive — keep last 2000 chars for context.
         tail = tail[-2000:]
         return [Finding(
             source="pytest_collect",
-            message=f"pytest --collect-only failed (exit {proc.returncode})",
+            message=(
+                f"pytest --collect-only failed in container "
+                f"`{self._service_name}` (exit {proc.returncode})"
+            ),
             raw=tail,
         )]
 
