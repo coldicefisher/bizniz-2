@@ -24,6 +24,22 @@ ONE seeded_files entry. Skeleton-shipped files do not need to be
 re-emitted (skeleton files exist already; we're seeding only the NEW
 files the milestone will add).
 
+NEVER seed manifest / config files. The following paths are
+SKELETON-OWNED and the orchestrator will refuse to overwrite them:
+
+  - ``requirements.txt``, ``pyproject.toml``, ``setup.py``, ``setup.cfg``
+  - ``package.json``, ``package-lock.json``, ``tsconfig.json``
+  - ``Dockerfile``, ``Dockerfile.test``
+  - ``vite.config.ts``, ``vite.config.js``
+
+If the milestone needs new runtime dependencies, the Coder agent
+declares them via ``requested_deps`` in its per-issue output and
+the orchestrator appends them deterministically. You (the planner)
+must not preempt that by seeding a summarized manifest — the
+summary almost always drops skeleton-shipped deps the validator
+relies on (pytest, asyncpg, etc.) and strands the validator with
+phantom "unresolved import" findings.
+
 Content rules — what goes IN the seeded file:
 - All imports, fully spelled. ``from app.models.recipe import Recipe``,
   not ``# TODO: import Recipe``.

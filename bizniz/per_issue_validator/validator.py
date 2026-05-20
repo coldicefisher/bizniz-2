@@ -54,6 +54,15 @@ class PerIssueValidator:
         # sequentially against the workspace. Default None → no
         # escalation; structured-only fix-loop.
         debugger: Optional["PerIssueDebugger"] = None,
+        # 2026-05-20 hotfix: when the fix-pass agent declares new
+        # ``requested_deps``, the orchestrator needs to apply them
+        # to the manifest AND rebuild the container so the next
+        # validator pass sees the import resolved. Without this,
+        # validator stalls forever flagging `import pytest`
+        # because pytest never lands in requirements.txt.
+        # Signature: callback(deps: List[RequestedDep]) -> None
+        # — implementation should APPEND to manifest + rebuild.
+        on_deps_changed: Optional[Callable] = None,
     ):
         self._agent = agent
         self._workspace = workspace
@@ -64,6 +73,7 @@ class PerIssueValidator:
         self._stall_threshold = stall_threshold
         self._hard_cap = hard_cap
         self._debugger = debugger
+        self._on_deps_changed = on_deps_changed
 
     def validate(
         self,
@@ -145,6 +155,23 @@ class PerIssueValidator:
                 if p not in files_written:
                     files_written.append(p)
             last_result = fix_result
+
+            # 2026-05-20 hotfix: if the fix-pass agent requested new
+            # deps, apply them + rebuild the container BEFORE the
+            # next scan. Otherwise the scanner sees stale
+            # requirements.txt and keeps flagging the same import.
+            if (
+                self._on_deps_changed is not None
+                and getattr(fix_result, "requested_deps", None)
+            ):
+                try:
+                    self._on_deps_changed(fix_result.requested_deps)
+                except Exception as e:
+                    self._log(
+                        f"PerIssueValidator[{issue.id}]: "
+                        f"on_deps_changed callback raised "
+                        f"{type(e).__name__}: {e} (continuing)"
+                    )
 
             findings = self._scan(issue, files_written)
             cur_count = len(findings)

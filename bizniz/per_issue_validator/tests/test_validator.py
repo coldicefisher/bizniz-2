@@ -694,3 +694,125 @@ class TestFindingsRenderer:
         out = _render_findings_for_prompt(findings)
         assert "ast" in out
         assert "and 5 more" in out
+
+
+# ── Fix C: requested_deps callback ─────────────────────────────────
+
+
+class TestOnDepsChangedCallback:
+    """2026-05-20 Fix C: when the fix-pass agent declares
+    ``requested_deps``, the validator MUST invoke the
+    on_deps_changed callback so the orchestrator can append to
+    requirements.txt + rebuild the container before the next scan.
+
+    Without this, an agent that legitimately needs a new dep (e.g.
+    pytest-asyncio) loops forever — the request lands in the
+    result object and is dropped on the floor."""
+
+    def _fix_result_with_deps(self) -> CoderTesterResult:
+        from bizniz.coder_tester.types import RequestedDep
+        return CoderTesterResult(
+            issue_id="BE-001",
+            filled_files=[
+                FilledFile(
+                    path="app/me.py",
+                    content="def me(): return 1\n",
+                    role="code",
+                ),
+                FilledFile(
+                    path="tests/test_me.py",
+                    content="def test_me(): assert True\n",
+                    role="test",
+                ),
+            ],
+            requested_deps=[
+                RequestedDep(name="pytest-asyncio", language="python"),
+            ],
+        )
+
+    def test_callback_fires_when_fix_result_has_deps(self, tmp_path):
+        agent = MagicMock(spec=CoderTesterAgent)
+        agent.code_issue.return_value = self._fix_result_with_deps()
+
+        on_deps = MagicMock()
+        v = PerIssueValidator(
+            agent=agent,
+            workspace=_workspace(tmp_path),
+            run_pytest_collect=False,
+            on_deps_changed=on_deps,
+        )
+        v.validate(
+            issue=_issue(),
+            initial_result=_broken_imports_result(),
+            service=_service(),
+            capabilities=[],
+            seeded_files=[],
+        )
+        # Callback fired with the requested_deps list.
+        on_deps.assert_called_once()
+        deps_arg = on_deps.call_args.args[0]
+        assert len(deps_arg) == 1
+        assert deps_arg[0].name == "pytest-asyncio"
+
+    def test_no_callback_when_fix_result_has_no_deps(self, tmp_path):
+        agent = MagicMock(spec=CoderTesterAgent)
+        # Fix returns clean code with NO requested_deps.
+        agent.code_issue.return_value = _clean_result()
+
+        on_deps = MagicMock()
+        v = PerIssueValidator(
+            agent=agent,
+            workspace=_workspace(tmp_path),
+            run_pytest_collect=False,
+            on_deps_changed=on_deps,
+        )
+        v.validate(
+            issue=_issue(),
+            initial_result=_broken_imports_result(),
+            service=_service(),
+            capabilities=[],
+            seeded_files=[],
+        )
+        on_deps.assert_not_called()
+
+    def test_no_callback_when_not_wired(self, tmp_path):
+        # Backwards compat — old callers don't pass on_deps_changed.
+        agent = MagicMock(spec=CoderTesterAgent)
+        agent.code_issue.return_value = self._fix_result_with_deps()
+
+        v = PerIssueValidator(
+            agent=agent,
+            workspace=_workspace(tmp_path),
+            run_pytest_collect=False,
+        )
+        # Should not raise.
+        v.validate(
+            issue=_issue(),
+            initial_result=_broken_imports_result(),
+            service=_service(),
+            capabilities=[],
+            seeded_files=[],
+        )
+
+    def test_callback_exception_does_not_break_loop(self, tmp_path):
+        agent = MagicMock(spec=CoderTesterAgent)
+        agent.code_issue.return_value = self._fix_result_with_deps()
+
+        on_deps = MagicMock(side_effect=RuntimeError("rebuild blew up"))
+        v = PerIssueValidator(
+            agent=agent,
+            workspace=_workspace(tmp_path),
+            run_pytest_collect=False,
+            on_deps_changed=on_deps,
+        )
+        # Loop continues despite callback raising — the fix-pass
+        # output (clean code) lets validate complete.
+        result = v.validate(
+            issue=_issue(),
+            initial_result=_broken_imports_result(),
+            service=_service(),
+            capabilities=[],
+            seeded_files=[],
+        )
+        assert result.clean is True
+        on_deps.assert_called_once()

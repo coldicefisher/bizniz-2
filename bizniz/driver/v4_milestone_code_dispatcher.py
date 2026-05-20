@@ -886,6 +886,42 @@ class V4MilestoneCodeDispatcher:
         # are up by then). v5 hotfix 2026-05-20.
         validator_compose = self._compose_path if use_repair_tier else None
         validator_service = service.name if use_repair_tier else None
+
+        # 2026-05-20 hotfix Fix C: when the validator's fix-loop
+        # gets a fix_result with requested_deps, apply them to the
+        # manifest + rebuild the container BEFORE the next scan.
+        # Without this, the agent legitimately requests a missing
+        # dep (e.g. pytest-asyncio) every iter, the request lands
+        # in the result object, and is dropped on the floor —
+        # validator stalls forever on the same import finding.
+        ws_root_for_deps_obj = getattr(workspace, "root", None)
+        ws_root_for_deps = (
+            Path(str(ws_root_for_deps_obj))
+            if ws_root_for_deps_obj is not None else None
+        )
+
+        def _on_deps_changed_for_service(deps):
+            if not deps or ws_root_for_deps is None:
+                return
+            before = hash_trigger_files(ws_root_for_deps)
+            _apply_requested_deps(
+                deps, ws_root_for_deps, on_status=self._on_status,
+            )
+            if self._compose_path:
+                rebuild = maybe_rebuild(
+                    compose_path=self._compose_path,
+                    service_name=service.name,
+                    workspace_root=ws_root_for_deps,
+                    before_hashes=before,
+                    on_status=self._on_status,
+                )
+                if rebuild.triggered and not rebuild.success:
+                    self._log(
+                        f"V4 fix-loop deps: [{service.name}] container "
+                        f"rebuild FAILED ({rebuild.mode}): "
+                        f"{rebuild.error_tail[:200]}"
+                    )
+
         validator = PerIssueValidator(
             agent=agent,
             workspace=workspace,
@@ -893,6 +929,7 @@ class V4MilestoneCodeDispatcher:
             compose_path=validator_compose,
             service_name=validator_service,
             debugger=debugger,
+            on_deps_changed=_on_deps_changed_for_service,
         )
 
         # Pre-compute per-issue seeded file slices + sibling summaries
@@ -1109,6 +1146,26 @@ class V4MilestoneCodeDispatcher:
 
     # ── Helpers ──────────────────────────────────────────────────
 
+    # Skeleton-shipped manifest files. ServicePlanner sometimes
+    # hallucinates these into seeded_files (against the prompt) and
+    # stomps the skeleton's real deps, which then strands the
+    # validator (e.g. import pytest unresolved because pytest was
+    # in the skeleton's requirements.txt but the seeded summary
+    # dropped it). 2026-05-20 hotfix: always skip these paths.
+    _PROTECTED_MANIFEST_FILES = frozenset({
+        "requirements.txt",
+        "package.json",
+        "package-lock.json",
+        "Dockerfile",
+        "Dockerfile.test",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "tsconfig.json",
+        "vite.config.ts",
+        "vite.config.js",
+    })
+
     def _materialize_seed(self, service, seeded_files) -> None:
         if not seeded_files:
             return
@@ -1119,10 +1176,26 @@ class V4MilestoneCodeDispatcher:
                 return
             ws_path = Path(str(ws_root))
             ws_path.mkdir(parents=True, exist_ok=True)
+            skipped: List[str] = []
             for sf in seeded_files:
+                # Defense in depth — match by basename so the planner
+                # can't sneak around with "./requirements.txt".
+                basename = Path(sf.path).name
+                if basename in self._PROTECTED_MANIFEST_FILES:
+                    skipped.append(sf.path)
+                    continue
                 dest = ws_path / sf.path
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(sf.content, encoding="utf-8")
+            if skipped:
+                self._log(
+                    f"V4MilestoneCodeDispatcher: SKIPPED seeding "
+                    f"{len(skipped)} manifest file(s) — these are "
+                    f"skeleton-shipped and must not be overwritten: "
+                    f"{skipped}. For dep changes the agent should "
+                    f"emit requested_deps; the dispatcher applies "
+                    f"them with deterministic append."
+                )
         except Exception as e:
             self._log(
                 f"V4MilestoneCodeDispatcher: seed materialization "

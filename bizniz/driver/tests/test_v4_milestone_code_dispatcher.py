@@ -451,3 +451,100 @@ class TestRepairPath:
         assert result.completed_issue_ids == []
         assert result.deferred_issue_ids == []
         repair_agent.code_issue.assert_not_called()
+
+
+# ── _materialize_seed manifest protection ──────────────────────────
+
+
+class TestMaterializeSeedManifestProtection:
+    """2026-05-20 hotfix: ServicePlanner sometimes emits manifest
+    files (requirements.txt, package.json, Dockerfile) in
+    seeded_files. Materializing them would stomp the skeleton's
+    real deps (e.g. losing pytest, asyncpg), stranding the
+    validator with phantom 'unresolved import' findings the agent
+    can't fix because the deps aren't even visible."""
+
+    def _dispatcher(self, tmp_path):
+        return V4MilestoneCodeDispatcher(
+            planner_factory=lambda _s: MagicMock(),
+            coder_tester_factory=lambda _s: MagicMock(),
+            workspace_for_service=_ws_factory(tmp_path),
+        )
+
+    def test_requirements_txt_is_not_overwritten(self, tmp_path):
+        # Skeleton ships a real requirements.txt
+        ws = tmp_path / "backend"
+        ws.mkdir(parents=True)
+        original = (
+            "fastapi==0.115.6\n"
+            "pytest==8.3.0\n"
+            "asyncpg==0.30.0\n"
+        )
+        (ws / "requirements.txt").write_text(original)
+
+        # Planner hallucinates a summary requirements.txt.
+        bad_seed = SeededFile(
+            path="requirements.txt",
+            content="# truncated summary\nhttpx>=0.27\n",
+            rationale="auth deps",
+        )
+        good_seed = SeededFile(
+            path="app/api/routes/auth.py",
+            content="raise NotImplementedError\n",
+            rationale="",
+        )
+
+        service = _service()
+        d = self._dispatcher(tmp_path)
+        d._materialize_seed(service, [bad_seed, good_seed])
+
+        # requirements.txt is unchanged.
+        assert (ws / "requirements.txt").read_text() == original
+        # The real code file landed.
+        assert (ws / "app/api/routes/auth.py").exists()
+
+    def test_protected_set_covers_common_manifests(self, tmp_path):
+        ws = tmp_path / "backend"
+        ws.mkdir(parents=True)
+        (ws / "package.json").write_text('{"name":"orig"}\n')
+        (ws / "Dockerfile").write_text("FROM python:3.12\n")
+        (ws / "pyproject.toml").write_text("[project]\nname='x'\n")
+
+        seeds = [
+            SeededFile(path="package.json", content="{}", rationale=""),
+            SeededFile(path="Dockerfile", content="FROM scratch", rationale=""),
+            SeededFile(path="pyproject.toml", content="", rationale=""),
+        ]
+        d = self._dispatcher(tmp_path)
+        d._materialize_seed(_service(), seeds)
+
+        # None were overwritten.
+        assert (ws / "package.json").read_text() == '{"name":"orig"}\n'
+        assert (ws / "Dockerfile").read_text() == "FROM python:3.12\n"
+        assert (ws / "pyproject.toml").read_text() == "[project]\nname='x'\n"
+
+    def test_subdirectory_manifest_still_protected_by_basename(self, tmp_path):
+        # Even nested paths get the protection — basename match.
+        ws = tmp_path / "backend"
+        (ws / "subpkg").mkdir(parents=True)
+        seed = SeededFile(
+            path="subpkg/requirements.txt",
+            content="evil\n",
+            rationale="",
+        )
+        d = self._dispatcher(tmp_path)
+        d._materialize_seed(_service(), [seed])
+        # File wasn't created.
+        assert not (ws / "subpkg/requirements.txt").exists()
+
+    def test_non_manifest_files_still_written(self, tmp_path):
+        ws = tmp_path / "backend"
+        ws.mkdir(parents=True)
+        seed = SeededFile(
+            path="app/auth.py",
+            content="raise NotImplementedError\n",
+            rationale="",
+        )
+        d = self._dispatcher(tmp_path)
+        d._materialize_seed(_service(), [seed])
+        assert (ws / "app/auth.py").read_text() == "raise NotImplementedError\n"
