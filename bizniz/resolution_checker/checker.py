@@ -87,10 +87,18 @@ Your input is:
     iter).
 
 Your job is to examine the CURRENT code and judge each finding:
-  - `resolved` — the defect is no longer present
-  - `still_present` — the defect is still in the code
-  - `regressed` — the code now has the defect again after being fixed
-    (rare; only relevant when iter > 2)
+  - `resolved` — the behavior the finding asked for is observable
+    in the current code, OR the defect the finding flagged is no
+    longer present. You should mark resolved when you can point to
+    a specific function, class, test, or code path that satisfies
+    the finding.
+  - `still_present` — you searched the code and can NOT find
+    evidence of the spec'd behavior, OR the defect the finding
+    flagged is clearly still in the code (e.g., the line of code
+    or pattern flagged is unchanged from what the finding
+    described).
+  - `regressed` — the code now has the defect again after being
+    fixed in a prior iter (only relevant when iter > 2).
 
 HARD CONSTRAINTS:
 
@@ -103,13 +111,35 @@ HARD CONSTRAINTS:
    canonical id from the input — copy it verbatim. Don't paraphrase
    or shorten.
 
-3. **Evidence is one line.** A brief reason — "function exists at
-   app/me.py:14" or "still throws NotImplementedError at line 22".
+3. **Evidence is one line.** A brief reason — "function `me()`
+   at app/api/routes/me.py:14 satisfies the /me endpoint scenario"
+   or "still throws NotImplementedError at app/auth.py:22".
    Not a paragraph.
 
-4. **Be conservative on `resolved`.** If you're not sure the defect
-   is gone, prefer `still_present`. False-positive `resolved`
-   verdicts make the loop falsely declare success.
+4. **Verdict bias is BALANCED, not conservative.** Earlier versions
+   of this prompt told you to "prefer still_present when unsure" —
+   that pathologically biased the loop into never converging. The
+   correct standard is now:
+
+   - When the canonical finding asks for a SCENARIO (e.g. "missing
+     scenario: login returns 401 for bad password"), mark
+     `resolved` if a test or code path covers that case. Don't
+     demand the test name or assertion text match verbatim — any
+     equivalent coverage counts.
+
+   - When the canonical finding flags a SPECIFIC DEFECT (e.g.
+     "flagged_symbol: import jwt at line 5"), check if the offending
+     line/pattern is gone or replaced. If it is, mark `resolved`.
+
+   - When you CAN'T find the file the finding refers to, default
+     to `still_present` only if you have reason to believe the
+     file/symbol was supposed to exist. If the finding refers to a
+     capability that the visible code clearly delivers via a
+     different path, mark `resolved`.
+
+   The cost of a false `resolved` (loop ships prematurely) is
+   roughly equal to the cost of a false `still_present` (loop
+   stalls + halts). Treat them symmetrically.
 
 5. **Stay structured.** Emit ONE JSON object matching the schema.
    No prose around it.
@@ -270,8 +300,10 @@ class ResolutionChecker:
         sections.append(
             "## Your job\n\n"
             "Emit `{resolutions: [{finding_id, status, evidence}, ...]}`. "
-            "One entry per finding above. Be conservative on `resolved` "
-            "— if unsure, return `still_present`."
+            "One entry per finding above. Verdict is BALANCED (not "
+            "biased toward still_present). Mark `resolved` when the "
+            "spec'd behavior is observable; mark `still_present` "
+            "when the defect is clearly still in the code."
         )
         return "\n".join(sections)
 
