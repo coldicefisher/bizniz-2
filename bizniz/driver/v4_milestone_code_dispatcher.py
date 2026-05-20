@@ -753,12 +753,20 @@ class V4MilestoneCodeDispatcher:
                 )
                 debugger = None
 
+        # pytest_collect needs containers RUNNING. Smoke phase brings
+        # them up AFTER IMPLEMENT — so at IMPLEMENT time, exec'ing
+        # ``docker compose exec backend pytest`` fails immediately and
+        # the agent burns iters chasing phantom env errors. Only pass
+        # compose/service to the validator when we're in REPAIR (containers
+        # are up by then). v5 hotfix 2026-05-20.
+        validator_compose = self._compose_path if use_repair_tier else None
+        validator_service = service.name if use_repair_tier else None
         validator = PerIssueValidator(
             agent=agent,
             workspace=workspace,
             on_status=self._on_status,
-            compose_path=self._compose_path,
-            service_name=service.name,
+            compose_path=validator_compose,
+            service_name=validator_service,
             debugger=debugger,
         )
 
