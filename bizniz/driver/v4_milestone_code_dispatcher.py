@@ -256,17 +256,57 @@ class V4MilestoneCodeDispatcher:
                     f"(iter {repair_iteration})"
                 )
                 t0 = time.time()
+                # Pull prior issues + dispositions from the issue store
+                # when available (production ServicePlanner.plan_repair
+                # uses them as context). Empty when no store wired.
+                prior_issues: list = []
+                prior_dispositions: dict = {}
+                if active_store is not None:
+                    try:
+                        prior_issues = list(
+                            active_store.list_issues_for_service(service.name) or []
+                        )
+                        prior_dispositions = dict(
+                            active_store.dispositions_for_service(service.name) or {}
+                        ) if hasattr(active_store, "dispositions_for_service") else {}
+                    except Exception:
+                        prior_issues = []
+                        prior_dispositions = {}
                 try:
-                    repair_plan = repair_planner.repair(
-                        architecture=architecture,
-                        enriched_spec=enriched_spec,
-                        service=service,
-                        coverage_report=coverage_report,
-                        code_review_report=code_review_report,
-                        repair_iteration=repair_iteration,
-                        skeleton_md=skeleton_md,
-                        auth_contract=auth_contract,
-                    )
+                    # Production ServicePlanner uses ``plan_repair``; the
+                    # scaffolded variant doesn't have a repair() method
+                    # yet so we route through the production planner
+                    # that v2_build wires into ``repair_planner_factory``.
+                    if hasattr(repair_planner, "plan_repair"):
+                        fix_issues_raw = repair_planner.plan_repair(
+                            architecture=architecture,
+                            enriched_spec=enriched_spec,
+                            service=service,
+                            prior_issues=prior_issues,
+                            prior_dispositions=prior_dispositions,
+                            coverage_report=coverage_report,
+                            code_review_report=code_review_report,
+                            repair_iteration=repair_iteration,
+                            skeleton_md=skeleton_md,
+                            auth_contract=auth_contract,
+                        )
+                    else:
+                        # Fallback: object with a .repair() that returns
+                        # something with .issues (scaffolded variant, if
+                        # one ever lands).
+                        result_obj = repair_planner.repair(
+                            architecture=architecture,
+                            enriched_spec=enriched_spec,
+                            service=service,
+                            coverage_report=coverage_report,
+                            code_review_report=code_review_report,
+                            repair_iteration=repair_iteration,
+                            skeleton_md=skeleton_md,
+                            auth_contract=auth_contract,
+                        )
+                        fix_issues_raw = list(
+                            getattr(result_obj, "issues", []) or []
+                        )
                 except Exception as e:
                     self._log(
                         f"V4 repair: `{service.name}` planner failed: "
@@ -278,11 +318,8 @@ class V4MilestoneCodeDispatcher:
                     )
                     continue
 
-                # repair_plan from production ServicePlanner has .issues
-                # (list of Issues) and may have .seeded_files if it's
-                # the scaffolded variant — we tolerate both.
-                fix_issues = list(getattr(repair_plan, "issues", []) or [])
-                seeded_files = list(getattr(repair_plan, "seeded_files", []) or [])
+                fix_issues = list(fix_issues_raw or [])
+                seeded_files: list = []  # plan_repair doesn't emit seeds
                 if not fix_issues:
                     self._log(
                         f"V4 repair: `{service.name}` planner emitted 0 "

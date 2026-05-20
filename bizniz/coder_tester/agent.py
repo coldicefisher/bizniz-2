@@ -156,12 +156,45 @@ class CoderTesterAgent:
 
         filled: List[FilledFile] = []
         for it in items:
+            # Salvage common Haiku schema misses BEFORE Pydantic
+            # validates. The strict JSON-schema path occasionally
+            # produces ``role=null`` or omits the field on bigger
+            # backend issues (observed on recipe_v4_v6 backend run,
+            # 8/9 issues affected). Infer role from path extension
+            # when missing/null; default the path to a salvageable
+            # value if absolutely necessary.
+            it = dict(it) if isinstance(it, dict) else it
+            if isinstance(it, dict):
+                if it.get("role") in (None, ""):
+                    path_str = it.get("path", "") or ""
+                    looks_like_test = (
+                        "/test_" in path_str
+                        or path_str.startswith("test_")
+                        or "/tests/" in path_str
+                        or path_str.endswith("_test.py")
+                        or path_str.endswith(".test.tsx")
+                        or path_str.endswith(".test.ts")
+                    )
+                    it["role"] = "test" if looks_like_test else "code"
             try:
                 filled.append(FilledFile(**it))
             except Exception as e:
+                # Capture the rich Pydantic ValidationError details
+                # (errors() lists each field problem). Without this
+                # the message is just "1 validation error for FilledFile"
+                # with no indication of which field failed.
+                detail = ""
+                errors = getattr(e, "errors", None)
+                if callable(errors):
+                    try:
+                        detail = f" — fields: {errors()}"
+                    except Exception:
+                        pass
+                keys = list(it.keys()) if isinstance(it, dict) else "(non-dict)"
                 raise CoderTesterError(
                     f"CoderTesterAgent[{issue.id}]: filled_files entry "
-                    f"failed validation: {type(e).__name__}: {e}; item: {it}"
+                    f"failed validation: {type(e).__name__}: {e}{detail}; "
+                    f"item keys: {keys}"
                 )
 
         # Path-contract gate: every produced path must be in the

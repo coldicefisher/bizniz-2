@@ -255,6 +255,92 @@ class TestNotes:
         assert any("Skipped foo handler" in s for s in statuses)
 
 
+# ── Schema salvage (Haiku occasionally drops role) ────────────────
+
+
+class TestSchemaSalvage:
+    """Live debrief 2026-05-19 recipe_v4_v6: Haiku produced
+    ``role: null`` or omitted ``role`` on backend issues, crashing 8/9
+    issues in the run. Agent now infers role from path extension as a
+    salvage step before Pydantic validation."""
+
+    def test_null_role_inferred_from_test_path(self):
+        # Paths must match the issue's declared target_files/test_files
+        # so the path-contract gate doesn't reject before salvage matters.
+        out = {
+            "issue_id": "BE-001",
+            "filled_files": [
+                {"path": "tests/test_me.py", "content": "x", "role": None},
+                {"path": "app/api/routes/me.py", "content": "y", "role": None},
+            ],
+            "notes": "",
+        }
+        with patch(
+            "bizniz.coder_tester.agent.call_with_retry",
+            return_value=out,
+        ):
+            agent = CoderTesterAgent(client=MagicMock(spec=BaseAIClient))
+            result = agent.code_issue(
+                issue=_issue(),
+                service=_service(),
+                seeded_files=[],
+                capabilities=[],
+            )
+        by_path = {f.path: f.role for f in result.filled_files}
+        assert by_path["tests/test_me.py"] == "test"
+        assert by_path["app/api/routes/me.py"] == "code"
+
+    def test_missing_role_field_inferred(self):
+        out = {
+            "issue_id": "BE-001",
+            "filled_files": [
+                {"path": "tests/test_me.py", "content": "x"},
+                {"path": "app/api/routes/me.py", "content": "y"},
+            ],
+            "notes": "",
+        }
+        with patch(
+            "bizniz.coder_tester.agent.call_with_retry",
+            return_value=out,
+        ):
+            agent = CoderTesterAgent(client=MagicMock(spec=BaseAIClient))
+            result = agent.code_issue(
+                issue=_issue(),
+                service=_service(),
+                seeded_files=[],
+                capabilities=[],
+            )
+        roles = {f.role for f in result.filled_files}
+        assert roles == {"code", "test"}
+
+    def test_validation_error_includes_field_detail(self):
+        # path missing entirely — salvage can't help. Error message
+        # must surface the actual Pydantic field detail (used to be
+        # truncated to "1 validation error for FilledFile").
+        bad = {
+            "issue_id": "BE-001",
+            "filled_files": [{"content": "x", "role": "code"}],
+            "notes": "",
+        }
+        with patch(
+            "bizniz.coder_tester.agent.call_with_retry",
+            return_value=bad,
+        ):
+            agent = CoderTesterAgent(client=MagicMock(spec=BaseAIClient))
+            with pytest.raises(CoderTesterError) as exc_info:
+                agent.code_issue(
+                    issue=_issue(),
+                    service=_service(),
+                    seeded_files=[],
+                    capabilities=[],
+                )
+        msg = str(exc_info.value)
+        # Either pydantic surfaces "path" in errors() or the item-keys
+        # list shows path is missing — either way the user knows which
+        # field broke.
+        assert "path" in msg or "item keys" in msg
+
+
 # ── Prompt building ────────────────────────────────────────────────
 
 

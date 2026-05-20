@@ -276,14 +276,12 @@ class TestRepairPath:
             )
 
     def test_repair_dispatches_fix_issues_via_repair_factory(self, tmp_path):
-        # Repair planner returns 1 fix-issue.
+        # Repair planner returns 1 fix-issue via plan_repair (production
+        # ServicePlanner contract: returns List[Issue] directly).
         fix_issue = _issue("BE-fix1")
-        repair_plan = MagicMock()
-        repair_plan.issues = [fix_issue]
-        repair_plan.seeded_files = []
 
         repair_planner = MagicMock()
-        repair_planner.repair.return_value = repair_plan
+        repair_planner.plan_repair.return_value = [fix_issue]
 
         # Repair agent factory tracked separately from implement.
         implement_agent = MagicMock()
@@ -323,12 +321,8 @@ class TestRepairPath:
 
     def test_repair_planner_emits_zero_issues_logs_warning(self, tmp_path):
         # Empty repair plan → service skipped, no fix-issues dispatched.
-        empty_plan = MagicMock()
-        empty_plan.issues = []
-        empty_plan.seeded_files = []
-
         repair_planner = MagicMock()
-        repair_planner.repair.return_value = empty_plan
+        repair_planner.plan_repair.return_value = []
         repair_agent = MagicMock()
 
         dispatcher = V4MilestoneCodeDispatcher(

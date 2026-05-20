@@ -626,12 +626,18 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
                 client=v4_repair_client, on_status=on_status,
             )
 
-        # Repair planner: reuse the production ServicePlanner (which
-        # has a repair() method that takes coverage + code_review and
-        # returns fix-issues). v2_dispatcher already has the service
-        # planner internally; we expose it as a factory here.
+        # Repair planner: production ServicePlanner (has plan_repair()
+        # which takes coverage + code_review + prior_issues and emits
+        # fix-issues). We instantiate per-service so each gets its own
+        # client (status logging, cost attribution).
+        from bizniz.service_planner.agent import ServicePlanner as V4RepairPlanner
+
         def v4_repair_planner_factory(service):
-            return v2_dispatcher._service_planner_for(service) if hasattr(v2_dispatcher, "_service_planner_for") else v2_dispatcher
+            rp_client = _client_for(
+                getattr(config, "service_planner_model", config.engineer_model),
+                f"service_planner_v4_repair:{service.name}",
+            )
+            return V4RepairPlanner(client=rp_client, on_status=on_status)
 
         code_dispatcher = V4MilestoneCodeDispatcher(
             planner_factory=v4_planner_factory,
