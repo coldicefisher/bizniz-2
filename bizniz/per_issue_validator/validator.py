@@ -43,7 +43,19 @@ class PerIssueValidator:
         agent: CoderTesterAgent,
         workspace: BaseWorkspace,
         on_status: Optional[Callable[[str], None]] = None,
-        run_pytest_collect: bool = True,
+        # Default OFF (2026-05-19 hotfix from recipe_v4_v5 live debrief).
+        # pytest --collect-only runs on the HOST and can't resolve
+        # workspace imports (the project's deps live in the docker
+        # container, not in the host's venv). Every per-issue
+        # collection attempt therefore fails with import errors that
+        # the agent CAN'T fix — sending it into a futile shuffle of
+        # type hints and decorators. The SMOKE phase runs tests
+        # in-container later in the pipeline; per-issue trusts
+        # symbol_validator (AST + import resolution against the
+        # workspace's declared deps) and skips pytest collection.
+        # Opt-in via True for perf-test sandboxes where the workspace
+        # deps are host-installed.
+        run_pytest_collect: bool = False,
         stall_threshold: int = 3,
         hard_cap: int = 10,
     ):
