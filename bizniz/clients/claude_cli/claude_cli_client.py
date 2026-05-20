@@ -131,6 +131,7 @@ class ClaudeCliClient(BaseAIClient):
         temperature: float = 0.0,
         cached_content_name: Optional[str] = None,
         cache_prefix_count: int = 0,
+        resume_session_id: Optional[str] = None,
         **kwargs,
     ) -> Tuple[str, str, List]:
         """Invoke ``claude --print`` once. Returns ``(text, session_id,
@@ -181,6 +182,14 @@ class ClaudeCliClient(BaseAIClient):
             self._command, "--print",
             "--output-format=json",
         ]
+        # v4 Option 2 (2026-05-19): when a prior session_id is passed,
+        # resume that session instead of starting fresh. The CLI's
+        # server-side prompt cache stays warm so the agent doesn't
+        # re-tokenize the system + scaffold context on every fix-pass.
+        # Big token win on iterative fix-loops; no-op when resume_session_id
+        # is None (the default new-session path).
+        if resume_session_id:
+            cmd.extend(["--resume", resume_session_id])
         if self._fallback_model:
             # ``--fallback-model`` auto-switches to this model when the
             # default is overloaded. The user opts into accepting

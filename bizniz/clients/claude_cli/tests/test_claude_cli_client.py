@@ -96,6 +96,36 @@ class TestGetText:
         for tool in ("Edit", "Write", "Bash"):
             assert tool in disallowed, f"{tool} must be in --disallowedTools"
 
+    def test_resume_session_id_adds_resume_flag(self):
+        """v4 Option 2 (2026-05-19): when ``resume_session_id`` is
+        passed, the CLI command includes ``--resume <id>`` so the
+        prompt cache stays warm across fix-passes."""
+        c = self._client()
+        with patch(
+            "bizniz.clients.claude_cli.claude_cli_client.subprocess.run",
+            return_value=_fake_proc(),
+        ) as m:
+            c.get_text(
+                messages="continuation",
+                use_message_history=False,
+                resume_session_id="prior-sess-abc",
+            )
+        argv = m.call_args.args[0]
+        assert "--resume" in argv
+        idx = argv.index("--resume")
+        assert argv[idx + 1] == "prior-sess-abc"
+
+    def test_no_resume_flag_when_session_id_none(self):
+        """Default path: no ``--resume`` flag → fresh session."""
+        c = self._client()
+        with patch(
+            "bizniz.clients.claude_cli.claude_cli_client.subprocess.run",
+            return_value=_fake_proc(),
+        ) as m:
+            c.get_text(messages="hi", use_message_history=False)
+        argv = m.call_args.args[0]
+        assert "--resume" not in argv
+
     def test_returns_result_text_and_session_id(self):
         c = self._client()
         with patch(
