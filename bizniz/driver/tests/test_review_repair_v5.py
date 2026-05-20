@@ -266,3 +266,115 @@ class TestRegressionRollback:
         assert project_git.rollback_repair_iter.called
         # Snapshot was taken at least once before each repair iter.
         assert project_git.snapshot_for_repair_iter.call_count >= 1
+
+
+class TestCollectFilesForCheck:
+    """2026-05-20 regression: the prior collector only included
+    paths with a ``file_hint``. QE coverage findings (the bulk of
+    findings) reference a ``capability_id``, NOT a file — so the
+    checker got zero files and judged every finding still_present.
+
+    The fix wires a ``discover_workspace_files`` closure so the
+    checker sees the actual workspace code/tests."""
+
+    def _canonical_with_no_file_hints(self):
+        return CanonicalReport(
+            milestone_name="M1",
+            iter_frozen=1,
+            findings=[
+                CanonicalFinding(
+                    id="qe:cap_a:first_login",
+                    source="quality_engineer",
+                    priority="critical",
+                    summary="missing scenario: first_login",
+                    capability_id="cap_a",
+                    file_hint=None,
+                    status="initial",
+                ),
+            ],
+        )
+
+    def test_includes_discovered_files_when_no_file_hints(self):
+        snapshot = MagicMock(
+            return_value={"app/api/routes/me.py": "def me(): ..."}
+        )
+        discover = MagicMock(
+            return_value=["app/api/routes/me.py", "tests/test_me.py"]
+        )
+        loop = ReviewRepairV5Loop(
+            phase_review_parallel=MagicMock(),
+            repair_dispatcher=MagicMock(),
+            qe_resolution_checker=MagicMock(),
+            cr_resolution_checker=MagicMock(),
+            snapshot_workspace_files=snapshot,
+            discover_workspace_files=discover,
+        )
+        files = loop._collect_files_for_check(
+            self._canonical_with_no_file_hints()
+        )
+        discover.assert_called_once()
+        # snapshot was asked for the discovered paths, sorted.
+        called_paths = snapshot.call_args.args[0]
+        assert "app/api/routes/me.py" in called_paths
+        assert "tests/test_me.py" in called_paths
+        # Returned content threads through.
+        assert "app/api/routes/me.py" in files
+
+    def test_caps_at_60_paths(self):
+        many = [f"app/file_{i}.py" for i in range(200)]
+        snapshot = MagicMock(return_value={})
+        discover = MagicMock(return_value=many)
+        loop = ReviewRepairV5Loop(
+            phase_review_parallel=MagicMock(),
+            repair_dispatcher=MagicMock(),
+            qe_resolution_checker=MagicMock(),
+            cr_resolution_checker=MagicMock(),
+            snapshot_workspace_files=snapshot,
+            discover_workspace_files=discover,
+        )
+        loop._collect_files_for_check(
+            self._canonical_with_no_file_hints()
+        )
+        called_paths = snapshot.call_args.args[0]
+        assert len(called_paths) == 60
+
+    def test_empty_when_no_snapshot_closure(self):
+        loop = ReviewRepairV5Loop(
+            phase_review_parallel=MagicMock(),
+            repair_dispatcher=MagicMock(),
+            qe_resolution_checker=MagicMock(),
+            cr_resolution_checker=MagicMock(),
+            snapshot_workspace_files=None,
+        )
+        assert loop._collect_files_for_check(
+            self._canonical_with_no_file_hints()
+        ) == {}
+
+    def test_old_path_still_collects_file_hints_when_no_discoverer(self):
+        snapshot = MagicMock(
+            return_value={"app/auth.py": "import jwt\n"}
+        )
+        canonical = CanonicalReport(
+            milestone_name="M1",
+            iter_frozen=1,
+            findings=[
+                CanonicalFinding(
+                    id="cr:flagged_symbol:1",
+                    source="code_reviewer",
+                    priority="critical",
+                    summary="bad import",
+                    file_hint="app/auth.py",
+                    status="initial",
+                ),
+            ],
+        )
+        loop = ReviewRepairV5Loop(
+            phase_review_parallel=MagicMock(),
+            repair_dispatcher=MagicMock(),
+            qe_resolution_checker=MagicMock(),
+            cr_resolution_checker=MagicMock(),
+            snapshot_workspace_files=snapshot,
+            discover_workspace_files=None,
+        )
+        files = loop._collect_files_for_check(canonical)
+        assert "app/auth.py" in files

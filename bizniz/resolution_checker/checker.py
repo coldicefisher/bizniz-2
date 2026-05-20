@@ -197,8 +197,17 @@ class ResolutionChecker:
 
         self._log(
             f"ResolutionChecker[{source_filter or 'all'}]: checking "
-            f"{len(findings_to_check)} finding(s) at iter {iter_idx}"
+            f"{len(findings_to_check)} finding(s) at iter {iter_idx} "
+            f"against {len(current_files)} file(s) on disk"
         )
+        if not current_files:
+            self._log(
+                f"ResolutionChecker[{source_filter or 'all'}]: WARNING "
+                f"— iter {iter_idx} received ZERO files. Verdict will "
+                f"be guessed from finding metadata only. This is the "
+                f"v14 failure mode; if you see this, the discover "
+                f"closure isn't wired."
+            )
 
         prompt = self._build_prompt(
             findings_to_check=findings_to_check,

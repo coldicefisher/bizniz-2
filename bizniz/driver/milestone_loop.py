@@ -2004,6 +2004,25 @@ class MilestoneLoop:
                     files[path] = content
             return files
 
+        # 2026-05-20 fix: discovery closure — returns relative paths
+        # of code/test files in the live workspace. Lets the
+        # ResolutionChecker see files that QE coverage findings
+        # reference by capability_id (no file_hint).
+        def _discover_files() -> List[str]:
+            try:
+                all_paths = self._primary_workspace.list_relative_files()
+            except Exception:
+                return []
+            keep_suffixes = (".py", ".ts", ".tsx", ".js", ".jsx")
+            skip_dirs = ("__pycache__", "node_modules", ".venv", "dist", "build")
+            out: List[str] = []
+            for p in all_paths:
+                if any(seg in p.split("/") for seg in skip_dirs):
+                    continue
+                if p.endswith(keep_suffixes):
+                    out.append(p)
+            return out
+
         # Canonical report path — persist alongside milestone state.
         canonical_path = None
         try:
@@ -2022,6 +2041,7 @@ class MilestoneLoop:
             project_git=self._project_git,
             canonical_path=canonical_path,
             snapshot_workspace_files=_snapshot_files,
+            discover_workspace_files=_discover_files,
             milestone_debugger=self._milestone_debugger,
             stall_threshold=self._repair_stall_threshold,
             hard_cap=self._repair_max_iterations,

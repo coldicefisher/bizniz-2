@@ -64,6 +64,14 @@ class ReviewRepairV5Loop:
         # the resolution checker should examine. v2_build wires this
         # to read from the live workspace.
         snapshot_workspace_files: Optional[Callable[[List[str]], Dict[str, str]]] = None,
+        # Optional: walks the live workspace and returns relative
+        # paths of code+test files relevant to this milestone.
+        # 2026-05-20 fix: prior versions only passed file_hint-tagged
+        # paths to the checker, which left the checker with ZERO
+        # files for QE coverage findings (no file_hint), so it
+        # always voted still_present. v2_build wires this to a
+        # workspace walker.
+        discover_workspace_files: Optional[Callable[[], List[str]]] = None,
         # Optional escalation: PerMilestoneDebugger fires when the
         # loop is about to stall (stall_counter +1 with no progress).
         # If the debugger produces meaningful changes, the loop
@@ -80,6 +88,7 @@ class ReviewRepairV5Loop:
         self._project_git = project_git
         self._canonical_path = canonical_path
         self._snapshot_workspace_files = snapshot_workspace_files
+        self._discover_workspace_files = discover_workspace_files
         self._milestone_debugger = milestone_debugger
         self._stall_threshold = max(1, int(stall_threshold))
         self._hard_cap = max(1, int(hard_cap))
@@ -357,20 +366,64 @@ class ReviewRepairV5Loop:
     def _collect_files_for_check(
         self, canonical: CanonicalReport,
     ) -> Dict[str, str]:
-        """Read the files referenced by canonical findings' file_hints
-        from the live workspace. Used by the resolution checker."""
+        """Collect workspace files for the ResolutionChecker to inspect.
+
+        v14 anchor (2026-05-20): the prior version only passed paths
+        referenced by ``file_hint``. Most QE coverage findings
+        reference a ``capability_id`` (no file_hint), so the
+        checker was given ZERO code and judged every finding as
+        ``still_present`` forever. Loop never converged.
+
+        Fix: also call ``discover_workspace_files()`` to get ALL
+        code + test files in the milestone's workspace. The
+        checker has the real material to inspect.
+
+        Cap total file count to keep the prompt bounded; per-file
+        char cap lives in the checker's prompt builder.
+        """
         if self._snapshot_workspace_files is None:
             return {}
-        paths = sorted({
+
+        # Start with file_hint paths (CR critical findings).
+        paths: set = {
             f.file_hint for f in canonical.findings
             if f.file_hint and f.status not in ("resolved", "wont_fix")
-        })
-        if not paths:
+        }
+
+        # Augment with all relevant workspace files via the
+        # discover closure (if wired). Pre-2026-05-20 callers may
+        # not pass one — fall back gracefully.
+        if self._discover_workspace_files is not None:
+            try:
+                discovered = self._discover_workspace_files()
+                paths.update(discovered)
+            except Exception:
+                pass
+
+        # Cap to keep prompt bounded. Sort so output is deterministic.
+        capped = sorted(paths)[:60]
+        if not capped:
+            self._log(
+                "ReviewRepairV5: _collect_files_for_check returned 0 "
+                "paths (no file_hints AND discover_workspace_files "
+                "yielded nothing) — checker will fly blind"
+            )
             return {}
         try:
-            return self._snapshot_workspace_files(paths)
-        except Exception:
+            files = self._snapshot_workspace_files(capped)
+        except Exception as e:
+            self._log(
+                f"ReviewRepairV5: snapshot_workspace_files raised "
+                f"{type(e).__name__}: {e} — checker will fly blind"
+            )
             return {}
+        sample = sorted(files.keys())[:5]
+        self._log(
+            f"ReviewRepairV5: _collect_files_for_check assembled "
+            f"{len(files)} file(s) for checker (asked for "
+            f"{len(capped)}); sample={sample}"
+        )
+        return files
 
     def _synthesize_reports(
         self, *,
