@@ -1,19 +1,28 @@
 """Code-example generator for AUTH_CONTRACT.md.
 
-Single LLM call. Takes the AuthManifest (which has the live FA URL,
-app ID, issuer, and the actual test users) and the project's stack
-languages. Emits a markdown block of language-specific code examples
-the Coder can paste into integration tests + production code.
+Two paths:
 
-Why an LLM call (vs deterministic templating): the deterministic path
-would need a per-language template per operation (login, decode JWT,
-require_role, etc.) × every framework we support. The LLM can write
-idiomatic snippets for any stack with one prompt. The structured
-data (URL, app_id, issuer, user emails) is grounded in the manifest
-so it can't be fabricated.
+1. **Skeleton template** (CTX-3, preferred): each skeleton ships an
+   ``AUTH_CONTRACT_EXAMPLES.md.template`` with verified-working
+   examples using the EXACT libraries the skeleton's
+   requirements.txt declares. Placeholders ({{primary_app_id}},
+   etc.) are substituted from the AuthManifest. Zero LLM call;
+   zero "agent invents wrong library" risk.
+
+2. **LLM fallback** (legacy): when no template exists in the
+   skeleton, a single LLM call produces the section from the
+   manifest. Kept for back-compat with skeletons that haven't
+   added the template yet.
+
+The skeleton-template path drops the FROM-SCRATCH LLM generation
+that was producing PyJWT examples when the skeleton only shipped
+python-jose (the recipe_v4_v10 bug, 2026-05-20).
 """
 from __future__ import annotations
 
+import os
+import re
+from pathlib import Path
 from typing import Callable, List, Optional
 
 from bizniz.auth_operator.manifest import AuthManifest
@@ -98,15 +107,32 @@ def generate_code_examples(
     languages: List[str],
     on_status: Optional[Callable[[str], None]] = None,
     max_retries: int = 2,
+    skeleton_paths: Optional[List[Path]] = None,
 ) -> str:
-    """Single LLM call. Returns the rendered ``## Code samples``
-    markdown section ready to append to the contract.
+    """Returns the rendered ``## Code samples`` markdown section.
+
+    Order of attempts:
+    1. **Skeleton template** (CTX-3): if any provided skeleton path
+       contains ``AUTH_CONTRACT_EXAMPLES.md.template``, load it,
+       substitute placeholders from the manifest, return.
+    2. **LLM fallback**: single LLM call produces the section from
+       the manifest. Used when no template is found.
 
     Returns an empty string on failure — the contract is still useful
     without code samples; this is additive.
     """
     if not languages:
         return ""
+
+    # CTX-3 (2026-05-20): try the skeleton-shipped template first.
+    template_md = _try_skeleton_template(
+        manifest=manifest,
+        skeleton_paths=skeleton_paths or [],
+        on_status=on_status,
+    )
+    if template_md:
+        return template_md
+    # Fall through to LLM generation.
 
     # Build the user prompt as compact JSON-ish data (no Pydantic
     # serialization needed; the LLM reads it as text).
@@ -169,3 +195,79 @@ def generate_code_examples(
 
     md = (raw or {}).get("markdown") or ""
     return md.strip()
+
+
+
+# ── CTX-3 (2026-05-20): skeleton-template path ────────────────────
+
+
+_TEMPLATE_FILENAME = "AUTH_CONTRACT_EXAMPLES.md.template"
+
+
+def _try_skeleton_template(
+    *,
+    manifest: AuthManifest,
+    skeleton_paths: List[Path],
+    on_status: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Look for AUTH_CONTRACT_EXAMPLES.md.template in any provided
+    skeleton path; load + substitute + return. Empty string if none
+    found or substitution fails.
+
+    Substitution: ``{{placeholder}}`` → value, applied via simple
+    ``str.replace`` (no LLM, no Jinja). The skeleton author writes
+    canonical values; pipeline substitutes runtime ones.
+    """
+    template_text = ""
+    template_source = ""
+    for sk_path in skeleton_paths:
+        candidate = Path(sk_path) / _TEMPLATE_FILENAME
+        if candidate.exists() and candidate.is_file():
+            try:
+                template_text = candidate.read_text(encoding="utf-8")
+                template_source = str(candidate)
+                break
+            except Exception:
+                continue
+    if not template_text:
+        if on_status:
+            on_status(
+                "AuthOperator: no AUTH_CONTRACT_EXAMPLES.md.template "
+                "in skeletons — falling back to LLM generation"
+            )
+        return ""
+
+    substitutions = _build_substitutions(manifest)
+    rendered = template_text
+    for placeholder, value in substitutions.items():
+        rendered = rendered.replace("{{" + placeholder + "}}", value)
+
+    if on_status:
+        on_status(
+            f"AuthOperator: rendered code samples from "
+            f"{template_source} (deterministic, "
+            f"{len(substitutions)} substitutions)"
+        )
+    return rendered.strip()
+
+
+def _build_substitutions(manifest: AuthManifest) -> dict:
+    """Map of placeholder → substitution value, from the manifest."""
+    # Pick a representative test user (first one, by convention).
+    test_email = ""
+    test_password = ""
+    if manifest.users:
+        test_email = manifest.users[0].email or ""
+        test_password = manifest.users[0].password or ""
+    return {
+        "primary_app_id": manifest.primary_app_id or "",
+        "tenant_id": manifest.tenant_id or "",
+        "issuer": manifest.issuer or "",
+        "fa_url_host": manifest.fa_url or "",
+        "fa_url_container": "http://auth:9011",
+        "signing_algorithm": (
+            manifest.signing_key.algorithm if manifest.signing_key else "RS256"
+        ),
+        "test_user_email": test_email,
+        "test_user_password": test_password,
+    }

@@ -656,11 +656,24 @@ class V2Pipeline:
                 and (s.language or "").lower() in
                 ("python", "typescript", "javascript")
             })
+            # CTX-3 (2026-05-20): pass the skeleton source paths so
+            # generate_code_examples can find a verified template
+            # (AUTH_CONTRACT_EXAMPLES.md.template) and skip the LLM
+            # call entirely. Falls back to LLM if no template found.
+            from bizniz.architect.skeletons import (
+                get_skeleton, skeleton_source_path,
+            )
+            sk_paths = []
+            for svc in architecture.services:
+                sk_info = get_skeleton(getattr(svc, "skeleton", None))
+                if sk_info:
+                    sk_paths.append(skeleton_source_path(sk_info))
             samples = generate_code_examples(
                 client=self._auth_code_examples_client,
                 manifest=manifest,
                 languages=languages,
                 on_status=self._on_status,
+                skeleton_paths=sk_paths,
             )
             if samples:
                 contract_md = contract_md.rstrip() + "\n\n" + samples + "\n"
