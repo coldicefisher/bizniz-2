@@ -37,6 +37,7 @@ from bizniz.lib.dependency_graph import topological_layers
 from bizniz.orchestrator.parallel_issue_runner import (
     PIRunner, PIRunnerResult,
 )
+from bizniz.per_issue_validator.debugger import PerIssueDebugger
 from bizniz.per_issue_validator.types import ValidatedIssue
 from bizniz.per_issue_validator.validator import PerIssueValidator
 from bizniz.quality_engineer.types import EnrichedSpec
@@ -76,12 +77,15 @@ class V4MilestoneCodeDispatcher:
         on_status: Optional[Callable[[str], None]] = None,
         only_service: Optional[str] = None,
         repair_planner_factory: Optional[Callable[[ServiceDefinition], object]] = None,
-        # When set, the per-issue validator runs pytest --collect-only
-        # inside the target service's docker container instead of on
-        # the host. v4 Option 1 (2026-05-19). compose_path is the
-        # docker-compose.yml path; service_name comes from the
-        # ServiceDefinition.name at dispatch time.
         compose_path: Optional[str] = None,
+        # v4 Option 3 (2026-05-19): when True, PerIssueValidator
+        # escalates a stalled structured fix-loop to PerIssueDebugger
+        # (tool-loop with Edit/Write/Read/Bash, sequential, context-
+        # truncating). Default True — the whole point of Option 3.
+        enable_per_issue_debugger: bool = True,
+        # Wall budget per debugger invocation. Default 10 min — the
+        # debugger is meant to be slow but bounded.
+        debugger_timeout_seconds: int = 600,
     ):
         self._planner_factory = planner_factory
         self._coder_tester_factory = coder_tester_factory
@@ -95,6 +99,8 @@ class V4MilestoneCodeDispatcher:
         self._only_service = only_service
         self._repair_planner_factory = repair_planner_factory
         self._compose_path = compose_path
+        self._enable_per_issue_debugger = bool(enable_per_issue_debugger)
+        self._debugger_timeout_seconds = int(debugger_timeout_seconds)
 
     # ── IMPLEMENT phase ────────────────────────────────────────────
 
@@ -506,12 +512,31 @@ class V4MilestoneCodeDispatcher:
         )
         agent = agent_factory(service)
         workspace = self._workspace_for_service(service.workspace_name)
+        debugger: Optional[PerIssueDebugger] = None
+        if self._enable_per_issue_debugger:
+            try:
+                debugger = PerIssueDebugger(
+                    workspace=workspace,
+                    compose_path=self._compose_path,
+                    service_name=service.name,
+                    timeout_seconds=self._debugger_timeout_seconds,
+                    on_status=self._on_status,
+                )
+            except Exception as e:
+                self._log(
+                    f"V4MilestoneCodeDispatcher: per-issue debugger init "
+                    f"failed ({type(e).__name__}: {e}) — running without "
+                    f"escalation"
+                )
+                debugger = None
+
         validator = PerIssueValidator(
             agent=agent,
             workspace=workspace,
             on_status=self._on_status,
             compose_path=self._compose_path,
             service_name=service.name,
+            debugger=debugger,
         )
 
         # Pre-compute per-issue seeded file slices + sibling summaries

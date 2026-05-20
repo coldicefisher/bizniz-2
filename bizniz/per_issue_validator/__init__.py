@@ -10,6 +10,10 @@ can't be fooled by an agent that misread the spec. The "agentic
 debug" pass is the same CoderTesterAgent re-invoked with findings
 as additional context.
 """
+from bizniz.per_issue_validator.debugger import (
+    PerIssueDebugger,
+    PerIssueDebuggerError,
+)
 from bizniz.per_issue_validator.types import (
     Finding,
     ValidatedIssue,
@@ -20,4 +24,6 @@ __all__ = [
     "Finding",
     "ValidatedIssue",
     "PerIssueValidator",
+    "PerIssueDebugger",
+    "PerIssueDebuggerError",
 ]

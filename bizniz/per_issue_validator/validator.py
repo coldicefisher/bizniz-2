@@ -43,22 +43,17 @@ class PerIssueValidator:
         agent: CoderTesterAgent,
         workspace: BaseWorkspace,
         on_status: Optional[Callable[[str], None]] = None,
-        # When ``compose_path`` + ``service_name`` are BOTH set,
-        # pytest collection runs INSIDE the target service's docker
-        # container via ``docker compose exec`` — where the workspace's
-        # declared deps are actually installed. Without those, pytest
-        # collection runs on the host and routinely false-fails because
-        # host venv ≠ container venv. The container-validation path
-        # is the v4 Option 1 fix (2026-05-19).
         compose_path: Optional[str] = None,
         service_name: Optional[str] = None,
-        # If True, attempt pytest collection. Effective only when the
-        # container args above are set (host-mode pytest collection is
-        # too noisy in practice). Default True — when the container
-        # config is missing, the scan just silently skips pytest.
         run_pytest_collect: bool = True,
         stall_threshold: int = 3,
         hard_cap: int = 10,
+        # v4 Option 3 (2026-05-19): when set, escalate to the
+        # tool-loop debugger if the structured fix-loop stalls.
+        # The debugger has full Edit/Write/Read/Bash and runs
+        # sequentially against the workspace. Default None → no
+        # escalation; structured-only fix-loop.
+        debugger: Optional["PerIssueDebugger"] = None,
     ):
         self._agent = agent
         self._workspace = workspace
@@ -68,6 +63,7 @@ class PerIssueValidator:
         self._run_pytest_collect = run_pytest_collect
         self._stall_threshold = stall_threshold
         self._hard_cap = hard_cap
+        self._debugger = debugger
 
     def validate(
         self,
@@ -183,8 +179,28 @@ class PerIssueValidator:
                 if stall_counter >= self._stall_threshold:
                     self._log(
                         f"PerIssueValidator[{issue.id}]: stall threshold "
-                        f"reached — halting with {cur_count} finding(s)"
+                        f"reached — {cur_count} finding(s) remaining"
                     )
+                    # v4 Option 3: escalate to the tool-loop debugger
+                    # if one is wired. The debugger has Edit/Write/
+                    # Read/Bash; runs sequentially against the
+                    # workspace; truncates its own context. Returns
+                    # a ValidatedIssue we can pass back up.
+                    if self._debugger is not None:
+                        self._log(
+                            f"PerIssueValidator[{issue.id}]: escalating "
+                            f"to PerIssueDebugger (tool-loop)"
+                        )
+                        return self._escalate_to_debugger(
+                            issue=issue,
+                            service=service,
+                            current_files=last_result.filled_files,
+                            findings=findings,
+                            capabilities=capabilities,
+                            skeleton_md=skeleton_md,
+                            auth_contract=auth_contract,
+                            structured_iters=debug_iter,
+                        )
                     return ValidatedIssue(
                         issue_id=issue.id,
                         clean=False,
@@ -398,6 +414,79 @@ class PerIssueValidator:
             skeleton_md=skeleton_md,
             auth_contract=auth_contract,
             sibling_issue_summaries=sibling_issue_summaries,
+        )
+
+    def _escalate_to_debugger(
+        self,
+        *,
+        issue: Issue,
+        service: ServiceDefinition,
+        current_files: List[FilledFile],
+        findings: List[Finding],
+        capabilities: List[CapabilitySpec],
+        skeleton_md: Optional[str],
+        auth_contract: Optional[str],
+        structured_iters: int,
+    ) -> ValidatedIssue:
+        """Escalate from the structured fix-loop to the tool-loop
+        debugger. The debugger has full Edit/Write/Read/Bash and can
+        verify its own fixes against the live container.
+
+        After the debugger returns, we re-scan to check the
+        deterministic gates one more time — the debugger reports
+        clean/partial but we trust the scanners more than the agent's
+        self-report.
+        """
+        try:
+            dbg_result = self._debugger.debug(
+                issue=issue,
+                service=service,
+                current_files=current_files,
+                findings=findings,
+                capabilities=capabilities,
+                skeleton_md=skeleton_md,
+                auth_contract=auth_contract,
+            )
+        except Exception as e:
+            self._log(
+                f"PerIssueValidator[{issue.id}]: debugger raised — "
+                f"{type(e).__name__}: {e}"
+            )
+            return ValidatedIssue(
+                issue_id=issue.id,
+                clean=False,
+                files_written=[f.path for f in current_files],
+                findings=findings,
+                debug_iterations=structured_iters + 1,
+                halt_reason=f"debugger_error: {type(e).__name__}: {e}",
+            )
+
+        # Re-scan to confirm. The debugger edits files in-place on
+        # the workspace — read them back via the scanner.
+        files_after = dbg_result.files_written or [f.path for f in current_files]
+        post_scan = self._scan(issue, files_after)
+        self._log(
+            f"PerIssueValidator[{issue.id}]: post-debugger re-scan: "
+            f"{len(post_scan)} finding(s) (debugger reported "
+            f"{'clean' if dbg_result.clean else 'partial'})"
+        )
+
+        if not post_scan:
+            return ValidatedIssue(
+                issue_id=issue.id,
+                clean=True,
+                files_written=files_after,
+                findings=[],
+                debug_iterations=structured_iters + 1,
+            )
+
+        return ValidatedIssue(
+            issue_id=issue.id,
+            clean=False,
+            files_written=files_after,
+            findings=post_scan,
+            debug_iterations=structured_iters + 1,
+            halt_reason="debugger_partial: scan still surfaced findings",
         )
 
     def _log(self, msg: str) -> None:

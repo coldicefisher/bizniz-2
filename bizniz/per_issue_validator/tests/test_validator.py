@@ -589,6 +589,97 @@ class TestAttributeAccessAdvisory:
             assert "not blocking" in line
 
 
+# ── Debugger escalation (v4 Option 3) ─────────────────────────────
+
+
+class TestDebuggerEscalation:
+    """When the structured fix-loop stalls, PerIssueValidator can
+    escalate to a tool-loop PerIssueDebugger."""
+
+    def test_no_debugger_falls_back_to_old_stall_behavior(self, tmp_path):
+        agent = MagicMock(spec=CoderTesterAgent)
+        agent.code_issue.return_value = _broken_imports_result()
+
+        v = PerIssueValidator(
+            agent=agent,
+            workspace=_workspace(tmp_path),
+            stall_threshold=2,
+            debugger=None,  # no escalation
+        )
+        result = v.validate(
+            issue=_issue(),
+            initial_result=_broken_imports_result(),
+            service=_service(),
+            capabilities=[],
+            seeded_files=[],
+        )
+        assert result.clean is False
+        assert result.halt_reason == "stall"
+
+    def test_debugger_escalation_invoked_on_stall(self, tmp_path):
+        from bizniz.per_issue_validator.debugger import PerIssueDebugger
+        from bizniz.per_issue_validator.types import ValidatedIssue
+
+        # Agent keeps returning broken code → stall → escalate.
+        agent = MagicMock(spec=CoderTesterAgent)
+        agent.code_issue.return_value = _broken_imports_result()
+
+        debugger = MagicMock(spec=PerIssueDebugger)
+        debugger.debug.return_value = ValidatedIssue(
+            issue_id="BE-001",
+            clean=True,
+            files_written=["app/me.py", "tests/test_me.py"],
+        )
+
+        ws = _workspace(tmp_path)
+        v = PerIssueValidator(
+            agent=agent,
+            workspace=ws,
+            stall_threshold=2,
+            debugger=debugger,
+        )
+        result = v.validate(
+            issue=_issue(),
+            initial_result=_broken_imports_result(),
+            service=_service(),
+            capabilities=[],
+            seeded_files=[],
+        )
+        # The contract for the escalation: debugger is invoked when
+        # the structured loop stalls. The post-debug re-scan decides
+        # final cleanliness — we verify the dispatch happened.
+        debugger.debug.assert_called_once()
+        # halt_reason now reflects the debugger path (either success
+        # post-scan, or "debugger_partial: scan still surfaced
+        # findings"), NOT the bare "stall" we got without escalation.
+        assert result.halt_reason != "stall"
+
+    def test_debugger_exception_returns_partial(self, tmp_path):
+        from bizniz.per_issue_validator.debugger import PerIssueDebugger
+
+        agent = MagicMock(spec=CoderTesterAgent)
+        agent.code_issue.return_value = _broken_imports_result()
+
+        debugger = MagicMock(spec=PerIssueDebugger)
+        debugger.debug.side_effect = RuntimeError("debugger crashed")
+
+        v = PerIssueValidator(
+            agent=agent,
+            workspace=_workspace(tmp_path),
+            stall_threshold=2,
+            debugger=debugger,
+        )
+        result = v.validate(
+            issue=_issue(),
+            initial_result=_broken_imports_result(),
+            service=_service(),
+            capabilities=[],
+            seeded_files=[],
+        )
+        assert result.clean is False
+        assert "debugger_error" in result.halt_reason
+
+
 # ── Findings renderer ─────────────────────────────────────────────
 
 
