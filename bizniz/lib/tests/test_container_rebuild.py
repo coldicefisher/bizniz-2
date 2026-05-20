@@ -77,13 +77,15 @@ class TestRebuildRouting:
         before = hash_trigger_files(tmp_path)
         (tmp_path / "requirements.txt").write_text("fastapi\npyjwt\n")
 
-        # Mock both subprocess.run + health check.
+        # Mock both subprocess.run + container-running check.
         def fake_run(cmd, *args, **kwargs):
-            # All commands succeed.
             return MagicMock(returncode=0, stdout="", stderr="")
         with patch(
             "bizniz.lib.container_rebuild.subprocess.run",
             side_effect=fake_run,
+        ), patch(
+            "bizniz.lib.container_rebuild._is_container_running",
+            return_value=True,
         ):
             result = maybe_rebuild(
                 compose_path="/c.yml",
@@ -106,6 +108,9 @@ class TestRebuildRouting:
         with patch(
             "bizniz.lib.container_rebuild.subprocess.run",
             side_effect=fake_run,
+        ), patch(
+            "bizniz.lib.container_rebuild._is_container_running",
+            return_value=True,
         ):
             result = maybe_rebuild(
                 compose_path="/c.yml",
@@ -116,6 +121,33 @@ class TestRebuildRouting:
             )
         assert result.triggered
         assert result.mode == "hard"
+
+    def test_image_only_when_container_not_running(self, tmp_path):
+        """2026-05-20 hotfix: at IMPLEMENT time before Smoke, container
+        isn't up. Rebuild the image (not the container) so deps land
+        when Smoke later does `docker compose up`."""
+        (tmp_path / "requirements.txt").write_text("fastapi\n")
+        before = hash_trigger_files(tmp_path)
+        (tmp_path / "requirements.txt").write_text("fastapi\npyjwt\n")
+
+        def fake_run(cmd, *args, **kwargs):
+            return MagicMock(returncode=0, stdout="", stderr="")
+        with patch(
+            "bizniz.lib.container_rebuild.subprocess.run",
+            side_effect=fake_run,
+        ), patch(
+            "bizniz.lib.container_rebuild._is_container_running",
+            return_value=False,  # container NOT running
+        ):
+            result = maybe_rebuild(
+                compose_path="/c.yml",
+                service_name="backend",
+                workspace_root=tmp_path,
+                before_hashes=before,
+            )
+        assert result.triggered
+        assert result.mode == "image_only"
+        assert result.success is True
 
 
 # ── Failure surfacing ──────────────────────────────────────────────
@@ -142,6 +174,9 @@ class TestErrorSurfacing:
         with patch(
             "bizniz.lib.container_rebuild.subprocess.run",
             side_effect=fake_run,
+        ), patch(
+            "bizniz.lib.container_rebuild._is_container_running",
+            return_value=True,
         ):
             result = maybe_rebuild(
                 compose_path="/c.yml",

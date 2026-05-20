@@ -26,11 +26,29 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+
+
+# ── Per-service serialization ─────────────────────────────────────
+
+
+_REBUILD_LOCKS: Dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _rebuild_lock_for(service_name: str) -> threading.Lock:
+    """Lazy-create + return a per-service lock so concurrent agents
+    in the same PIRunner level don't trigger concurrent docker
+    builds against the same service."""
+    with _LOCKS_GUARD:
+        if service_name not in _REBUILD_LOCKS:
+            _REBUILD_LOCKS[service_name] = threading.Lock()
+        return _REBUILD_LOCKS[service_name]
 
 
 # Files whose change triggers a soft (install + restart) rebuild.
@@ -111,18 +129,12 @@ def maybe_rebuild(
     ~2KB of subprocess output so the caller can surface as a finding.
     """
     if not compose_path or not service_name:
-        # No container infra wired — no-op (used by perf-test sandboxes).
         return RebuildResult(triggered=False, mode="none")
 
     if after_hashes is None:
         after_hashes = hash_trigger_files(workspace_root)
-
-    changed = detect_changes(before_hashes, after_hashes)
-    if not changed:
+    if not detect_changes(before_hashes, after_hashes):
         return RebuildResult(triggered=False, mode="none")
-
-    hard = any(f in _HARD_TRIGGERS for f in changed)
-    mode = "hard" if hard else "soft"
 
     def _log(msg: str) -> None:
         if on_status:
@@ -131,39 +143,69 @@ def maybe_rebuild(
             except Exception:
                 pass
 
-    _log(
-        f"container_rebuild[{service_name}]: {mode} rebuild triggered "
-        f"by changes to {changed}"
-    )
-    t0 = time.time()
-    try:
-        if hard:
-            return _hard_rebuild(
+    # Per-service lock so N parallel agents in a PIRunner level
+    # don't trigger N concurrent docker builds against the same
+    # service. First in wins; subsequent calls re-hash inside the
+    # lock and skip if a prior rebuild already covered them.
+    with _rebuild_lock_for(service_name):
+        current_hashes = hash_trigger_files(workspace_root)
+        changed = detect_changes(before_hashes, current_hashes)
+        if not changed:
+            return RebuildResult(triggered=False, mode="none")
+
+        t0 = time.time()
+
+        # 2026-05-20 hotfix: at IMPLEMENT time the service container
+        # isn't started yet (Smoke brings them up). ``docker compose
+        # exec backend pip install`` fails because there's no
+        # running container. BUT ``docker compose build`` works on
+        # the IMAGE — no container needed. Rebuild the image so deps
+        # are baked in; when Smoke does ``docker compose up`` the
+        # container starts with the new deps automatically.
+        if not _is_container_running(compose_path, service_name):
+            return _image_build_only(
                 compose_path=compose_path,
                 service_name=service_name,
                 changed=changed,
                 on_status=on_status,
                 build_timeout_s=build_timeout_s,
+                t0=t0,
+            )
+
+        hard = any(f in _HARD_TRIGGERS for f in changed)
+        mode = "hard" if hard else "soft"
+        _log(
+            f"container_rebuild[{service_name}]: {mode} rebuild "
+            f"triggered by changes to {changed}"
+        )
+        try:
+            if hard:
+                return _hard_rebuild(
+                    compose_path=compose_path,
+                    service_name=service_name,
+                    changed=changed,
+                    on_status=on_status,
+                    build_timeout_s=build_timeout_s,
+                    health_timeout_s=health_timeout_s,
+                    t0=t0,
+                )
+            return _soft_rebuild(
+                compose_path=compose_path,
+                service_name=service_name,
+                changed=changed,
+                workspace_root=workspace_root,
+                on_status=on_status,
+                install_timeout_s=install_timeout_s,
                 health_timeout_s=health_timeout_s,
                 t0=t0,
             )
-        return _soft_rebuild(
-            compose_path=compose_path,
-            service_name=service_name,
-            changed=changed,
-            workspace_root=workspace_root,
-            on_status=on_status,
-            install_timeout_s=install_timeout_s,
-            health_timeout_s=health_timeout_s,
-            t0=t0,
-        )
-    except Exception as e:
-        return RebuildResult(
-            triggered=True, mode=mode, files_changed=changed,
-            success=False,
-            error_tail=f"{type(e).__name__}: {e}",
-            wall_s=time.time() - t0,
-        )
+        except Exception as e:
+            return RebuildResult(
+                triggered=True, mode=mode, files_changed=changed,
+                success=False,
+                error_tail=f"{type(e).__name__}: {e}",
+                wall_s=time.time() - t0,
+            )
 
 
 # ── Soft rebuild ──────────────────────────────────────────────────
@@ -361,3 +403,88 @@ def _wait_for_health(
             pass
         time.sleep(poll_interval_s)
     return False
+
+
+# ── Container state check + image-only build (2026-05-20 hotfix) ──
+
+
+def _is_container_running(compose_path: str, service_name: str) -> bool:
+    """True if `docker compose ps` shows the service as running.
+    False on any error (no compose, no container, docker not on PATH).
+    """
+    try:
+        r = subprocess.run(
+            ["docker", "compose", "-f", compose_path, "ps",
+             "--status", "running", "--services"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return False
+    if r.returncode != 0:
+        return False
+    running = (r.stdout or "").splitlines()
+    return service_name in [s.strip() for s in running if s.strip()]
+
+
+def _image_build_only(
+    *,
+    compose_path: str,
+    service_name: str,
+    changed: List[str],
+    on_status: Optional[Callable[[str], None]],
+    build_timeout_s: float,
+    t0: float,
+) -> RebuildResult:
+    """When the container isn't running, just rebuild the image.
+
+    ``docker compose build`` works on images and doesn't require a
+    running container. The Dockerfile's RUN pip install picks up
+    new deps from requirements.txt. When Smoke phase later runs
+    ``docker compose up -d``, the container starts from the freshly-
+    built image with the new deps in place.
+
+    No health check — we never started anything.
+    """
+    if on_status:
+        on_status(
+            f"container_rebuild[{service_name}]: container not running "
+            f"yet; building image so deps land on next `compose up` "
+            f"(changes: {changed})"
+        )
+    try:
+        proc = subprocess.run(
+            ["docker", "compose", "-f", compose_path, "build", service_name],
+            capture_output=True, text=True, timeout=build_timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return RebuildResult(
+            triggered=True, mode="image_only", files_changed=changed,
+            success=False,
+            error_tail=f"docker build timed out after {build_timeout_s}s",
+            wall_s=time.time() - t0,
+        )
+    except Exception as e:
+        return RebuildResult(
+            triggered=True, mode="image_only", files_changed=changed,
+            success=False,
+            error_tail=f"{type(e).__name__}: {e}",
+            wall_s=time.time() - t0,
+        )
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout)[-2000:]
+        return RebuildResult(
+            triggered=True, mode="image_only", files_changed=changed,
+            success=False,
+            error_tail=f"docker build exited {proc.returncode}:\n{tail}",
+            wall_s=time.time() - t0,
+        )
+    if on_status:
+        on_status(
+            f"container_rebuild[{service_name}]: image built in "
+            f"{time.time() - t0:.1f}s — Smoke will start container "
+            f"with the new deps"
+        )
+    return RebuildResult(
+        triggered=True, mode="image_only", files_changed=changed,
+        success=True, wall_s=time.time() - t0,
+    )
