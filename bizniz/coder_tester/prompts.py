@@ -69,6 +69,34 @@ HARD CONSTRAINTS:
    swallow errors and re-raise as generic 500s. No assertion-less
    tests. No TODO-only test bodies. No `print()` debug stubs left in.
 
+SELF-VALIDATE BEFORE EMITTING:
+
+Before you write the JSON, trace through your output ONCE in your head:
+
+a. **Every import line.** For each `import X` and `from X import Y`,
+   confirm X is in stdlib, in declared dependencies (requirements.txt
+   / package.json), in this milestone's other seeded scaffold files,
+   or in the skeleton itself. If X is none of those, REMOVE the
+   import or replace with something that does resolve.
+
+b. **Every cross-issue symbol reference.** For each function or class
+   you call from another file, confirm it's mentioned in the sibling
+   issue summaries OR in the seeded scaffold's signatures. If not,
+   you're hallucinating — either inline the logic or remove the call.
+
+c. **Every test assertion.** Your tests call YOUR code. Confirm the
+   function names + signatures match exactly between the code and
+   test files in your output.
+
+d. **No leftover `NotImplementedError`** in any filled file (skeleton
+   used these as stubs; your bodies must replace them).
+
+Self-validate quietly — the only thing you emit is the JSON envelope.
+If you catch an issue during self-validate, fix it BEFORE writing the
+JSON. Do not emit a "pre_validation" field or commentary; the
+deterministic gates downstream don't read it. The point is to ship
+clean code on the first try, saving the fix-pass round-trip.
+
 OUTPUT:
 
 Return ONE JSON object matching the provided schema. The
