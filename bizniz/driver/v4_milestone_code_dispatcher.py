@@ -809,7 +809,9 @@ class V4MilestoneCodeDispatcher:
                 ]
             # Filter sibling list to exclude THIS issue.
             siblings = [s for s in sibling_summaries if not s.startswith(f"`{issue.id}` ")]
-            # Initial agent dispatch.
+            # Initial agent dispatch. v4 fix B (2026-05-20): REPAIR
+            # uses edit-mode (surgical patches against existing files).
+            # IMPLEMENT stays whole-file (greenfield).
             initial = agent.code_issue(
                 issue=issue,
                 service=service,
@@ -818,7 +820,39 @@ class V4MilestoneCodeDispatcher:
                 skeleton_md=skeleton_md,
                 auth_contract=auth_contract,
                 sibling_issue_summaries=siblings,
+                edit_mode=use_repair_tier,
             )
+            # If edit-mode, apply patches via apply_edits before
+            # the validator runs (validator reads from disk).
+            if use_repair_tier and initial.edits:
+                from bizniz.coder_tester.edits import apply_edits
+                report = apply_edits(workspace, initial.edits)
+                if report.failures:
+                    self._log(
+                        f"V4 repair: [{issue.id}] {len(report.failures)} "
+                        f"edit(s) failed to apply — "
+                        f"{[(f.path, f.reason) for f in report.failures[:3]]}"
+                    )
+                # Synthesize whole-file results from on-disk content
+                # so the validator (which expects FilledFile) can work.
+                from bizniz.coder_tester.types import (
+                    CoderTesterResult, FilledFile,
+                )
+                synth = []
+                for path in (
+                    list(issue.target_files) + list(issue.test_files)
+                ):
+                    content = _read_workspace_file(workspace, path)
+                    if content is not None:
+                        role = "test" if path in issue.test_files else "code"
+                        synth.append(FilledFile(
+                            path=path, content=content, role=role,
+                        ))
+                initial = CoderTesterResult(
+                    issue_id=issue.id,
+                    filled_files=synth,
+                    notes=initial.notes,
+                )
             # Validate + fix-loop.
             return validator.validate(
                 issue=issue,

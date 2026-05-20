@@ -106,6 +106,63 @@ issue's `target_files` + `test_files`. Each entry's `role` is
 """
 
 
+# v4 fix B (2026-05-20): edit-mode system prompt for REPAIR. The
+# agent emits surgical patches instead of whole-file content.
+# Unchanged code in the existing file stays verbatim — eliminates
+# the cross-fix-issue conflict pattern where whole-file overwrites
+# erased adjacent fix-issues' work.
+CODER_TESTER_EDIT_SYSTEM_PROMPT = """You are a senior software engineer
+fixing ONE atomic issue's code + tests. The files you're fixing
+ALREADY EXIST on disk — you've been shown the CURRENT content. Your
+job is to emit SURGICAL EDITS (find/replace patches), not whole-file
+rewrites.
+
+HARD CONSTRAINTS:
+
+1. **One issue, multiple precise patches.** You see exactly one
+   issue's spec. Emit ONE or MORE FileEdit entries with
+   `path / old_text / new_text`. Each `old_text` must be a UNIQUE
+   substring of the file's current content. Pad with surrounding
+   lines until unique.
+
+2. **Preserve unchanged code.** Do NOT regenerate or rewrite lines
+   you aren't actively changing. The whole point of edit mode is
+   that lines you don't touch stay verbatim — that's how we avoid
+   the "fix-breaks-unrelated-code" regression class.
+
+3. **Multiple edits to the same file are applied in order.** Each
+   subsequent edit sees the prior edits' results. Order yours so
+   the `old_text` matches what's on disk after earlier edits.
+
+4. **Code and tests stay aligned BECAUSE YOU WROTE BOTH.** When you
+   edit a function's signature, also edit the corresponding test
+   assertion in the same call. No drift across patches.
+
+5. **No whole-file edits.** If your `old_text` would equal (or
+   nearly equal) the entire file content, you're doing it wrong —
+   that's whole-file mode. Break into focused patches; leave a
+   `notes` line if a section genuinely needs full rewrite.
+
+6. **Replace every `raise NotImplementedError`.** A common edit
+   target: stub markers from the original scaffold.
+
+7. **Tests must be REAL.** Real fixtures, real assertions. No
+   stubs. No `assert True`.
+
+8. **Honor the auth contract.** No local password hashing, no JWT
+   minting — only JWT validation via `get_current_user`.
+
+9. **Forbidden patterns.** No `except Exception:` re-raising as
+   generic 500s. No assertion-less tests.
+
+OUTPUT:
+
+Return ONE JSON object matching the provided edit-mode schema.
+``edits`` array, one entry per surgical change. The runner applies
+each edit via find/replace against the current on-disk content.
+"""
+
+
 def build_user_prompt(
     *,
     issue: Issue,
@@ -115,6 +172,7 @@ def build_user_prompt(
     skeleton_md: Optional[str] = None,
     auth_contract: Optional[str] = None,
     sibling_issue_summaries: Optional[List[str]] = None,
+    edit_mode: bool = False,
 ) -> str:
     """Build the per-issue user prompt.
 
@@ -210,13 +268,39 @@ def build_user_prompt(
     if auth_contract:
         sections.append(f"\n## Auth contract\n\n{auth_contract}")
 
-    sections.append(
-        "\n## Your job\n\n"
-        "Emit a JSON object with two fields: `issue_id` (echo the id "
-        "above) and `filled_files` (one entry per path in target_files "
-        "+ test_files, with `path`, `content`, and `role`). Match the "
-        "contract, replace every `NotImplementedError`, write real "
-        "tests that encode YOUR implementation's edge cases."
-    )
+    if edit_mode:
+        sections.append(
+            "\n## Your job (EDIT MODE — REPAIR)\n\n"
+            "The files above ALREADY EXIST on disk (the seeded scaffold "
+            "shows the CURRENT content). Emit SURGICAL EDITS — find/"
+            "replace patches — not whole-file rewrites.\n\n"
+            "Output schema: `{issue_id, edits: [{path, old_text, "
+            "new_text, role}], notes}`. For each edit:\n\n"
+            "- `path` MUST be in the issue's target_files or test_files\n"
+            "- `old_text` MUST be a UNIQUE substring of the file's "
+            "current content. If a short change could match multiple "
+            "places, pad with surrounding lines until unique.\n"
+            "- `new_text` is the replacement. Match indentation + "
+            "whitespace exactly.\n"
+            "- Multiple edits to the same file are applied IN ORDER; "
+            "later edits see earlier edits' results.\n\n"
+            "Rules:\n"
+            "- DO NOT regenerate unchanged code. Preserve everything "
+            "your edit doesn't touch.\n"
+            "- DO NOT emit a single edit covering the whole file — "
+            "that defeats the purpose. Break into focused patches.\n"
+            "- If you can't fix something without rewriting most of "
+            "the file, leave a `notes` line and target the smallest "
+            "viable change.\n"
+        )
+    else:
+        sections.append(
+            "\n## Your job\n\n"
+            "Emit a JSON object with two fields: `issue_id` (echo the id "
+            "above) and `filled_files` (one entry per path in target_files "
+            "+ test_files, with `path`, `content`, and `role`). Match the "
+            "contract, replace every `NotImplementedError`, write real "
+            "tests that encode YOUR implementation's edge cases."
+        )
 
     return "\n".join(sections)

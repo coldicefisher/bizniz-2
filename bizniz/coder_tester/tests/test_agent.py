@@ -113,7 +113,9 @@ class TestHappyPath:
                 capabilities=[],
             )
         kwargs = mock_call.call_args.kwargs
-        assert kwargs["label"] == "CoderTesterAgent[BE-XYZ]"
+        # Label includes the mode (whole-file by default; "edit" when
+        # edit_mode=True is passed).
+        assert kwargs["label"].startswith("CoderTesterAgent[BE-XYZ")
 
 
 # ── Path-contract enforcement ──────────────────────────────────────
@@ -339,6 +341,137 @@ class TestSchemaSalvage:
         # list shows path is missing — either way the user knows which
         # field broke.
         assert "path" in msg or "item keys" in msg
+
+
+# ── Edit-mode (v4 fix B, 2026-05-20) ──────────────────────────────
+
+
+class TestEditMode:
+    def _edit_output(self, issue_id="BE-001"):
+        return {
+            "issue_id": issue_id,
+            "edits": [
+                {
+                    "path": "app/api/routes/me.py",
+                    "old_text": "raise NotImplementedError",
+                    "new_text": "return {'ok': True}",
+                    "role": "code",
+                },
+                {
+                    "path": "tests/test_me.py",
+                    "old_text": "assert True",
+                    "new_text": "assert response.json() == {'ok': True}",
+                    "role": "test",
+                },
+            ],
+            "notes": "",
+        }
+
+    def test_edit_mode_returns_edits_not_filled_files(self):
+        with patch(
+            "bizniz.coder_tester.agent.call_with_retry",
+            return_value=self._edit_output(),
+        ):
+            agent = CoderTesterAgent(client=MagicMock(spec=BaseAIClient))
+            result = agent.code_issue(
+                issue=_issue(),
+                service=_service(),
+                seeded_files=[],
+                capabilities=[],
+                edit_mode=True,
+            )
+        assert len(result.edits) == 2
+        assert result.filled_files == []
+        # Path contract enforced.
+        paths = {e.path for e in result.edits}
+        assert paths == {"app/api/routes/me.py", "tests/test_me.py"}
+
+    def test_edit_mode_uses_edit_schema(self):
+        from bizniz.coder_tester.agent import CODER_TESTER_EDIT_SCHEMA
+        with patch(
+            "bizniz.coder_tester.agent.call_with_retry",
+            return_value=self._edit_output(),
+        ) as mock_call:
+            agent = CoderTesterAgent(client=MagicMock(spec=BaseAIClient))
+            agent.code_issue(
+                issue=_issue(), service=_service(),
+                seeded_files=[], capabilities=[],
+                edit_mode=True,
+            )
+        # Edit-mode schema passed to call_with_retry.
+        kwargs = mock_call.call_args.kwargs
+        assert kwargs["schema"] is CODER_TESTER_EDIT_SCHEMA
+
+    def test_edit_mode_uses_edit_system_prompt(self):
+        from bizniz.coder_tester.prompts import (
+            CODER_TESTER_EDIT_SYSTEM_PROMPT,
+        )
+        with patch(
+            "bizniz.coder_tester.agent.call_with_retry",
+            return_value=self._edit_output(),
+        ) as mock_call:
+            agent = CoderTesterAgent(client=MagicMock(spec=BaseAIClient))
+            agent.code_issue(
+                issue=_issue(), service=_service(),
+                seeded_files=[], capabilities=[],
+                edit_mode=True,
+            )
+        # System message is the edit-mode prompt.
+        sys_msg = mock_call.call_args.kwargs["messages"][0]
+        assert sys_msg.content == CODER_TESTER_EDIT_SYSTEM_PROMPT
+
+    def test_edit_mode_out_of_scope_path_raises(self):
+        bad = {
+            "issue_id": "BE-001",
+            "edits": [
+                {
+                    "path": "app/secrets/leak.py",  # not in issue scope
+                    "old_text": "x", "new_text": "y", "role": "code",
+                },
+            ],
+            "notes": "",
+        }
+        with patch(
+            "bizniz.coder_tester.agent.call_with_retry",
+            return_value=bad,
+        ):
+            agent = CoderTesterAgent(client=MagicMock(spec=BaseAIClient))
+            with pytest.raises(CoderTesterError, match="outside .* declared scope"):
+                agent.code_issue(
+                    issue=_issue(), service=_service(),
+                    seeded_files=[], capabilities=[],
+                    edit_mode=True,
+                )
+
+    def test_edit_mode_empty_edits_raises(self):
+        with patch(
+            "bizniz.coder_tester.agent.call_with_retry",
+            return_value={"issue_id": "BE-001", "edits": [], "notes": ""},
+        ):
+            agent = CoderTesterAgent(client=MagicMock(spec=BaseAIClient))
+            with pytest.raises(CoderTesterError, match="empty edits"):
+                agent.code_issue(
+                    issue=_issue(), service=_service(),
+                    seeded_files=[], capabilities=[],
+                    edit_mode=True,
+                )
+
+    def test_edit_mode_prompt_includes_edit_instructions(self):
+        with patch(
+            "bizniz.coder_tester.agent.call_with_retry",
+            return_value=self._edit_output(),
+        ) as mock_call:
+            agent = CoderTesterAgent(client=MagicMock(spec=BaseAIClient))
+            agent.code_issue(
+                issue=_issue(), service=_service(),
+                seeded_files=[], capabilities=[],
+                edit_mode=True,
+            )
+        user_msg = mock_call.call_args.kwargs["messages"][1]
+        body = user_msg.content
+        # User-prompt's "Your job" section for edit mode.
+        assert "EDIT MODE" in body
+        assert "old_text" in body and "new_text" in body
 
 
 # ── Prompt building ────────────────────────────────────────────────

@@ -18,10 +18,13 @@ from bizniz.clients.chatgpt.messages import Message
 from bizniz.clients.chatgpt.types.response_format import ResponseFormat
 from bizniz.coder.types import Issue
 from bizniz.coder_tester.prompts import (
+    CODER_TESTER_EDIT_SYSTEM_PROMPT,
     CODER_TESTER_SYSTEM_PROMPT,
     build_user_prompt,
 )
-from bizniz.coder_tester.types import CoderTesterResult, FilledFile
+from bizniz.coder_tester.types import (
+    CoderTesterResult, FileEdit, FilledFile,
+)
 from bizniz.lib.llm_utils import call_with_retry
 from bizniz.quality_engineer.types import CapabilitySpec
 
@@ -84,6 +87,74 @@ CODER_TESTER_SCHEMA = {
 }
 
 
+# v4 fix B (2026-05-20): edit-mode schema. The agent emits surgical
+# patches instead of whole-file content. Bizniz applies each patch
+# via ``apply_edits`` — unchanged code in the existing file stays
+# verbatim. Right for REPAIR; whole-file stays right for IMPLEMENT
+# (greenfield).
+CODER_TESTER_EDIT_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "coder_tester_edit_output",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "issue_id": {
+                    "type": "string",
+                    "description": "Echo back the issue id from the prompt.",
+                },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "Surgical patches. Each is a find/replace within "
+                        "the current on-disk content. old_text MUST be "
+                        "unique in the file — pad with surrounding "
+                        "context if a short edit could match multiple places."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Workspace-relative path.",
+                            },
+                            "old_text": {
+                                "type": "string",
+                                "description": (
+                                    "Existing substring to replace. Must "
+                                    "be unique in the current file."
+                                ),
+                            },
+                            "new_text": {
+                                "type": "string",
+                                "description": "Replacement text.",
+                            },
+                            "role": {
+                                "type": "string",
+                                "enum": ["code", "test"],
+                                "description": "'code' or 'test'. Informational.",
+                            },
+                        },
+                        "required": ["path", "old_text", "new_text", "role"],
+                        "additionalProperties": False,
+                    },
+                },
+                "notes": {
+                    "type": "string",
+                    "description": (
+                        "Optional one-line free-text about deferred work, "
+                        "assumptions, open questions. NOT used as a gate."
+                    ),
+                },
+            },
+            "required": ["issue_id", "edits", "notes"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+}
+
+
 class CoderTesterError(Exception):
     """Agent output failed validation or violated the path contract."""
 
@@ -111,15 +182,27 @@ class CoderTesterAgent:
         skeleton_md: Optional[str] = None,
         auth_contract: Optional[str] = None,
         sibling_issue_summaries: Optional[List[str]] = None,
+        # v4 fix B (2026-05-20): when True, the agent emits surgical
+        # edits (FileEdit) instead of whole-file content. Use for
+        # REPAIR; leave False for IMPLEMENT.
+        edit_mode: bool = False,
     ) -> CoderTesterResult:
         """Code + test ONE issue end-to-end in one LLM call.
 
-        Validates the output's `filled_files` paths against the union
-        of `issue.target_files` and `issue.test_files`. Out-of-scope
-        paths fail loudly — the per-issue gate is non-negotiable.
+        ``edit_mode=False`` (default): agent emits ``filled_files``
+        (whole-file content). Right for IMPLEMENT.
+
+        ``edit_mode=True``: agent emits ``edits`` (surgical patches
+        against existing files). Right for REPAIR — preserves
+        unchanged code, eliminates whole-file overwrite regressions.
+
+        Validates output paths against the issue's declared
+        ``target_files`` + ``test_files`` union. Out-of-scope paths
+        fail loudly.
         """
+        mode_label = "edit" if edit_mode else "whole"
         self._log(
-            f"CoderTesterAgent[{issue.id}]: {issue.title} "
+            f"CoderTesterAgent[{issue.id}, {mode_label}]: {issue.title} "
             f"({len(issue.target_files)} code file(s), "
             f"{len(issue.test_files)} test file(s))"
         )
@@ -132,20 +215,33 @@ class CoderTesterAgent:
             skeleton_md=skeleton_md,
             auth_contract=auth_contract,
             sibling_issue_summaries=sibling_issue_summaries,
+            edit_mode=edit_mode,
+        )
+
+        system_prompt = (
+            CODER_TESTER_EDIT_SYSTEM_PROMPT if edit_mode
+            else CODER_TESTER_SYSTEM_PROMPT
+        )
+        schema = (
+            CODER_TESTER_EDIT_SCHEMA if edit_mode
+            else CODER_TESTER_SCHEMA
         )
 
         raw = call_with_retry(
             client=self._client,
             messages=[
-                Message(role="system", content=CODER_TESTER_SYSTEM_PROMPT),
+                Message(role="system", content=system_prompt),
                 Message(role="user", content=user_prompt),
             ],
             response_format=ResponseFormat.JSON_SCHEMA,
-            schema=CODER_TESTER_SCHEMA,
+            schema=schema,
             max_attempts=self._max_retries,
             on_status=self._on_status,
-            label=f"CoderTesterAgent[{issue.id}]",
+            label=f"CoderTesterAgent[{issue.id},{mode_label}]",
         )
+
+        if edit_mode:
+            return self._parse_edit_result(issue, raw)
 
         items = raw.get("filled_files") or []
         if not items:
@@ -236,6 +332,79 @@ class CoderTesterAgent:
         )
         return CoderTesterResult(
             issue_id=issue.id, filled_files=filled, notes=notes,
+        )
+
+    def _parse_edit_result(
+        self, issue: Issue, raw: dict,
+    ) -> CoderTesterResult:
+        """Parse the edit-mode envelope. Validates output paths
+        against the issue's declared file set."""
+        items = raw.get("edits") or []
+        if not items:
+            raise CoderTesterError(
+                f"CoderTesterAgent[{issue.id}, edit]: empty edits. "
+                f"Refusing to ship a no-op result."
+            )
+
+        edits: List[FileEdit] = []
+        for it in items:
+            it = dict(it) if isinstance(it, dict) else it
+            if isinstance(it, dict) and it.get("role") in (None, ""):
+                path_str = it.get("path", "") or ""
+                looks_like_test = (
+                    "/test_" in path_str
+                    or path_str.startswith("test_")
+                    or "/tests/" in path_str
+                    or path_str.endswith("_test.py")
+                    or path_str.endswith(".test.tsx")
+                    or path_str.endswith(".test.ts")
+                )
+                it["role"] = "test" if looks_like_test else "code"
+            try:
+                edits.append(FileEdit(**it))
+            except Exception as e:
+                detail = ""
+                errors = getattr(e, "errors", None)
+                if callable(errors):
+                    try:
+                        detail = f" — fields: {errors()}"
+                    except Exception:
+                        pass
+                keys = list(it.keys()) if isinstance(it, dict) else "(non-dict)"
+                raise CoderTesterError(
+                    f"CoderTesterAgent[{issue.id}, edit]: edits entry "
+                    f"failed validation: {type(e).__name__}: {e}{detail}; "
+                    f"item keys: {keys}"
+                )
+
+        # Path-contract gate (same as whole-file mode).
+        allowed = set(issue.target_files) | set(issue.test_files)
+        produced = {e.path for e in edits}
+        extras = produced - allowed
+        if extras:
+            raise CoderTesterError(
+                f"CoderTesterAgent[{issue.id}, edit]: agent wrote edits "
+                f"outside the issue's declared scope: {sorted(extras)}. "
+                f"Allowed: {sorted(allowed)}."
+            )
+
+        echoed_id = raw.get("issue_id") or ""
+        if echoed_id and echoed_id != issue.id:
+            self._log(
+                f"CoderTesterAgent[{issue.id}, edit]: WARNING — agent "
+                f"echoed issue_id={echoed_id!r}"
+            )
+
+        notes = raw.get("notes") or ""
+        if notes:
+            self._log(f"CoderTesterAgent[{issue.id}, edit]: notes — {notes}")
+
+        self._log(
+            f"CoderTesterAgent[{issue.id}, edit]: → {len(edits)} edit(s) "
+            f"across {len(produced)} file(s)"
+        )
+        return CoderTesterResult(
+            issue_id=issue.id, edits=edits, notes=notes,
         )
 
     def _log(self, msg: str) -> None:
