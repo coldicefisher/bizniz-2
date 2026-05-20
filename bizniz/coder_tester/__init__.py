@@ -12,12 +12,16 @@ from bizniz.coder_tester.agent import (
 )
 from bizniz.coder_tester.types import (
     CoderTesterResult,
+    FileEdit,
     FilledFile,
+    RequestedDep,
 )
 
 __all__ = [
     "CoderTesterAgent",
     "CoderTesterError",
     "CoderTesterResult",
+    "FileEdit",
     "FilledFile",
+    "RequestedDep",
 ]

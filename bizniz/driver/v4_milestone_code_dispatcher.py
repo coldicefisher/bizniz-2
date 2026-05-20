@@ -38,6 +38,9 @@ from bizniz.lib.dependency_graph import topological_layers
 from bizniz.orchestrator.parallel_issue_runner import (
     PIRunner, PIRunnerResult,
 )
+from bizniz.lib.container_rebuild import (
+    hash_trigger_files, maybe_rebuild,
+)
 from bizniz.per_issue_validator.debugger import PerIssueDebugger
 from bizniz.per_issue_validator.types import ValidatedIssue
 from bizniz.per_issue_validator.validator import PerIssueValidator
@@ -58,6 +61,97 @@ WorkspaceForService = Callable[[str], BaseWorkspace]
 def _is_code_bearing(service: ServiceDefinition) -> bool:
     lang = (service.language or "").lower()
     return lang not in {"yaml", "sql"}
+
+
+def _apply_requested_deps(
+    deps,
+    workspace_root: Path,
+    on_status: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Append RequestedDep entries to the appropriate manifest file.
+    Python deps → requirements.txt; TypeScript → package.json.
+    Idempotent: skips deps already declared.
+
+    CTX-4 (2026-05-20): structured path A. Path B (agent edits the
+    manifest itself) is handled by the same trigger-file hashing
+    downstream — only this helper writes.
+    """
+    if not deps:
+        return
+    py_deps = [d for d in deps if (d.language or "").lower() == "python"]
+    ts_deps = [d for d in deps if (d.language or "").lower() == "typescript"]
+
+    if py_deps:
+        req_path = workspace_root / "requirements.txt"
+        existing = ""
+        if req_path.exists():
+            try:
+                existing = req_path.read_text(encoding="utf-8")
+            except Exception:
+                existing = ""
+        existing_names = {
+            line.split("[", 1)[0].split("==", 1)[0].split(">=", 1)[0]
+                .split("<=", 1)[0].split("~=", 1)[0].strip().lower()
+            for line in existing.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        new_lines = []
+        for d in py_deps:
+            name_lower = d.name.lower()
+            if name_lower in existing_names:
+                continue
+            specifier = d.version or ""
+            line = f"{d.name}{specifier}"
+            new_lines.append(line)
+        if new_lines:
+            tail = "" if existing.endswith("\n") or not existing else "\n"
+            additions = (
+                "\n# v4 requested_deps\n" + "\n".join(new_lines) + "\n"
+            )
+            try:
+                req_path.write_text(existing + tail + additions, encoding="utf-8")
+                if on_status:
+                    on_status(
+                        f"V4: appended {len(new_lines)} requested dep(s) "
+                        f"to requirements.txt: "
+                        f"{[d.name for d in py_deps if d.name.lower() not in existing_names]}"
+                    )
+            except Exception as e:
+                if on_status:
+                    on_status(
+                        f"V4: failed to write requirements.txt: "
+                        f"{type(e).__name__}: {e}"
+                    )
+
+    if ts_deps:
+        # Minimal: append to package.json's dependencies. Best-effort.
+        import json
+        pj_path = workspace_root / "package.json"
+        if not pj_path.exists():
+            return
+        try:
+            data = json.loads(pj_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        deps_block = data.setdefault("dependencies", {})
+        added = []
+        for d in ts_deps:
+            if d.name in deps_block:
+                continue
+            deps_block[d.name] = d.version or "latest"
+            added.append(d.name)
+        if added:
+            try:
+                pj_path.write_text(
+                    json.dumps(data, indent=2) + "\n", encoding="utf-8",
+                )
+                if on_status:
+                    on_status(
+                        f"V4: appended {len(added)} requested dep(s) "
+                        f"to package.json: {added}"
+                    )
+            except Exception:
+                pass
 
 
 def _read_workspace_file(workspace, path: str) -> Optional[str]:
@@ -838,6 +932,18 @@ class V4MilestoneCodeDispatcher:
                 )
                 ctx_section = None
 
+            # CTX-4 (2026-05-20): hash trigger files BEFORE the
+            # agent runs so we can detect requirements.txt /
+            # package.json / Dockerfile changes after.
+            ws_root_path = None
+            ws_root_obj = getattr(workspace, "root", None)
+            if ws_root_obj is not None:
+                from pathlib import Path
+                ws_root_path = Path(str(ws_root_obj))
+            before_hashes = (
+                hash_trigger_files(ws_root_path) if ws_root_path else {}
+            )
+
             # Initial agent dispatch. v4 fix B (2026-05-20): REPAIR
             # uses edit-mode (surgical patches against existing files).
             # IMPLEMENT stays whole-file (greenfield).
@@ -922,6 +1028,37 @@ class V4MilestoneCodeDispatcher:
                     filled_files=synth,
                     notes=initial.notes,
                 )
+            # CTX-4 (2026-05-20): apply requested_deps to requirements.txt
+            # (if any) before checking trigger-file hashes for the
+            # deterministic container rebuild.
+            if initial.requested_deps and ws_root_path is not None:
+                _apply_requested_deps(
+                    initial.requested_deps,
+                    ws_root_path,
+                    on_status=self._on_status,
+                )
+
+            # CTX-4: deterministic container rebuild when manifests changed.
+            # Catches both Path A (requested_deps) and Path B (agent
+            # edited requirements.txt / package.json directly).
+            if ws_root_path is not None and self._compose_path:
+                rebuild_result = maybe_rebuild(
+                    compose_path=self._compose_path,
+                    service_name=service.name,
+                    workspace_root=ws_root_path,
+                    before_hashes=before_hashes,
+                    on_status=self._on_status,
+                )
+                if rebuild_result.triggered and not rebuild_result.success:
+                    # Rebuild failed — surface as a halt reason so the
+                    # validator's fix-loop can act on it on next iter.
+                    self._log(
+                        f"V4: [{issue.id}] container rebuild FAILED "
+                        f"({rebuild_result.mode}, "
+                        f"files={rebuild_result.files_changed}): "
+                        f"{rebuild_result.error_tail[:200]}"
+                    )
+
             # Validate + fix-loop.
             return validator.validate(
                 issue=issue,

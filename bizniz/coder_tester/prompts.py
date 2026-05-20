@@ -69,6 +69,23 @@ HARD CONSTRAINTS:
    swallow errors and re-raise as generic 500s. No assertion-less
    tests. No TODO-only test bodies. No `print()` debug stubs left in.
 
+ADDING DEPENDENCIES (CTX-4):
+
+The "Installed packages" table in the user prompt lists what's
+available. If you need a package NOT in that table:
+
+- **Preferred**: emit a ``requested_deps`` entry — structured
+  ``{"name": "...", "version": "...", "purpose": "...", "language": "python|typescript"}``.
+  Orchestrator appends to requirements.txt / package.json,
+  runs `pip install` + restarts the container + re-validates.
+- **Acceptable**: include the package in your filled_files for
+  requirements.txt / package.json directly.
+
+Do NOT: run pip install in your code, restart containers, run
+pytest to verify, or wrap the new import in defensive try/except.
+The orchestrator handles install + restart + re-validation. If
+install fails, you'll see the pip error next iteration.
+
 SELF-VALIDATE BEFORE EMITTING:
 
 Before you write the JSON, trace through your output ONCE in your head:
@@ -157,6 +174,11 @@ HARD CONSTRAINTS:
 
 9. **Forbidden patterns.** No `except Exception:` re-raising as
    generic 500s. No assertion-less tests.
+
+10. **Adding dependencies (CTX-4)**: same flow as IMPLEMENT mode —
+    prefer ``requested_deps`` for new packages; orchestrator
+    handles install + restart + re-validation. Don't run pip/npm
+    yourself; don't wrap new imports in try/except.
 
 OUTPUT:
 

@@ -23,10 +23,52 @@ from bizniz.coder_tester.prompts import (
     build_user_prompt,
 )
 from bizniz.coder_tester.types import (
-    CoderTesterResult, FileEdit, FilledFile,
+    CoderTesterResult, FileEdit, FilledFile, RequestedDep,
 )
 from bizniz.lib.llm_utils import call_with_retry
 from bizniz.quality_engineer.types import CapabilitySpec
+
+
+# CTX-4 (2026-05-20): shared schema field for structured dep
+# requests. Both whole-file and edit modes embed this so the agent
+# can declare new deps explicitly instead of (or alongside) editing
+# requirements.txt.
+_REQUESTED_DEPS_SCHEMA_FIELD = {
+    "type": "array",
+    "description": (
+        "Dependencies to ADD to the project. The orchestrator "
+        "appends to requirements.txt / package.json, runs install + "
+        "container restart, then re-validates. Use this for NEW "
+        "packages not already in the workspace's deps table. "
+        "Leave empty when no new deps are needed."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Distribution name (pyjwt, react, ...).",
+            },
+            "version": {
+                "type": "string",
+                "description": (
+                    "Version specifier. Empty for latest stable. "
+                    "Examples: '^2.10' (npm), '==2.10.0' (python)."
+                ),
+            },
+            "purpose": {
+                "type": "string",
+                "description": "One-line why (logged).",
+            },
+            "language": {
+                "type": "string",
+                "enum": ["python", "typescript"],
+            },
+        },
+        "required": ["name", "version", "purpose", "language"],
+        "additionalProperties": False,
+    },
+}
 
 
 CODER_TESTER_SCHEMA = {
@@ -71,6 +113,7 @@ CODER_TESTER_SCHEMA = {
                         "additionalProperties": False,
                     },
                 },
+                "requested_deps": _REQUESTED_DEPS_SCHEMA_FIELD,
                 "notes": {
                     "type": "string",
                     "description": (
@@ -79,7 +122,7 @@ CODER_TESTER_SCHEMA = {
                     ),
                 },
             },
-            "required": ["issue_id", "filled_files", "notes"],
+            "required": ["issue_id", "filled_files", "requested_deps", "notes"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -169,6 +212,7 @@ CODER_TESTER_EDIT_SCHEMA = {
                         "additionalProperties": False,
                     },
                 },
+                "requested_deps": _REQUESTED_DEPS_SCHEMA_FIELD,
                 "notes": {
                     "type": "string",
                     "description": (
@@ -177,7 +221,7 @@ CODER_TESTER_EDIT_SCHEMA = {
                     ),
                 },
             },
-            "required": ["issue_id", "edits", "new_files", "notes"],
+            "required": ["issue_id", "edits", "new_files", "requested_deps", "notes"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -187,6 +231,25 @@ CODER_TESTER_EDIT_SCHEMA = {
 
 class CoderTesterError(Exception):
     """Agent output failed validation or violated the path contract."""
+
+
+def _parse_requested_deps(raw_items) -> List[RequestedDep]:
+    """Parse the requested_deps list from raw LLM output. Tolerant
+    of missing or malformed items — bad entries are dropped, not
+    raised, because deps are additive (worst case is the orchestrator
+    doesn't add a dep the agent wanted)."""
+    if not raw_items:
+        return []
+    out: List[RequestedDep] = []
+    for it in raw_items:
+        if not isinstance(it, dict):
+            continue
+        try:
+            out.append(RequestedDep(**it))
+        except Exception:
+            # Skip malformed entry; agent may try again next iter.
+            continue
+    return out
 
 
 class CoderTesterAgent:
@@ -360,13 +423,24 @@ class CoderTesterAgent:
         if notes:
             self._log(f"CoderTesterAgent[{issue.id}]: notes — {notes}")
 
+        # CTX-4 (2026-05-20): capture requested_deps if the agent
+        # emitted any.
+        requested_deps = _parse_requested_deps(raw.get("requested_deps"))
+        if requested_deps:
+            self._log(
+                f"CoderTesterAgent[{issue.id}]: requested "
+                f"{len(requested_deps)} new dep(s): "
+                f"{[d.name for d in requested_deps]}"
+            )
+
         self._log(
             f"CoderTesterAgent[{issue.id}]: → {len(filled)} file(s) filled "
             f"({sum(1 for f in filled if f.role == 'code')} code, "
             f"{sum(1 for f in filled if f.role == 'test')} test)"
         )
         return CoderTesterResult(
-            issue_id=issue.id, filled_files=filled, notes=notes,
+            issue_id=issue.id, filled_files=filled,
+            requested_deps=requested_deps, notes=notes,
         )
 
     def _parse_edit_result(
@@ -462,6 +536,15 @@ class CoderTesterAgent:
         if notes:
             self._log(f"CoderTesterAgent[{issue.id}, edit]: notes — {notes}")
 
+        # CTX-4 (2026-05-20): capture requested_deps in edit-mode too.
+        requested_deps = _parse_requested_deps(raw.get("requested_deps"))
+        if requested_deps:
+            self._log(
+                f"CoderTesterAgent[{issue.id}, edit]: requested "
+                f"{len(requested_deps)} new dep(s): "
+                f"{[d.name for d in requested_deps]}"
+            )
+
         self._log(
             f"CoderTesterAgent[{issue.id}, edit]: → {len(edits)} edit(s) "
             f"+ {len(new_files)} new file(s) across "
@@ -469,7 +552,8 @@ class CoderTesterAgent:
         )
         return CoderTesterResult(
             issue_id=issue.id, edits=edits,
-            filled_files=new_files,  # new_files reuse the filled_files slot
+            filled_files=new_files,
+            requested_deps=requested_deps,
             notes=notes,
         )
 

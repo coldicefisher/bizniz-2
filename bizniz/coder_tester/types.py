@@ -60,15 +60,53 @@ class FileEdit(BaseModel):
     )
 
 
+class RequestedDep(BaseModel):
+    """One dependency the agent wants added to the project.
+
+    CTX-4 (2026-05-20): structured alternative to "agent edits
+    requirements.txt mid-call". Both paths work; this one is
+    explicit so the orchestrator can validate package names + log
+    what was added.
+    """
+    name: str = Field(
+        ...,
+        description="Distribution name (pyjwt, python-dateutil, react, ...).",
+    )
+    version: str = Field(
+        default="",
+        description=(
+            "Version specifier. Empty for latest stable. Examples: "
+            "'^2.10' (npm), '==2.10.0' (python), '>=3.0' (python)."
+        ),
+    )
+    purpose: str = Field(
+        default="",
+        description="One-line why (logged for operator visibility).",
+    )
+    language: str = Field(
+        default="python",
+        description="'python' or 'typescript'.",
+    )
+
+
 class CoderTesterResult(BaseModel):
     """Output envelope from one CoderTesterAgent dispatch (one issue).
 
     Whole-file mode: ``filled_files`` is populated, ``edits`` empty.
     Edit mode: ``edits`` is populated, ``filled_files`` empty.
+    Either mode: ``requested_deps`` may carry structured dep adds.
     """
     issue_id: str = Field(..., description="Echoes the issue id for traceability.")
     filled_files: List[FilledFile] = Field(default_factory=list)
     edits: List[FileEdit] = Field(default_factory=list)
+    requested_deps: List[RequestedDep] = Field(
+        default_factory=list,
+        description=(
+            "CTX-4 (2026-05-20): structured dep additions. Orchestrator "
+            "appends to requirements.txt / package.json, runs install + "
+            "restart, then re-validates."
+        ),
+    )
     notes: str = Field(
         default="",
         description=(
