@@ -205,8 +205,22 @@ class PerIssueValidator:
         return written
 
     def _scan(self, issue: Issue, files_written: List[str]) -> List[Finding]:
-        """Run all deterministic scanners; return one Finding list."""
+        """Run all deterministic scanners; return one Finding list.
+
+        Only BLOCKING findings appear in the returned list — the
+        per-issue fix-loop iterates on these. ``unresolved_attribute``
+        findings (from symbol_validator's attribute-access check) are
+        treated as ADVISORY: they're noisy on framework-magic patterns
+        (Pydantic ``model_fields``, SQLAlchemy ``__tablename__``,
+        SQLAlchemy ``Base.registry``) and the v4 live run on
+        recipe_v4_v4 (2026-05-19) showed the agent ping-ponging
+        between equally-valid alternatives to satisfy false positives.
+        Genuine attribute hallucinations still surface downstream in
+        QE + CR review. Logged here so the operator can spot them
+        without blocking the loop.
+        """
         findings: List[Finding] = []
+        advisory_count = 0
 
         # Python symbol + AST validation. Skip for non-python issues
         # (TypeScript validation is deferred per symbol_validator.py).
@@ -230,21 +244,18 @@ class PerIssueValidator:
                         message=f"unresolved {u.kind}: {u.symbol} ({u.reason})",
                         raw=f"{u.file}:{u.line} {u.symbol} — {u.reason}",
                     ))
-                for ua in report.unresolved_attributes:
-                    findings.append(Finding(
-                        source="symbol_validator",
-                        file=ua.file,
-                        line=ua.line,
-                        message=(
-                            f"unknown attribute {ua.var}.{ua.attribute} on "
-                            f"{ua.class_name} (available: "
-                            f"{', '.join(ua.available[:5])})"
-                        ),
-                        raw=f"{ua.file}:{ua.line} {ua.var}.{ua.attribute}",
-                    ))
+                # unresolved_attributes are ADVISORY — log count, don't
+                # surface as blocking findings (see docstring).
+                advisory_count = len(report.unresolved_attributes)
 
         if self._run_pytest_collect:
             findings.extend(self._pytest_collect(issue, files_written))
+
+        if advisory_count:
+            self._log(
+                f"PerIssueValidator[{issue.id}]: {advisory_count} "
+                f"attribute-access advisor(y/ies) — not blocking (logged)"
+            )
 
         return findings
 
