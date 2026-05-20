@@ -319,6 +319,115 @@ class TestRepairPath:
         repair_agent.code_issue.assert_called()
         implement_agent.code_issue.assert_not_called()
 
+    def test_parallel_services_dispatched_concurrently(self, tmp_path):
+        """v4 fix #2: two services in the same topological layer
+        run concurrently (not sequentially)."""
+        import threading
+        import time as _time
+        from bizniz.workspace.local_workspace import LocalWorkspace
+
+        backend = _service("backend", language="python")
+        frontend = _service("frontend", language="python")
+
+        planner = MagicMock()
+        planner.plan_service.return_value = ScaffoldedPlanResult(
+            issues=[_issue("X-001")],
+            seeded_files=[
+                SeededFile(path="app/x-001.py", content="pass\n", rationale=""),
+            ],
+        )
+
+        in_flight = []
+        max_in_flight = [0]
+        lock = threading.Lock()
+
+        def slow_code_issue(*, issue, **kwargs):
+            with lock:
+                in_flight.append(issue.id)
+                if len(in_flight) > max_in_flight[0]:
+                    max_in_flight[0] = len(in_flight)
+            _time.sleep(0.1)
+            with lock:
+                in_flight.remove(issue.id)
+            return CoderTesterResult(
+                issue_id=issue.id,
+                filled_files=[
+                    FilledFile(
+                        path=issue.target_files[0],
+                        content="def x(): return 1\n", role="code",
+                    ),
+                    FilledFile(
+                        path=issue.test_files[0],
+                        content="def test_x(): assert True\n", role="test",
+                    ),
+                ],
+            )
+
+        agent = MagicMock()
+        agent.code_issue.side_effect = slow_code_issue
+
+        # Per-service factory returns the same mock so we can observe
+        # max-in-flight across services.
+        ws_factory = _ws_factory(tmp_path)
+        dispatcher = V4MilestoneCodeDispatcher(
+            planner_factory=lambda _s: planner,
+            coder_tester_factory=lambda _s: agent,
+            workspace_for_service=ws_factory,
+        )
+        t0 = _time.time()
+        dispatcher.run(
+            architecture=_arch(services=[backend, frontend]),
+            enriched_spec=_spec(),
+        )
+        wall = _time.time() - t0
+        # Both services in same layer (no cross-service deps) →
+        # ran in parallel → wall ≈ max(per-service), not sum.
+        # 2 services × 1 issue × 0.1s/issue: parallel = ~0.1-0.2s,
+        # sequential = ~0.2-0.4s. Use 0.3s as the boundary.
+        assert wall < 0.6, f"expected parallel, got {wall:.2f}s"
+        # At least 2 issues in flight simultaneously across services.
+        assert max_in_flight[0] >= 2
+
+    def test_repair_workspace_summary_passed_to_planner_when_supported(self, tmp_path):
+        """v4 fix #4: planner.plan_repair is called with
+        workspace_summary kwarg when the planner's signature accepts
+        it AND there's meaningful workspace content."""
+        # Set up a workspace with a .py file so _compute_workspace_summary
+        # has something to report.
+        ws_factory = _ws_factory(tmp_path)
+        ws = ws_factory("backend")
+        ws.write_file("app/existing.py", "def foo(): pass\n")
+
+        # Mock planner whose plan_repair signature accepts workspace_summary.
+        def plan_repair_stub(*, architecture, enriched_spec, service,
+                             prior_issues, prior_dispositions,
+                             coverage_report, code_review_report,
+                             repair_iteration, skeleton_md=None,
+                             auth_contract=None, workspace_summary=None):
+            return []
+        repair_planner = MagicMock()
+        repair_planner.plan_repair.side_effect = plan_repair_stub
+
+        dispatcher = V4MilestoneCodeDispatcher(
+            planner_factory=lambda _s: MagicMock(),
+            coder_tester_factory=lambda _s: MagicMock(),
+            workspace_for_service=ws_factory,
+            repair_planner_factory=lambda _s: repair_planner,
+        )
+        dispatcher.repair(
+            architecture=_arch(),
+            enriched_spec=_spec(),
+            coverage_report=MagicMock(),
+            code_review_report=MagicMock(),
+            repair_iteration=1,
+        )
+        assert repair_planner.plan_repair.called
+        kwargs = repair_planner.plan_repair.call_args.kwargs
+        # workspace_summary is passed when computed AND planner accepts it.
+        assert "workspace_summary" in kwargs
+        assert kwargs["workspace_summary"]  # non-empty
+        assert "app/existing.py" in kwargs["workspace_summary"]
+
     def test_repair_planner_emits_zero_issues_logs_warning(self, tmp_path):
         # Empty repair plan → service skipped, no fix-issues dispatched.
         repair_planner = MagicMock()

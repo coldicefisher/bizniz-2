@@ -39,6 +39,12 @@ def build_repair_prompt(
     repair_iteration: int,                # 1 or 2
     skeleton_md: Optional[str] = None,
     auth_contract: Optional[str] = None,
+    # v4 fix #4 (2026-05-19): optional snapshot of the live
+    # workspace state. Passed by V4MilestoneCodeDispatcher so the
+    # planner sees what's actually on disk now (post prior repair
+    # iters), not just the frozen review report. Reduces wasted
+    # fix-issues that re-attempt already-done work.
+    workspace_summary: Optional[str] = None,
 ) -> str:
     """Assemble the user prompt for ServicePlanner.plan_repair()."""
     sections: list[str] = []
@@ -53,6 +59,16 @@ def build_repair_prompt(
     )
 
     sections.append(f"## Target service\n\n{_render_service(service)}")
+
+    if workspace_summary:
+        sections.append(
+            "## Current workspace state (post prior repair iter)\n\n"
+            "These files have been modified since the original "
+            "implementation. Consider what's already done before "
+            "emitting fix-issues — don't re-attempt work that's "
+            "already addressed.\n\n"
+            f"{workspace_summary}"
+        )
 
     sections.append("## Prior implementation issues + dispositions\n")
     if not prior_issues:

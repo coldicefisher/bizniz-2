@@ -152,6 +152,11 @@ class ServicePlanner:
         repair_iteration: int,
         skeleton_md: Optional[str] = None,
         auth_contract: Optional[str] = None,
+        # v4 fix #4 (2026-05-19): optional snapshot of the live
+        # workspace state so the planner doesn't emit fix-issues for
+        # things already partially addressed by earlier iters. When
+        # None, prompt unchanged (back-compat with v3.1 + v2 callers).
+        workspace_summary: Optional[str] = None,
     ) -> List[Issue]:
         """Repair-mode planning. Takes review findings + prior issues
         and emits MINIMUM fix-issues.
@@ -175,6 +180,7 @@ class ServicePlanner:
             repair_iteration=repair_iteration,
             skeleton_md=skeleton_md,
             auth_contract=auth_contract,
+            workspace_summary=workspace_summary,
         )
 
         raw = call_with_retry(

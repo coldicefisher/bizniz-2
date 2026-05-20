@@ -23,6 +23,7 @@ MilestoneLoop is unchanged downstream.
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -56,6 +57,20 @@ WorkspaceForService = Callable[[str], BaseWorkspace]
 def _is_code_bearing(service: ServiceDefinition) -> bool:
     lang = (service.language or "").lower()
     return lang not in {"yaml", "sql"}
+
+
+def _read_workspace_file(workspace, path: str) -> Optional[str]:
+    """Read a file from the workspace if it exists. Returns None on
+    miss or error. Used by repair-mode dispatch to seed the
+    CoderTesterAgent with what's currently on disk (after prior
+    fix-issues' writes), not the planner's frozen output."""
+    try:
+        p = workspace.path(path)
+        if p.exists() and p.is_file():
+            return p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    return None
 
 
 class V4MilestoneCodeDispatcher:
@@ -134,6 +149,13 @@ class V4MilestoneCodeDispatcher:
         per_service_notes: List[str] = []
 
         for layer in layers:
+            # v4 fix #2 (2026-05-19): parallelize services WITHIN a
+            # topological layer. Services in the same layer don't
+            # depend on each other (by definition of the layer) so
+            # backend + frontend can run their planner + IMPLEMENT
+            # concurrently. recipe_v4_v8 wasted ~5 min running them
+            # sequentially.
+            eligible = []
             for service in layer:
                 if not _is_code_bearing(service):
                     self._log(
@@ -148,20 +170,56 @@ class V4MilestoneCodeDispatcher:
                         f"(only_service={self._only_service!r})"
                     )
                     continue
-                skeleton_md = (
-                    skeleton_md_for_service(service.name)
-                    if skeleton_md_for_service else None
-                )
+                eligible.append(service)
 
-                result = self._dispatch_service(
-                    service=service,
-                    architecture=architecture,
-                    enriched_spec=enriched_spec,
-                    skeleton_md=skeleton_md,
-                    auth_contract=auth_contract,
-                    active_store=active_store,
-                    repair_iteration=0,
-                )
+            if not eligible:
+                continue
+
+            self._log(
+                f"V4MilestoneCodeDispatcher: dispatching {len(eligible)} "
+                f"service(s) in parallel: {[s.name for s in eligible]}"
+            )
+
+            results_by_name: Dict[str, dict] = {}
+            with ThreadPoolExecutor(max_workers=len(eligible)) as ex:
+                future_to_name = {}
+                for service in eligible:
+                    skeleton_md = (
+                        skeleton_md_for_service(service.name)
+                        if skeleton_md_for_service else None
+                    )
+                    fut = ex.submit(
+                        self._dispatch_service,
+                        service=service,
+                        architecture=architecture,
+                        enriched_spec=enriched_spec,
+                        skeleton_md=skeleton_md,
+                        auth_contract=auth_contract,
+                        active_store=active_store,
+                        repair_iteration=0,
+                    )
+                    future_to_name[fut] = service.name
+                for fut in as_completed(future_to_name):
+                    name = future_to_name[fut]
+                    try:
+                        results_by_name[name] = fut.result()
+                    except Exception as e:
+                        self._log(
+                            f"V4MilestoneCodeDispatcher: `{name}` raised "
+                            f"{type(e).__name__}: {e}"
+                        )
+                        results_by_name[name] = {
+                            "issues": [], "completed": [], "deferred": [],
+                            "wall_s": 0.0,
+                            "notes": [f"service raised: {type(e).__name__}: {e}"],
+                        }
+
+            # Aggregate in deterministic order (by service definition order).
+            for service in eligible:
+                result = results_by_name.get(service.name) or {
+                    "issues": [], "completed": [], "deferred": [],
+                    "wall_s": 0.0, "notes": [],
+                }
                 completed.extend(result["completed"])
                 deferred.extend(result["deferred"])
                 for issue in result["issues"]:
@@ -251,120 +309,67 @@ class V4MilestoneCodeDispatcher:
 
         layers = topological_layers(list(architecture.services))
         for layer in layers:
-            for service in layer:
-                if not _is_code_bearing(service):
-                    continue
-                if (self._only_service is not None
-                        and service.name != self._only_service):
-                    continue
-                skeleton_md = (
-                    skeleton_md_for_service(service.name)
-                    if skeleton_md_for_service else None
+            eligible = [
+                s for s in layer
+                if _is_code_bearing(s) and (
+                    self._only_service is None or s.name == self._only_service
                 )
+            ]
+            if not eligible:
+                continue
 
-                repair_planner = self._repair_planner_factory(service)
-                self._log(
-                    f"V4 repair: planning `{service.name}` "
-                    f"(iter {repair_iteration})"
-                )
-                t0 = time.time()
-                # Pull prior issues + dispositions from the issue store
-                # when available (production ServicePlanner.plan_repair
-                # uses them as context). Empty when no store wired.
-                prior_issues: list = []
-                prior_dispositions: dict = {}
-                if active_store is not None:
+            self._log(
+                f"V4 repair: dispatching {len(eligible)} service(s) "
+                f"in parallel: {[s.name for s in eligible]}"
+            )
+
+            # v4 fix #2 (2026-05-19): parallelize repair across
+            # services within a layer (same as run()).
+            results_by_name: Dict[str, dict] = {}
+            with ThreadPoolExecutor(max_workers=len(eligible)) as ex:
+                future_to_name = {}
+                for service in eligible:
+                    skeleton_md = (
+                        skeleton_md_for_service(service.name)
+                        if skeleton_md_for_service else None
+                    )
+                    fut = ex.submit(
+                        self._repair_one_service,
+                        service=service,
+                        architecture=architecture,
+                        enriched_spec=enriched_spec,
+                        coverage_report=coverage_report,
+                        code_review_report=code_review_report,
+                        repair_iteration=repair_iteration,
+                        skeleton_md=skeleton_md,
+                        auth_contract=auth_contract,
+                        active_store=active_store,
+                        workspace_summary=workspace_summary,
+                    )
+                    future_to_name[fut] = service.name
+                for fut in as_completed(future_to_name):
+                    name = future_to_name[fut]
                     try:
-                        prior_issues = list(
-                            active_store.list_issues_for_service(service.name) or []
+                        results_by_name[name] = fut.result()
+                    except Exception as e:
+                        self._log(
+                            f"V4 repair: `{name}` raised "
+                            f"{type(e).__name__}: {e}"
                         )
-                        prior_dispositions = dict(
-                            active_store.dispositions_for_service(service.name) or {}
-                        ) if hasattr(active_store, "dispositions_for_service") else {}
-                    except Exception:
-                        prior_issues = []
-                        prior_dispositions = {}
-                try:
-                    # Production ServicePlanner uses ``plan_repair``; the
-                    # scaffolded variant doesn't have a repair() method
-                    # yet so we route through the production planner
-                    # that v2_build wires into ``repair_planner_factory``.
-                    if hasattr(repair_planner, "plan_repair"):
-                        fix_issues_raw = repair_planner.plan_repair(
-                            architecture=architecture,
-                            enriched_spec=enriched_spec,
-                            service=service,
-                            prior_issues=prior_issues,
-                            prior_dispositions=prior_dispositions,
-                            coverage_report=coverage_report,
-                            code_review_report=code_review_report,
-                            repair_iteration=repair_iteration,
-                            skeleton_md=skeleton_md,
-                            auth_contract=auth_contract,
-                        )
-                    else:
-                        # Fallback: object with a .repair() that returns
-                        # something with .issues (scaffolded variant, if
-                        # one ever lands).
-                        result_obj = repair_planner.repair(
-                            architecture=architecture,
-                            enriched_spec=enriched_spec,
-                            service=service,
-                            coverage_report=coverage_report,
-                            code_review_report=code_review_report,
-                            repair_iteration=repair_iteration,
-                            skeleton_md=skeleton_md,
-                            auth_contract=auth_contract,
-                        )
-                        fix_issues_raw = list(
-                            getattr(result_obj, "issues", []) or []
-                        )
-                except Exception as e:
-                    self._log(
-                        f"V4 repair: `{service.name}` planner failed: "
-                        f"{type(e).__name__}: {e}"
-                    )
-                    per_service_notes.append(
-                        f"`{service.name}` repair planner failed: "
-                        f"{type(e).__name__}: {e}"
-                    )
-                    continue
+                        results_by_name[name] = {
+                            "issues": [], "completed": [], "deferred": [],
+                            "wall_s": 0.0,
+                            "notes": [f"raised: {type(e).__name__}: {e}"],
+                        }
 
-                fix_issues = list(fix_issues_raw or [])
-                seeded_files: list = []  # plan_repair doesn't emit seeds
-                if not fix_issues:
-                    self._log(
-                        f"V4 repair: `{service.name}` planner emitted 0 "
-                        f"fix-issues (nothing to repair?)"
-                    )
-                    continue
-
-                self._log(
-                    f"V4 repair: `{service.name}` → {len(fix_issues)} "
-                    f"fix-issue(s) (took {time.time() - t0:.1f}s)"
-                )
-
-                # Materialize any new seeded scaffold from repair.
-                self._materialize_seed(service, seeded_files)
-
-                # Dispatch via PIRunner with repair tier factory.
-                runner_result = self._run_pirunner(
-                    service=service,
-                    architecture=architecture,
-                    enriched_spec=enriched_spec,
-                    issues=fix_issues,
-                    seeded_files=seeded_files,
-                    skeleton_md=skeleton_md,
-                    auth_contract=auth_contract,
-                    use_repair_tier=True,
-                )
-
-                svc_completed, svc_deferred = self._summarize_run(
-                    fix_issues, runner_result, active_store, service.name,
-                )
-                completed.extend(svc_completed)
-                deferred.extend(svc_deferred)
-                for issue in fix_issues:
+            for service in eligible:
+                result = results_by_name.get(service.name) or {
+                    "issues": [], "completed": [], "deferred": [],
+                    "wall_s": 0.0, "notes": [],
+                }
+                completed.extend(result["completed"])
+                deferred.extend(result["deferred"])
+                for issue in result["issues"]:
                     all_issues.append(EngineerIssue(
                         id=issue.id,
                         title=issue.title,
@@ -374,13 +379,14 @@ class V4MilestoneCodeDispatcher:
                         success_criteria=list(issue.success_criteria),
                         depends_on=list(issue.depends_on),
                         spec_refs=list(issue.spec_refs),
-                        status="done" if issue.id in svc_completed else "blocked",
+                        status="done" if issue.id in result["completed"] else "blocked",
                     ))
                 per_service_summaries.append(
-                    f"`{service.name}`: {len(svc_completed)}/"
-                    f"{len(fix_issues)} fix-issues in "
-                    f"{runner_result.wall_s:.1f}s"
+                    f"`{service.name}`: {len(result['completed'])}/"
+                    f"{len(result['issues'])} fix-issues in "
+                    f"{result['wall_s']:.1f}s"
                 )
+                per_service_notes.extend(result["notes"])
 
         plan = EngineerPlan(
             approach=(
@@ -404,6 +410,220 @@ class V4MilestoneCodeDispatcher:
             deferred_units=list(deferred),
             notes=per_service_notes,
         )
+
+    # ── Workspace summary (v4 fix #4) ─────────────────────────────
+
+    def _compute_workspace_summary(
+        self, service: ServiceDefinition,
+    ) -> Optional[str]:
+        """Render a compact summary of the service's workspace state
+        for the repair planner. Lists modified files + their sizes
+        + (when available) git status. Best-effort — returns None on
+        any error so the prompt falls back to its v3.1 behavior.
+
+        Capped at ~3000 chars so it doesn't blow up the planner
+        prompt.
+        """
+        try:
+            workspace = self._workspace_for_service(service.workspace_name)
+            ws_root = getattr(workspace, "root", None)
+            if ws_root is None:
+                return None
+            ws_path = Path(str(ws_root))
+            if not ws_path.exists():
+                return None
+        except Exception:
+            return None
+
+        lines: List[str] = []
+        try:
+            import subprocess
+            # git status — short form — within the workspace dir.
+            proc = subprocess.run(
+                ["git", "status", "--short"],
+                cwd=str(ws_path),
+                capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                lines.append("### git status (short)")
+                lines.append("```")
+                lines.append(proc.stdout.strip())
+                lines.append("```")
+        except Exception:
+            pass
+
+        # Top-level file listing with sizes (skip __pycache__, .git).
+        try:
+            file_lines = []
+            for p in sorted(ws_path.rglob("*.py")):
+                if any(part in {"__pycache__", ".git", ".pytest_cache",
+                                "node_modules", ".venv"} for part in p.parts):
+                    continue
+                try:
+                    size = p.stat().st_size
+                    rel = p.relative_to(ws_path)
+                    file_lines.append(f"  {rel} ({size} bytes)")
+                except Exception:
+                    pass
+            if file_lines:
+                lines.append("\n### Python files on disk")
+                lines.extend(file_lines[:60])  # cap to keep prompt sane
+        except Exception:
+            pass
+
+        if not lines:
+            return None
+        summary = "\n".join(lines)
+        if len(summary) > 3000:
+            summary = summary[:3000] + "\n...(truncated)"
+        return summary
+
+    # ── Repair: per-service helper ────────────────────────────────
+
+    def _repair_one_service(
+        self,
+        *,
+        service: ServiceDefinition,
+        architecture: SystemArchitecture,
+        enriched_spec: EnrichedSpec,
+        coverage_report,
+        code_review_report,
+        repair_iteration: int,
+        skeleton_md: Optional[str],
+        auth_contract: Optional[str],
+        active_store: Optional[IssueStateStore],
+        workspace_summary: Optional[str] = None,
+    ) -> dict:
+        """One service's REPAIR pass. Same dict shape as
+        ``_dispatch_service`` (issues, completed, deferred, wall_s,
+        notes) so the caller can aggregate uniformly. v4 fix #2
+        (2026-05-19): callable concurrently against sibling services."""
+        t0 = time.time()
+        repair_planner = self._repair_planner_factory(service)
+        self._log(
+            f"V4 repair: planning `{service.name}` "
+            f"(iter {repair_iteration})"
+        )
+
+        # v4 fix #4: compute live workspace summary if caller didn't
+        # provide one. The planner gets visibility into what's
+        # currently on disk so it doesn't re-attempt already-done work.
+        if not workspace_summary:
+            workspace_summary = self._compute_workspace_summary(service)
+
+        # Prior issues + dispositions context.
+        prior_issues: list = []
+        prior_dispositions: dict = {}
+        if active_store is not None:
+            try:
+                prior_issues = list(
+                    active_store.list_issues_for_service(service.name) or []
+                )
+                prior_dispositions = dict(
+                    active_store.dispositions_for_service(service.name) or {}
+                ) if hasattr(active_store, "dispositions_for_service") else {}
+            except Exception:
+                prior_issues = []
+                prior_dispositions = {}
+
+        try:
+            if hasattr(repair_planner, "plan_repair"):
+                # v4 fix #4 (2026-05-19): pass workspace_summary when
+                # the planner accepts it. Production ServicePlanner.
+                # plan_repair now does. If the call raises TypeError
+                # because of an unexpected kwarg (older custom
+                # planner), retry without workspace_summary.
+                kw = dict(
+                    architecture=architecture,
+                    enriched_spec=enriched_spec,
+                    service=service,
+                    prior_issues=prior_issues,
+                    prior_dispositions=prior_dispositions,
+                    coverage_report=coverage_report,
+                    code_review_report=code_review_report,
+                    repair_iteration=repair_iteration,
+                    skeleton_md=skeleton_md,
+                    auth_contract=auth_contract,
+                )
+                if workspace_summary:
+                    kw["workspace_summary"] = workspace_summary
+                try:
+                    fix_issues_raw = repair_planner.plan_repair(**kw)
+                except TypeError as e:
+                    if workspace_summary and "workspace_summary" in str(e):
+                        # Older planner — drop the new kwarg and retry.
+                        kw.pop("workspace_summary", None)
+                        fix_issues_raw = repair_planner.plan_repair(**kw)
+                    else:
+                        raise
+            else:
+                result_obj = repair_planner.repair(
+                    architecture=architecture,
+                    enriched_spec=enriched_spec,
+                    service=service,
+                    coverage_report=coverage_report,
+                    code_review_report=code_review_report,
+                    repair_iteration=repair_iteration,
+                    skeleton_md=skeleton_md,
+                    auth_contract=auth_contract,
+                )
+                fix_issues_raw = list(
+                    getattr(result_obj, "issues", []) or []
+                )
+        except Exception as e:
+            self._log(
+                f"V4 repair: `{service.name}` planner failed: "
+                f"{type(e).__name__}: {e}"
+            )
+            return {
+                "issues": [], "completed": [], "deferred": [],
+                "wall_s": time.time() - t0,
+                "notes": [
+                    f"`{service.name}` repair planner failed: "
+                    f"{type(e).__name__}: {e}"
+                ],
+            }
+
+        fix_issues = list(fix_issues_raw or [])
+        seeded_files: list = []  # plan_repair doesn't emit seeds
+        if not fix_issues:
+            self._log(
+                f"V4 repair: `{service.name}` planner emitted 0 "
+                f"fix-issues (nothing to repair?)"
+            )
+            return {
+                "issues": [], "completed": [], "deferred": [],
+                "wall_s": time.time() - t0, "notes": [],
+            }
+
+        self._log(
+            f"V4 repair: `{service.name}` → {len(fix_issues)} "
+            f"fix-issue(s) (took {time.time() - t0:.1f}s)"
+        )
+
+        self._materialize_seed(service, seeded_files)
+
+        runner_result = self._run_pirunner(
+            service=service,
+            architecture=architecture,
+            enriched_spec=enriched_spec,
+            issues=fix_issues,
+            seeded_files=seeded_files,
+            skeleton_md=skeleton_md,
+            auth_contract=auth_contract,
+            use_repair_tier=True,
+        )
+
+        svc_completed, svc_deferred = self._summarize_run(
+            fix_issues, runner_result, active_store, service.name,
+        )
+        return {
+            "issues": fix_issues,
+            "completed": svc_completed,
+            "deferred": svc_deferred,
+            "wall_s": time.time() - t0,
+            "notes": [runner_result.summary_line()],
+        }
 
     # ── Service dispatch ──────────────────────────────────────────
 
@@ -553,15 +773,40 @@ class V4MilestoneCodeDispatcher:
             )
 
         def per_issue_runner(issue: CoderIssue) -> ValidatedIssue:
-            # Build the seeded scaffold for THIS issue only.
+            # Build the seeded scaffold for THIS issue.
             issue_paths = set(issue.target_files) | set(issue.test_files)
-            issue_seed = [
-                CtFilledFile(
-                    path=sf.path, content=sf.content, role="code",
-                )
-                for sf in seeded_files
-                if sf.path in issue_paths
-            ]
+            if use_repair_tier:
+                # v4 fix #3 (2026-05-19): for REPAIR, read the LIVE
+                # workspace state (not the planner's frozen seed).
+                # This is the cross-fix-issue conflict source — agent
+                # B used to see A's pre-fix content as its "seed" and
+                # plan against stale assumptions. Reading from disk
+                # gives B the post-A content.
+                issue_seed = []
+                for path in sorted(issue_paths):
+                    content = _read_workspace_file(workspace, path)
+                    if content is not None:
+                        issue_seed.append(CtFilledFile(
+                            path=path, content=content, role="code",
+                        ))
+                if not issue_seed:
+                    # Fallback to planner seed if disk reads all failed.
+                    issue_seed = [
+                        CtFilledFile(
+                            path=sf.path, content=sf.content, role="code",
+                        )
+                        for sf in seeded_files
+                        if sf.path in issue_paths
+                    ]
+            else:
+                # IMPLEMENT path unchanged: planner's frozen seed.
+                issue_seed = [
+                    CtFilledFile(
+                        path=sf.path, content=sf.content, role="code",
+                    )
+                    for sf in seeded_files
+                    if sf.path in issue_paths
+                ]
             # Filter sibling list to exclude THIS issue.
             siblings = [s for s in sibling_summaries if not s.startswith(f"`{issue.id}` ")]
             # Initial agent dispatch.
