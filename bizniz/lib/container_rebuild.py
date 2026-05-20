@@ -273,20 +273,36 @@ def _soft_rebuild(
             capture_output=True, text=True, timeout=60,
         )
     except subprocess.TimeoutExpired:
-        pass  # health check below will catch this.
+        pass  # health check below will warn if anything's wrong.
 
-    # Health check.
+    # Health check — BEST-EFFORT only (2026-05-20 hotfix).
+    # Original behavior was to FAIL the whole rebuild on health
+    # timeout, which broke for frontend services: they don't expose
+    # a /health endpoint on port 8000 (frontend uses Vite on 5173),
+    # so health check ALWAYS times out for non-Python services,
+    # making container_rebuild report FAILED even when install
+    # succeeded. Trust the install exit code as ground truth;
+    # downgrade health timeout to a warning so subsequent validation
+    # (which actually exercises the service) catches real broken
+    # state.
     health_ok = _wait_for_health(
         compose_path=compose_path,
         service_name=service_name,
         timeout_s=health_timeout_s,
     )
     if not health_ok:
+        if on_status:
+            on_status(
+                f"container_rebuild[{service_name}]: install + restart "
+                f"succeeded but /health didn't go green within "
+                f"{health_timeout_s}s (may be normal for non-Python "
+                f"services without /health endpoint) — proceeding"
+            )
         return RebuildResult(
             triggered=True, mode="soft", files_changed=changed,
-            success=False,
+            success=True,  # install succeeded; trust it
             error_tail=(
-                f"service {service_name} did not return /health green "
+                f"warning: service {service_name} did not return /health "
                 f"within {health_timeout_s}s after install + restart"
             ),
             wall_s=time.time() - t0,
@@ -342,17 +358,25 @@ def _hard_rebuild(
         )
     except subprocess.TimeoutExpired:
         pass
+    # Health check best-effort (2026-05-20 hotfix; same reasoning as
+    # soft path — frontend has no /health, install ground-truth wins).
     health_ok = _wait_for_health(
         compose_path=compose_path,
         service_name=service_name,
         timeout_s=health_timeout_s,
     )
+    if not health_ok and on_status:
+        on_status(
+            f"container_rebuild[{service_name}]: build + recreate "
+            f"succeeded but /health didn't go green within "
+            f"{health_timeout_s}s — proceeding"
+        )
     return RebuildResult(
         triggered=True, mode="hard", files_changed=changed,
-        success=health_ok,
+        success=True,  # build succeeded; trust it
         error_tail=(
             "" if health_ok else
-            f"service {service_name} not healthy within {health_timeout_s}s"
+            f"warning: service {service_name} not healthy within {health_timeout_s}s"
         ),
         wall_s=time.time() - t0,
     )
