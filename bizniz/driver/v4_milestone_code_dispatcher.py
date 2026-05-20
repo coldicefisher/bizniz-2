@@ -236,7 +236,15 @@ class V4MilestoneCodeDispatcher:
         )
         active_store = issue_store if issue_store is not None else self._issue_store
 
-        layers = topological_layers(list(architecture.services))
+        # FIX-1 (2026-05-20): at IMPLEMENT time the compose-graph
+        # depends_on doesn't matter (no runtime services running
+        # yet — Smoke phase brings them up afterwards). Flatten all
+        # code-bearing services into ONE topological layer so they
+        # write concurrently. v13 anchor showed backend (6m) +
+        # frontend (8m) ran sequentially for ~14 min total;
+        # concurrent should land in ~max(6, 8) = ~8m, saving ~6 min
+        # per milestone (compounds across multi-milestone builds).
+        layers = self._flattened_layers_for_implement(architecture)
         all_issues: List[EngineerIssue] = []
         completed: List[str] = []
         deferred: List[str] = []
@@ -505,6 +513,28 @@ class V4MilestoneCodeDispatcher:
             deferred_units=list(deferred),
             notes=per_service_notes,
         )
+
+    # ── Layer flattening for concurrent IMPLEMENT (FIX-1) ──────────
+
+    def _flattened_layers_for_implement(self, architecture):
+        """At IMPLEMENT time, the compose-graph ``depends_on`` doesn't
+        matter — no runtime services running yet. Flatten all
+        code-bearing services into ONE layer so they write
+        concurrently (subject to ``ThreadPoolExecutor(max_workers=len)``
+        in the inner loop). Saves max(backend, frontend) wall vs
+        backend + frontend sequentially.
+
+        REPAIR keeps the topological order (still uses
+        ``topological_layers`` directly) because by repair time the
+        stack is up and depends_on does matter.
+        """
+        code_bearing = [
+            s for s in architecture.services if _is_code_bearing(s)
+        ]
+        if not code_bearing:
+            return []
+        # Single layer containing every code-bearing service.
+        return [code_bearing]
 
     # ── Workspace summary (v4 fix #4) ─────────────────────────────
 
