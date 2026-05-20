@@ -41,6 +41,7 @@ from bizniz.orchestrator.parallel_issue_runner import (
 from bizniz.per_issue_validator.debugger import PerIssueDebugger
 from bizniz.per_issue_validator.types import ValidatedIssue
 from bizniz.per_issue_validator.validator import PerIssueValidator
+from bizniz.workspace_context.builder import WorkspaceContextBuilder
 from bizniz.quality_engineer.types import EnrichedSpec
 from bizniz.service_planner.scaffolded import (
     ScaffoldedPlanResult, ServicePlannerWithScaffold,
@@ -780,6 +781,14 @@ class V4MilestoneCodeDispatcher:
                 f"`{i.id}` — {i.title} ({sib_files})"
             )
 
+        # CTX-1 (2026-05-20): build the preventive context once per
+        # service (workspace is stable between issues; per-issue
+        # content varies). We pass the rendered section text to
+        # each agent call.
+        context_builder = WorkspaceContextBuilder(
+            workspace=workspace, on_status=self._on_status,
+        )
+
         def per_issue_runner(issue: CoderIssue) -> ValidatedIssue:
             # Build the seeded scaffold for THIS issue.
             issue_paths = set(issue.target_files) | set(issue.test_files)
@@ -817,6 +826,18 @@ class V4MilestoneCodeDispatcher:
                 ]
             # Filter sibling list to exclude THIS issue.
             siblings = [s for s in sibling_summaries if not s.startswith(f"`{issue.id}` ")]
+            # Build per-issue context snapshot (CTX-1, 2026-05-20).
+            # Cheap (file IO + manifest parse); always fresh.
+            try:
+                ws_ctx = context_builder.build(issue)
+                ctx_section = ws_ctx.to_prompt_section()
+            except Exception as e:
+                self._log(
+                    f"V4: workspace_context build failed for [{issue.id}] "
+                    f"({type(e).__name__}: {e}) — continuing without"
+                )
+                ctx_section = None
+
             # Initial agent dispatch. v4 fix B (2026-05-20): REPAIR
             # uses edit-mode (surgical patches against existing files).
             # IMPLEMENT stays whole-file (greenfield).
@@ -829,6 +850,7 @@ class V4MilestoneCodeDispatcher:
                 auth_contract=auth_contract,
                 sibling_issue_summaries=siblings,
                 edit_mode=use_repair_tier,
+                workspace_context_section=ctx_section,
             )
             # If edit-mode: apply ``edits`` (existing files) via
             # apply_edits AND write ``new_files`` (paths that don't

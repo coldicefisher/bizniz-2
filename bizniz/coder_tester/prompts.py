@@ -182,6 +182,7 @@ def build_user_prompt(
     auth_contract: Optional[str] = None,
     sibling_issue_summaries: Optional[List[str]] = None,
     edit_mode: bool = False,
+    workspace_context_section: Optional[str] = None,
 ) -> str:
     """Build the per-issue user prompt.
 
@@ -191,6 +192,14 @@ def build_user_prompt(
     by name, without needing the full text of every other issue.
     """
     sections: List[str] = []
+
+    # Preventive context section comes FIRST (CTX-1, 2026-05-20):
+    # the agent reads what's actually installed + what's on disk
+    # before it even sees the issue spec, so all subsequent
+    # reasoning is grounded.
+    if workspace_context_section:
+        sections.append(workspace_context_section)
+        sections.append("")
 
     sections.append(f"## Target service\n")
     sections.append(f"- name: `{service.name}`")

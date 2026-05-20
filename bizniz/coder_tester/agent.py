@@ -216,6 +216,10 @@ class CoderTesterAgent:
         # edits (FileEdit) instead of whole-file content. Use for
         # REPAIR; leave False for IMPLEMENT.
         edit_mode: bool = False,
+        # CTX-1 (2026-05-20): preventive context — installed packages
+        # table, import-name map, live file state, "adding deps"
+        # instructions. Built deterministically per call.
+        workspace_context_section: Optional[str] = None,
     ) -> CoderTesterResult:
         """Code + test ONE issue end-to-end in one LLM call.
 
@@ -246,6 +250,7 @@ class CoderTesterAgent:
             auth_contract=auth_contract,
             sibling_issue_summaries=sibling_issue_summaries,
             edit_mode=edit_mode,
+            workspace_context_section=workspace_context_section,
         )
 
         system_prompt = (
