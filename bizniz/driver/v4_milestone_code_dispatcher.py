@@ -830,22 +830,61 @@ class V4MilestoneCodeDispatcher:
                 sibling_issue_summaries=siblings,
                 edit_mode=use_repair_tier,
             )
-            # If edit-mode, apply patches via apply_edits before
-            # the validator runs (validator reads from disk).
-            if use_repair_tier and initial.edits:
+            # If edit-mode: apply ``edits`` (existing files) via
+            # apply_edits AND write ``new_files`` (paths that don't
+            # exist yet) wholesale. v5 hotfix 2026-05-20: prior
+            # version silently swallowed file_missing failures and
+            # reported false-clean; new_files closes that gap.
+            if use_repair_tier and (initial.edits or initial.filled_files):
                 from bizniz.coder_tester.edits import apply_edits
-                report = apply_edits(workspace, initial.edits)
-                if report.failures:
-                    self._log(
-                        f"V4 repair: [{issue.id}] {len(report.failures)} "
-                        f"edit(s) failed to apply — "
-                        f"{[(f.path, f.reason) for f in report.failures[:3]]}"
-                    )
-                # Synthesize whole-file results from on-disk content
-                # so the validator (which expects FilledFile) can work.
                 from bizniz.coder_tester.types import (
                     CoderTesterResult, FilledFile,
                 )
+                # Step 1: write any new_files (carried in filled_files
+                # for the edit-mode result envelope).
+                new_files_to_write = list(initial.filled_files or [])
+                for nf in new_files_to_write:
+                    try:
+                        workspace.write_file(nf.path, nf.content)
+                    except Exception as e:
+                        self._log(
+                            f"V4 repair: [{issue.id}] failed to write "
+                            f"new_file {nf.path}: {type(e).__name__}: {e}"
+                        )
+                # Step 2: apply edits against existing files. If
+                # apply_edits reports file_missing failures, the agent
+                # got the new_files split wrong — surface as a
+                # CoderTesterError so the validator's fix-loop can
+                # retry instead of reporting false-clean.
+                if initial.edits:
+                    report = apply_edits(workspace, initial.edits)
+                    if report.failures:
+                        # file_missing is the recoverable case — the
+                        # agent should have put these in new_files.
+                        # Other failure modes (no_match, ambiguous)
+                        # mean the agent's old_text was wrong.
+                        self._log(
+                            f"V4 repair: [{issue.id}] {len(report.failures)} "
+                            f"edit(s) failed: "
+                            f"{[(f.path, f.reason) for f in report.failures[:3]]}"
+                        )
+                        # If ANY edits succeeded, partial progress is
+                        # OK — let the validator scan and the loop
+                        # decide. If NONE succeeded, raise so the
+                        # fix-pass mechanism retries.
+                        if not report.paths_written and not new_files_to_write:
+                            from bizniz.coder_tester.agent import CoderTesterError
+                            raise CoderTesterError(
+                                f"CoderTesterAgent[{issue.id}, edit]: ALL "
+                                f"edits failed to apply ({len(report.failures)} "
+                                f"failure(s)). First: "
+                                f"{report.failures[0].path} — "
+                                f"{report.failures[0].reason}. "
+                                f"Agent likely needs to use new_files "
+                                f"instead of edits for missing paths."
+                            )
+                # Synthesize FilledFile[] from on-disk content for
+                # the validator (which expects FilledFile).
                 synth = []
                 for path in (
                     list(issue.target_files) + list(issue.test_files)

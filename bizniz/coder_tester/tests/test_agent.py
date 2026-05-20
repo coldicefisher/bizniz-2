@@ -456,6 +456,90 @@ class TestEditMode:
                     edit_mode=True,
                 )
 
+    def test_edit_mode_supports_new_files(self):
+        """v5 hotfix 2026-05-20: paths that don't exist yet can be
+        emitted as new_files (whole-file content) alongside edits
+        for existing files."""
+        out = {
+            "issue_id": "BE-001",
+            "edits": [
+                {
+                    "path": "app/api/routes/me.py",  # existing
+                    "old_text": "raise NotImplementedError",
+                    "new_text": "return {'ok': True}",
+                    "role": "code",
+                },
+            ],
+            "new_files": [
+                {
+                    "path": "tests/test_me.py",  # NEW
+                    "content": "def test(): assert True\n",
+                    "role": "test",
+                },
+            ],
+            "notes": "",
+        }
+        with patch(
+            "bizniz.coder_tester.agent.call_with_retry",
+            return_value=out,
+        ):
+            agent = CoderTesterAgent(client=MagicMock(spec=BaseAIClient))
+            result = agent.code_issue(
+                issue=_issue(),
+                service=_service(),
+                seeded_files=[],
+                capabilities=[],
+                edit_mode=True,
+            )
+        assert len(result.edits) == 1
+        # new_files come back in the filled_files slot of the result.
+        assert len(result.filled_files) == 1
+        assert result.filled_files[0].path == "tests/test_me.py"
+
+    def test_edit_mode_new_file_out_of_scope_raises(self):
+        """Path-contract gate applies to BOTH edits AND new_files."""
+        bad = {
+            "issue_id": "BE-001",
+            "edits": [],
+            "new_files": [
+                {
+                    "path": "app/secrets/leak.py",  # not in scope
+                    "content": "x", "role": "code",
+                },
+            ],
+            "notes": "",
+        }
+        with patch(
+            "bizniz.coder_tester.agent.call_with_retry",
+            return_value=bad,
+        ):
+            agent = CoderTesterAgent(client=MagicMock(spec=BaseAIClient))
+            with pytest.raises(CoderTesterError, match="outside .* declared scope"):
+                agent.code_issue(
+                    issue=_issue(), service=_service(),
+                    seeded_files=[], capabilities=[],
+                    edit_mode=True,
+                )
+
+    def test_edit_mode_empty_both_lists_raises(self):
+        out = {
+            "issue_id": "BE-001",
+            "edits": [],
+            "new_files": [],
+            "notes": "",
+        }
+        with patch(
+            "bizniz.coder_tester.agent.call_with_retry",
+            return_value=out,
+        ):
+            agent = CoderTesterAgent(client=MagicMock(spec=BaseAIClient))
+            with pytest.raises(CoderTesterError, match="empty edits"):
+                agent.code_issue(
+                    issue=_issue(), service=_service(),
+                    seeded_files=[], capabilities=[],
+                    edit_mode=True,
+                )
+
     def test_edit_mode_prompt_includes_edit_instructions(self):
         with patch(
             "bizniz.coder_tester.agent.call_with_retry",

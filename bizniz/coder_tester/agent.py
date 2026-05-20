@@ -139,6 +139,36 @@ CODER_TESTER_EDIT_SCHEMA = {
                         "additionalProperties": False,
                     },
                 },
+                "new_files": {
+                    "type": "array",
+                    "description": (
+                        "Whole-file content for files that DON'T exist yet "
+                        "in the workspace (no seeded scaffold shown for "
+                        "them). Use ``edits`` for existing files; use "
+                        "``new_files`` only when a path needs to be "
+                        "created from scratch."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Workspace-relative path.",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Complete file content.",
+                            },
+                            "role": {
+                                "type": "string",
+                                "enum": ["code", "test"],
+                                "description": "'code' or 'test'.",
+                            },
+                        },
+                        "required": ["path", "content", "role"],
+                        "additionalProperties": False,
+                    },
+                },
                 "notes": {
                     "type": "string",
                     "description": (
@@ -147,7 +177,7 @@ CODER_TESTER_EDIT_SCHEMA = {
                     ),
                 },
             },
-            "required": ["issue_id", "edits", "notes"],
+            "required": ["issue_id", "edits", "new_files", "notes"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -338,16 +368,22 @@ class CoderTesterAgent:
         self, issue: Issue, raw: dict,
     ) -> CoderTesterResult:
         """Parse the edit-mode envelope. Validates output paths
-        against the issue's declared file set."""
-        items = raw.get("edits") or []
-        if not items:
+        against the issue's declared file set.
+
+        Edit-mode output can have BOTH ``edits`` (for existing files)
+        AND ``new_files`` (for paths that need to be created from
+        scratch). v5 hotfix 2026-05-20.
+        """
+        edit_items = raw.get("edits") or []
+        new_file_items = raw.get("new_files") or []
+        if not edit_items and not new_file_items:
             raise CoderTesterError(
-                f"CoderTesterAgent[{issue.id}, edit]: empty edits. "
-                f"Refusing to ship a no-op result."
+                f"CoderTesterAgent[{issue.id}, edit]: empty edits + "
+                f"new_files. Refusing to ship a no-op result."
             )
 
         edits: List[FileEdit] = []
-        for it in items:
+        for it in edit_items:
             it = dict(it) if isinstance(it, dict) else it
             if isinstance(it, dict) and it.get("role") in (None, ""):
                 path_str = it.get("path", "") or ""
@@ -377,13 +413,35 @@ class CoderTesterAgent:
                     f"item keys: {keys}"
                 )
 
-        # Path-contract gate (same as whole-file mode).
+        new_files: List[FilledFile] = []
+        for it in new_file_items:
+            it = dict(it) if isinstance(it, dict) else it
+            if isinstance(it, dict) and it.get("role") in (None, ""):
+                path_str = it.get("path", "") or ""
+                looks_like_test = (
+                    "/test_" in path_str
+                    or path_str.startswith("test_")
+                    or "/tests/" in path_str
+                    or path_str.endswith("_test.py")
+                    or path_str.endswith(".test.tsx")
+                    or path_str.endswith(".test.ts")
+                )
+                it["role"] = "test" if looks_like_test else "code"
+            try:
+                new_files.append(FilledFile(**it))
+            except Exception as e:
+                raise CoderTesterError(
+                    f"CoderTesterAgent[{issue.id}, edit]: new_files "
+                    f"entry failed validation: {type(e).__name__}: {e}"
+                )
+
+        # Path-contract gate (combined across edits + new_files).
         allowed = set(issue.target_files) | set(issue.test_files)
-        produced = {e.path for e in edits}
+        produced = {e.path for e in edits} | {f.path for f in new_files}
         extras = produced - allowed
         if extras:
             raise CoderTesterError(
-                f"CoderTesterAgent[{issue.id}, edit]: agent wrote edits "
+                f"CoderTesterAgent[{issue.id}, edit]: agent wrote files "
                 f"outside the issue's declared scope: {sorted(extras)}. "
                 f"Allowed: {sorted(allowed)}."
             )
@@ -401,10 +459,13 @@ class CoderTesterAgent:
 
         self._log(
             f"CoderTesterAgent[{issue.id}, edit]: → {len(edits)} edit(s) "
-            f"across {len(produced)} file(s)"
+            f"+ {len(new_files)} new file(s) across "
+            f"{len(produced)} path(s)"
         )
         return CoderTesterResult(
-            issue_id=issue.id, edits=edits, notes=notes,
+            issue_id=issue.id, edits=edits,
+            filled_files=new_files,  # new_files reuse the filled_files slot
+            notes=notes,
         )
 
     def _log(self, msg: str) -> None:

@@ -112,10 +112,13 @@ issue's `target_files` + `test_files`. Each entry's `role` is
 # the cross-fix-issue conflict pattern where whole-file overwrites
 # erased adjacent fix-issues' work.
 CODER_TESTER_EDIT_SYSTEM_PROMPT = """You are a senior software engineer
-fixing ONE atomic issue's code + tests. The files you're fixing
-ALREADY EXIST on disk — you've been shown the CURRENT content. Your
-job is to emit SURGICAL EDITS (find/replace patches), not whole-file
-rewrites.
+fixing ONE atomic issue's code + tests. Two output paths:
+
+  - **edits**: for files that ALREADY EXIST (shown in the scaffold).
+    Surgical find/replace patches. Preserve unchanged code.
+  - **new_files**: for paths in target_files / test_files that DO
+    NOT appear in the scaffold yet (no current content shown).
+    Whole-file content for creation.
 
 HARD CONSTRAINTS:
 
@@ -158,8 +161,14 @@ HARD CONSTRAINTS:
 OUTPUT:
 
 Return ONE JSON object matching the provided edit-mode schema.
-``edits`` array, one entry per surgical change. The runner applies
-each edit via find/replace against the current on-disk content.
+- ``edits`` array — one entry per surgical change to an EXISTING
+  file. Runner applies via find/replace.
+- ``new_files`` array — one entry per path that needs to be CREATED.
+  Runner writes the whole-file content directly.
+
+For each path in the issue's target_files + test_files, decide:
+existing in the scaffold? → use edits. Not in the scaffold? → use
+new_files. Don't put the same path in both.
 """
 
 
@@ -271,27 +280,25 @@ def build_user_prompt(
     if edit_mode:
         sections.append(
             "\n## Your job (EDIT MODE — REPAIR)\n\n"
-            "The files above ALREADY EXIST on disk (the seeded scaffold "
-            "shows the CURRENT content). Emit SURGICAL EDITS — find/"
-            "replace patches — not whole-file rewrites.\n\n"
-            "Output schema: `{issue_id, edits: [{path, old_text, "
-            "new_text, role}], notes}`. For each edit:\n\n"
-            "- `path` MUST be in the issue's target_files or test_files\n"
-            "- `old_text` MUST be a UNIQUE substring of the file's "
-            "current content. If a short change could match multiple "
-            "places, pad with surrounding lines until unique.\n"
-            "- `new_text` is the replacement. Match indentation + "
-            "whitespace exactly.\n"
-            "- Multiple edits to the same file are applied IN ORDER; "
-            "later edits see earlier edits' results.\n\n"
+            "Two output paths, both go into the same JSON envelope:\n\n"
+            "**A. For files ALREADY in the scaffold above** → use "
+            "`edits`. Surgical find/replace patches. Preserve unchanged "
+            "code. Each edit: `{path, old_text, new_text, role}`. "
+            "`old_text` must be a UNIQUE substring of the file's "
+            "current content — pad with surrounding lines until unique. "
+            "Multiple edits to the same file apply IN ORDER.\n\n"
+            "**B. For files in target_files / test_files but NOT in "
+            "the scaffold** (paths that don't exist yet) → use "
+            "`new_files`. Whole-file content for creation. Each entry: "
+            "`{path, content, role}`.\n\n"
             "Rules:\n"
-            "- DO NOT regenerate unchanged code. Preserve everything "
-            "your edit doesn't touch.\n"
-            "- DO NOT emit a single edit covering the whole file — "
-            "that defeats the purpose. Break into focused patches.\n"
-            "- If you can't fix something without rewriting most of "
-            "the file, leave a `notes` line and target the smallest "
-            "viable change.\n"
+            "- Same path NEVER goes in both `edits` and `new_files`.\n"
+            "- For `edits`: do NOT regenerate unchanged code. Preserve "
+            "everything your edit doesn't touch.\n"
+            "- For `edits`: do NOT emit a single edit covering the "
+            "whole file. Break into focused patches.\n"
+            "- If you can't decide whether a file exists, look for it "
+            "in the scaffold above. Present → edit. Absent → new_file.\n"
         )
     else:
         sections.append(
