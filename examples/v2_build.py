@@ -1005,7 +1005,7 @@ def _build_pipeline(args, on_status) -> V2Pipeline:
             client=cr_check_client, on_status=on_status,
         )
         project_git_for_v5 = ProjectGit(
-            root=project_root, on_status=on_status,
+            project_root=project_root, on_status=on_status,
         )
         try:
             milestone_debugger_for_v5 = PerMilestoneDebugger(
