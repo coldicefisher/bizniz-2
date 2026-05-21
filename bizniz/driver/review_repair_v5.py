@@ -186,11 +186,23 @@ class ReviewRepairV5Loop:
                     auth_contract=auth_contract,
                 )
             except Exception as e:
-                self._log(
-                    f"MilestoneLoop[v5]: repair iter {repair_iter} "
-                    f"raised: {type(e).__name__}: {e} — halting"
-                )
-                break
+                err_str = str(e)
+                if "no-op" in err_str or "Refusing to ship" in err_str:
+                    # Agent examined the code and concluded findings are
+                    # already satisfied — no edits needed. Fall through
+                    # to resolution check so the checker can confirm.
+                    self._log(
+                        f"MilestoneLoop[v5]: repair iter {repair_iter} "
+                        f"returned no-op ({type(e).__name__}) — "
+                        f"running resolution check anyway"
+                    )
+                    result = None
+                else:
+                    self._log(
+                        f"MilestoneLoop[v5]: repair iter {repair_iter} "
+                        f"raised: {type(e).__name__}: {e} — halting"
+                    )
+                    break
 
             # Resolution check: examine the current code against
             # canonical findings. Constrained output; no new findings
@@ -400,8 +412,25 @@ class ReviewRepairV5Loop:
             except Exception:
                 pass
 
-        # Cap to keep prompt bounded. Sort so output is deterministic.
-        capped = sorted(paths)[:60]
+        # Priority-sort before capping: file_hint paths first (most
+        # relevant to specific CR findings), then test files (QE
+        # coverage findings need to see tests), then everything else.
+        # Alphabetical within each tier for determinism.
+        file_hints = {
+            f.file_hint for f in canonical.findings
+            if f.file_hint and f.status not in ("resolved", "wont_fix")
+        }
+        test_files = {
+            p for p in paths
+            if "/test_" in p or p.startswith("test_") or "/tests/" in p
+        }
+        other_files = paths - file_hints - test_files
+        ordered = (
+            sorted(file_hints)
+            + sorted(test_files - file_hints)
+            + sorted(other_files)
+        )
+        capped = ordered[:60]
         if not capped:
             self._log(
                 "ReviewRepairV5: _collect_files_for_check returned 0 "
