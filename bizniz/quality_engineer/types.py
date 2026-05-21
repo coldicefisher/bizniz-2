@@ -142,6 +142,32 @@ class CoverageReport(BaseModel):
 # ── Patch output ───────────────────────────────────────────────────────
 
 
+class QEGeneratedTest(BaseModel):
+    """One test file written by QE.write_tests() for a set of findings."""
+    path: str = PydField(..., description="Workspace-relative path (e.g. backend/tests/integration/test_auth.py).")
+    content: str = PydField(..., description="Complete file content — written verbatim to disk.")
+    scope: Literal["e2e", "integration", "unit"] = PydField(..., description="Test scope tier.")
+    service: str = PydField(..., description="Which service this test lives in (e.g. 'backend', 'frontend').")
+    finding_ids: List[str] = PydField(default_factory=list, description="Canonical finding IDs this test covers.")
+
+
+class QEGeneratedPatch(BaseModel):
+    """One source file patch written by QE.write_patches() to address findings."""
+    path: str = PydField(..., description="Workspace-relative path of the file to write.")
+    content: str = PydField(..., description="Complete file content.")
+    finding_ids: List[str] = PydField(default_factory=list, description="Canonical finding IDs this patch addresses.")
+
+
+class QEWriteTestsResult(BaseModel):
+    """Returned by QualityEngineer.write_tests()."""
+    tests: List[QEGeneratedTest] = PydField(default_factory=list)
+
+
+class QEWritePatchesResult(BaseModel):
+    """Returned by QualityEngineer.write_patches()."""
+    patches: List[QEGeneratedPatch] = PydField(default_factory=list)
+
+
 class QETestPatch(BaseModel):
     """A test file the QE writes inline to cover a gap it identified.
 

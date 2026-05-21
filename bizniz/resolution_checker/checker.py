@@ -1,13 +1,13 @@
-"""``ResolutionChecker`` — v5 iter-2+ structured-output reviewer.
+"""``ResolutionChecker`` — DEPRECATED as of 2026-05-20.
 
-Takes a frozen CanonicalReport + current code files and emits a
-ResolutionReport: for each known finding, the LLM judges
-``resolved | still_present | regressed``. Constrained schema; the
-agent CANNOT add new findings.
+Replaced by QualityEngineer.write_tests() + write_patches() + PerMilestoneDebugger.debug_with_tests().
+Test pass/fail is now the convergence signal — no LLM judgment involved.
+Do not use in new code. Will be removed in a future cleanup pass.
 
-Per the v5 spec, runs per-source (QE flavor + CR flavor) in
-parallel — same fan-out as v3.1's parallel review. Both flavors
-share this Checker class; the prompt differs slightly.
+Original purpose: v5 iter-2+ structured-output reviewer. Takes a frozen
+CanonicalReport + current code files and emits a ResolutionReport: for
+each known finding, the LLM judges ``resolved | still_present | regressed``.
+Constrained schema; the agent CANNOT add new findings.
 """
 from __future__ import annotations
 

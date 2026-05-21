@@ -31,6 +31,41 @@ from bizniz.canonical_findings.types import CanonicalFinding
 
 _ALLOWED_TOOLS = ["Edit", "Write", "Read", "Bash", "Glob", "Grep"]
 
+_DEBUG_WITH_TESTS_SYSTEM_PROMPT = """You are a MILESTONE-SCOPED debugger.
+The QA Engineer has written test files that prove the missing scenarios.
+Your job is to make ALL of those tests pass by fixing the SOURCE CODE.
+
+# Hard constraints
+- Do NOT edit the QE-generated test files. They are the spec.
+- Do NOT soften assertions or add skip markers to make tests pass.
+- Do NOT introduce new code unrelated to the failing tests.
+- Do NOT silently swallow exceptions.
+- Imports must actually resolve — verify with Bash if uncertain.
+
+# Toolbox
+- **Read / Glob / Grep** — explore the workspace.
+- **Edit / Write** — fix source files.
+- **Bash** — run tests in Docker to verify:
+    docker compose -f <compose> exec -T <svc> python -m pytest <path> -x
+    docker compose -f <compose> exec -T frontend npx playwright test <path>
+    docker compose -f <compose> logs --tail 50 <svc>
+  Always verify with a real test run before claiming a fix is done.
+
+# Workflow
+1. Run the failing tests first to see the actual errors.
+2. Read the relevant source files.
+3. Make the minimal fix.
+4. Re-run the tests to verify.
+5. Repeat until all tests pass.
+
+# When done
+Emit a final line:
+  DEBUGGER_DONE: status=<clean|partial>, files_touched=[a.py, b.py, ...]
+
+  clean   = all QE-generated tests pass
+  partial = some still failing; note what's left
+"""
+
 
 _SYSTEM_PROMPT = """You are a MILESTONE-SCOPED debugger. The
 pipeline's structured fix-loop couldn't resolve the canonical
@@ -253,6 +288,147 @@ class PerMilestoneDebugger:
             clean=clean,
             files_touched=files_touched,
             wall_s=elapsed,
+            halt_reason="" if clean else "partial",
+            raw_tail=result_text[-1000:],
+        )
+
+    def debug_with_tests(
+        self,
+        *,
+        milestone_name: str,
+        test_paths: List[str],
+    ) -> PerMilestoneDebuggerResult:
+        """Run the debugger against QE-generated tests.
+
+        The tests are the spec. The debugger fixes source code until
+        all tests pass. No canonical findings — test pass/fail is the
+        convergence signal.
+        """
+        t0 = time.time()
+        if not test_paths:
+            self._log(
+                "PerMilestoneDebugger.debug_with_tests: no test paths — nothing to do"
+            )
+            return PerMilestoneDebuggerResult(clean=True, files_touched=[], wall_s=0.0)
+
+        self._log(
+            f"PerMilestoneDebugger[{milestone_name}]: debug_with_tests starting "
+            f"({len(test_paths)} test file(s), timeout={self._timeout_s:.0f}s)"
+        )
+
+        be_paths = [p for p in test_paths if not p.startswith("frontend/")]
+        fe_paths = [p for p in test_paths if p.startswith("frontend/")]
+        e2e_paths = [p for p in fe_paths if ".spec." in p]
+        jest_paths = [p for p in fe_paths if ".spec." not in p]
+
+        run_cmds: List[str] = []
+        if be_paths:
+            paths_str = " ".join(be_paths)
+            run_cmds.append(
+                f"docker compose -f {self._compose_path} exec -T backend "
+                f"python -m pytest {paths_str} -x -v"
+            )
+        if jest_paths:
+            paths_str = " ".join(p.replace("frontend/", "", 1) for p in jest_paths)
+            run_cmds.append(
+                f"docker compose -f {self._compose_path} exec -T frontend "
+                f"npx jest {paths_str} --no-coverage"
+            )
+        if e2e_paths:
+            paths_str = " ".join(p.replace("frontend/", "", 1) for p in e2e_paths)
+            run_cmds.append(
+                f"docker compose -f {self._compose_path} exec -T frontend "
+                f"npx playwright test {paths_str}"
+            )
+
+        prompt_lines = [
+            f"## Milestone: `{milestone_name}`\n",
+            "The QA Engineer has written the following test files. "
+            "Make ALL of them pass by fixing the source code.\n",
+            f"\n## Compose file\n`{self._compose_path}`\n",
+            "\n## Test files to pass\n",
+        ]
+        for p in test_paths:
+            prompt_lines.append(f"- `{p}`")
+        prompt_lines.append("\n## Run commands (start here)\n")
+        for cmd in run_cmds:
+            prompt_lines.append(f"```\n{cmd}\n```")
+        prompt_lines.append(
+            "\n## Your job\n"
+            "1. Run the tests above to see the failures.\n"
+            "2. Read the failing test + the source it exercises.\n"
+            "3. Fix the source (never edit the test files).\n"
+            "4. Re-run to verify.\n"
+            "5. Repeat until all tests pass.\n"
+            "When done emit:\n"
+            "  DEBUGGER_DONE: status=<clean|partial>, files_touched=[...]"
+        )
+        prompt = "\n".join(prompt_lines)
+
+        cmd = [
+            self._command, "--print",
+            "--output-format=json",
+            "--append-system-prompt", _DEBUG_WITH_TESTS_SYSTEM_PROMPT,
+            "--permission-mode", "bypassPermissions",
+            "--allowed-tools", " ".join(_ALLOWED_TOOLS),
+            "--add-dir", str(self._project_root),
+        ] + self._additional_args
+
+        env = os.environ.copy()
+        try:
+            proc = subprocess.run(
+                cmd, input=prompt, capture_output=True, text=True,
+                timeout=self._timeout_s, cwd=str(self._project_root), env=env,
+            )
+        except subprocess.TimeoutExpired:
+            elapsed = time.time() - t0
+            self._log(
+                f"PerMilestoneDebugger[{milestone_name}]: debug_with_tests "
+                f"TIMEOUT after {elapsed:.1f}s"
+            )
+            return PerMilestoneDebuggerResult(
+                clean=False, files_touched=[], wall_s=elapsed, halt_reason="timeout",
+            )
+
+        elapsed = time.time() - t0
+        self._log(
+            f"PerMilestoneDebugger[{milestone_name}]: debug_with_tests done "
+            f"in {elapsed:.1f}s (exit {proc.returncode})"
+        )
+
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout)[:1000]
+            return PerMilestoneDebuggerResult(
+                clean=False, files_touched=[], wall_s=elapsed,
+                halt_reason=f"exit_{proc.returncode}", raw_tail=tail,
+            )
+
+        try:
+            payload = json.loads(proc.stdout)
+            result_text = payload.get("result") or ""
+        except json.JSONDecodeError:
+            result_text = proc.stdout
+
+        status = "partial"
+        files_touched: List[str] = []
+        for line in result_text.splitlines():
+            line = line.strip()
+            if line.startswith("DEBUGGER_DONE:"):
+                if "status=clean" in line:
+                    status = "clean"
+                if "files_touched=[" in line:
+                    inner = line.split("files_touched=[", 1)[1].split("]", 1)[0]
+                    files_touched = [
+                        s.strip().strip("'\"") for s in inner.split(",") if s.strip()
+                    ]
+
+        clean = status == "clean"
+        self._log(
+            f"PerMilestoneDebugger[{milestone_name}]: debug_with_tests "
+            f"status={status}, files_touched={files_touched}"
+        )
+        return PerMilestoneDebuggerResult(
+            clean=clean, files_touched=files_touched, wall_s=elapsed,
             halt_reason="" if clean else "partial",
             raw_tail=result_text[-1000:],
         )

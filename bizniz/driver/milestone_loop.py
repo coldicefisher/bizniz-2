@@ -2033,78 +2033,26 @@ class MilestoneLoop:
         except Exception:
             canonical_path = None
 
-        # QE hybrid: build patch+validate closure. After iter-1 review
-        # the loop calls this with the CoverageReport + EnrichedSpec;
-        # we invoke QE.patch(), write the patches, run PerIssueValidator,
-        # and return the capability_ids that auto-resolved.
-        def _qe_patch_and_apply(coverage, enriched_spec) -> frozenset:
-            from bizniz.quality_engineer.types import QETestPatch
-            if not getattr(self._qe, "patch", None):
-                return frozenset()
+        # Architecture summary for QE prompts.
+        from bizniz.quality_engineer.agent import _summarize_architecture as _qe_arch_summary
+        arch_summary = _qe_arch_summary(architecture)
 
-            # Collect current test files from the workspace.
-            test_files: Dict[str, str] = {}
-            try:
-                all_paths = self._primary_workspace.list_relative_files()
-                test_exts = (".py", ".ts", ".tsx", ".js", ".jsx")
-                for p in all_paths:
-                    if not any(
-                        seg in p.split("/")
-                        for seg in ("__pycache__", "node_modules", ".venv", "dist", "build")
-                    ):
-                        is_test = (
-                            "/test_" in p or p.startswith("test_")
-                            or "/tests/" in p or ".test." in p or ".spec." in p
-                        )
-                        if is_test and p.endswith(test_exts):
-                            content = _safe_read(self._primary_workspace, p)
-                            if content is not None:
-                                test_files[p] = content
-            except Exception as e:
-                self._log(f"QE patch: test file collection failed: {e}")
-
-            patch_result = self._qe.patch(
-                coverage=coverage,
-                enriched_spec=enriched_spec,
-                test_files=test_files,
-            )
-            if not patch_result.patches:
-                return frozenset()
-
-            # Write patches + validate via PerIssueValidator if available.
-            # For now: write files directly and assume clean (no validator
-            # wired yet — validator integration is the next step).
-            # TODO: wire PerIssueValidator here for real test-run gating.
-            resolved_caps: set = set()
-            for patch in patch_result.patches:
-                try:
-                    self._primary_workspace.write_file(patch.path, patch.content)
-                    resolved_caps.update(patch.capability_ids)
-                    self._log(
-                        f"QE auto-patch: wrote {patch.path} "
-                        f"(covers {patch.capability_ids})"
-                    )
-                except Exception as e:
-                    self._log(
-                        f"QE auto-patch: failed to write {patch.path}: "
-                        f"{type(e).__name__}: {e}"
-                    )
-            return frozenset(resolved_caps)
+        # Write-file closure for QE-generated tests + patches.
+        def _write_file(path: str, content: str) -> None:
+            self._primary_workspace.write_file(path, content)
 
         loop = ReviewRepairV5Loop(
             phase_review_parallel=self._phase_review_parallel,
-            repair_dispatcher=self._code_dispatcher,
-            qe_resolution_checker=self._v5_qe_checker,
-            cr_resolution_checker=self._v5_cr_checker,
+            qe_agent=self._qe,
+            architecture_summary=arch_summary,
+            compose_path=str(self._compose_path) if self._compose_path else "",
             project_git=self._project_git,
             canonical_path=canonical_path,
             snapshot_workspace_files=_snapshot_files,
             discover_workspace_files=_discover_files,
+            write_workspace_file=_write_file,
             milestone_debugger=self._milestone_debugger,
-            stall_threshold=self._repair_stall_threshold,
-            hard_cap=self._repair_max_iterations,
             on_status=self._on_status,
-            qe_patch_and_apply=_qe_patch_and_apply,
         )
         return loop.run(
             milestone=milestone,

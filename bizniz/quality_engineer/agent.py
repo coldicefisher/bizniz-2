@@ -32,6 +32,16 @@ from bizniz.quality_engineer.prompts.patch_prompt import (
     PATCH_SYSTEM_PROMPT,
     build_patch_prompt,
 )
+from bizniz.quality_engineer.prompts.write_patches_prompt import (
+    WRITE_PATCHES_SCHEMA,
+    WRITE_PATCHES_SYSTEM_PROMPT,
+    build_write_patches_prompt,
+)
+from bizniz.quality_engineer.prompts.write_tests_prompt import (
+    WRITE_TESTS_SCHEMA,
+    WRITE_TESTS_SYSTEM_PROMPT,
+    build_write_tests_prompt,
+)
 from bizniz.quality_engineer.prompts.review_prompt import (
     REVIEW_SCHEMA,
     REVIEW_SYSTEM_PROMPT,
@@ -40,8 +50,12 @@ from bizniz.quality_engineer.prompts.review_prompt import (
 from bizniz.quality_engineer.types import (
     CoverageReport,
     EnrichedSpec,
+    QEGeneratedPatch,
+    QEGeneratedTest,
     QEPatchResult,
     QETestPatch,
+    QEWritePatchesResult,
+    QEWriteTestsResult,
     QualityEngineerError,
 )
 
@@ -335,6 +349,137 @@ class QualityEngineer:
             f"gaps={len(report.missing_scenarios)}"
         )
         return report
+
+    # ── Public: write_tests ───────────────────────────────────────────
+
+    def write_tests(
+        self,
+        *,
+        coverage: CoverageReport,
+        enriched_spec: EnrichedSpec,
+        architecture_summary: str,
+        compose_path: str,
+        test_files: Dict[str, str],
+        auth_contract: Optional[str] = None,
+    ) -> QEWriteTestsResult:
+        """One-shot: write test files for every missing scenario.
+
+        Tests are the ground truth for the agentic debugger. Highest
+        scope first (E2E → integration → unit). Always Docker.
+        """
+        if not coverage.missing_scenarios:
+            self._log("QualityEngineer (write_tests): no missing scenarios — skipping")
+            return QEWriteTestsResult()
+
+        self._log(
+            f"QualityEngineer (write_tests): {len(coverage.missing_scenarios)} "
+            f"scenario(s) to cover"
+        )
+
+        missing_dicts = [ms.model_dump() for ms in coverage.missing_scenarios]
+        user_prompt = build_write_tests_prompt(
+            milestone_name=coverage.milestone_name,
+            enriched_spec_json=enriched_spec.model_dump_json(indent=2),
+            missing_scenarios=missing_dicts,
+            architecture_summary=architecture_summary,
+            compose_path=compose_path,
+            test_files=test_files,
+            auth_contract=auth_contract,
+        )
+
+        raw = call_with_retry(
+            client=self._client,
+            messages=[
+                Message(role="system", content=WRITE_TESTS_SYSTEM_PROMPT),
+                Message(role="user", content=user_prompt),
+            ],
+            response_format=ResponseFormat.JSON_SCHEMA,
+            schema=WRITE_TESTS_SCHEMA,
+            max_attempts=self._max_retries,
+            on_status=self._on_status,
+            label="QualityEngineer.write_tests",
+        )
+
+        items = raw.get("tests") or []
+        tests: List[QEGeneratedTest] = []
+        for it in items:
+            try:
+                tests.append(QEGeneratedTest(**it))
+            except Exception as e:
+                self._log(
+                    f"QualityEngineer (write_tests): skipping malformed entry: "
+                    f"{type(e).__name__}: {e}"
+                )
+
+        self._log(
+            f"QualityEngineer (write_tests): {len(tests)} test file(s) — "
+            f"e2e={sum(1 for t in tests if t.scope=='e2e')}, "
+            f"integration={sum(1 for t in tests if t.scope=='integration')}, "
+            f"unit={sum(1 for t in tests if t.scope=='unit')}"
+        )
+        return QEWriteTestsResult(tests=tests)
+
+    # ── Public: write_patches ─────────────────────────────────────────
+
+    def write_patches(
+        self,
+        *,
+        coverage: CoverageReport,
+        enriched_spec: EnrichedSpec,
+        architecture_summary: str,
+        source_files: Dict[str, str],
+        auth_contract: Optional[str] = None,
+    ) -> QEWritePatchesResult:
+        """One-shot: write source code patches for missing scenarios.
+
+        Best-effort. The agentic debugger handles convergence.
+        Bias firewall RELAXED — sees source files.
+        """
+        if not coverage.missing_scenarios:
+            self._log("QualityEngineer (write_patches): no missing scenarios — skipping")
+            return QEWritePatchesResult()
+
+        self._log(
+            f"QualityEngineer (write_patches): writing patches for "
+            f"{len(coverage.missing_scenarios)} scenario(s)"
+        )
+
+        missing_dicts = [ms.model_dump() for ms in coverage.missing_scenarios]
+        user_prompt = build_write_patches_prompt(
+            milestone_name=coverage.milestone_name,
+            enriched_spec_json=enriched_spec.model_dump_json(indent=2),
+            missing_scenarios=missing_dicts,
+            architecture_summary=architecture_summary,
+            source_files=source_files,
+            auth_contract=auth_contract,
+        )
+
+        raw = call_with_retry(
+            client=self._client,
+            messages=[
+                Message(role="system", content=WRITE_PATCHES_SYSTEM_PROMPT),
+                Message(role="user", content=user_prompt),
+            ],
+            response_format=ResponseFormat.JSON_SCHEMA,
+            schema=WRITE_PATCHES_SCHEMA,
+            max_attempts=self._max_retries,
+            on_status=self._on_status,
+            label="QualityEngineer.write_patches",
+        )
+
+        items = raw.get("patches") or []
+        patches: List[QEGeneratedPatch] = []
+        for it in items:
+            try:
+                patches.append(QEGeneratedPatch(**it))
+            except Exception as e:
+                self._log(
+                    f"QualityEngineer (write_patches): skipping malformed entry: "
+                    f"{type(e).__name__}: {e}"
+                )
+
+        self._log(f"QualityEngineer (write_patches): {len(patches)} patch(es)")
+        return QEWritePatchesResult(patches=patches)
 
     # ── Public: patch ─────────────────────────────────────────────────
 
