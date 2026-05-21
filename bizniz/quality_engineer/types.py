@@ -137,3 +137,31 @@ class CoverageReport(BaseModel):
 
     def coverage_ratio(self) -> float:
         return self.covered_count / self.total_count if self.total_count else 0.0
+
+
+# ── Patch output ───────────────────────────────────────────────────────
+
+
+class QETestPatch(BaseModel):
+    """A test file the QE writes inline to cover a gap it identified.
+
+    path is workspace-relative (same convention as seeded scaffold).
+    content is the complete file — write it verbatim to disk.
+    capability_ids links back to CanonicalFinding ids so the harness
+    can mark the right findings auto-resolved when the patch validates.
+    """
+    path: str
+    content: str
+    capability_ids: List[str] = PydField(
+        default_factory=list,
+        description="Capability IDs from the EnrichedSpec this patch covers.",
+    )
+    scenario_descriptions: List[str] = PydField(
+        default_factory=list,
+        description="Human-readable list of scenarios covered, for logging.",
+    )
+
+
+class QEPatchResult(BaseModel):
+    """Returned by QualityEngineer.patch() — a batch of test file patches."""
+    patches: List[QETestPatch] = PydField(default_factory=list)

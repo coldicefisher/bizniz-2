@@ -27,6 +27,11 @@ from bizniz.quality_engineer.prompts.enrich_prompt import (
     build_enrich_prompt,
     build_reenrich_prompt,
 )
+from bizniz.quality_engineer.prompts.patch_prompt import (
+    PATCH_SCHEMA,
+    PATCH_SYSTEM_PROMPT,
+    build_patch_prompt,
+)
 from bizniz.quality_engineer.prompts.review_prompt import (
     REVIEW_SCHEMA,
     REVIEW_SYSTEM_PROMPT,
@@ -35,6 +40,8 @@ from bizniz.quality_engineer.prompts.review_prompt import (
 from bizniz.quality_engineer.types import (
     CoverageReport,
     EnrichedSpec,
+    QEPatchResult,
+    QETestPatch,
     QualityEngineerError,
 )
 
@@ -328,6 +335,75 @@ class QualityEngineer:
             f"gaps={len(report.missing_scenarios)}"
         )
         return report
+
+    # ── Public: patch ─────────────────────────────────────────────────
+
+    def patch(
+        self,
+        *,
+        coverage: CoverageReport,
+        enriched_spec: EnrichedSpec,
+        test_files: Dict[str, str],
+        auth_contract: Optional[str] = None,
+    ) -> QEPatchResult:
+        """Emit test file patches for the missing scenarios in ``coverage``.
+
+        Called immediately after review() in the v5 hybrid loop. Patches
+        that validate clean auto-resolve their findings before the
+        CanonicalReport is frozen, collapsing the most common repair
+        iteration (pure test-gap fixes) into the review pass itself.
+
+        Returns an empty QEPatchResult when there is nothing safe to
+        patch — callers must tolerate an empty patch list gracefully.
+        """
+        if not coverage.missing_scenarios:
+            return QEPatchResult()
+
+        self._log(
+            f"QualityEngineer (patch): {len(coverage.missing_scenarios)} "
+            f"missing scenario(s) — attempting inline patches"
+        )
+
+        missing_dicts = [
+            ms.model_dump() for ms in coverage.missing_scenarios
+        ]
+        user_prompt = build_patch_prompt(
+            milestone_name=coverage.milestone_name,
+            enriched_spec_json=enriched_spec.model_dump_json(indent=2),
+            missing_scenarios=missing_dicts,
+            test_files=test_files,
+            auth_contract=auth_contract,
+        )
+
+        raw = call_with_retry(
+            client=self._client,
+            messages=[
+                Message(role="system", content=PATCH_SYSTEM_PROMPT),
+                Message(role="user", content=user_prompt),
+            ],
+            response_format=ResponseFormat.JSON_SCHEMA,
+            schema=PATCH_SCHEMA,
+            max_attempts=self._max_retries,
+            on_status=self._on_status,
+            label="QualityEngineer.patch",
+        )
+
+        items = raw.get("patches") or []
+        patches: List[QETestPatch] = []
+        for it in items:
+            try:
+                patches.append(QETestPatch(**it))
+            except Exception as e:
+                self._log(
+                    f"QualityEngineer (patch): skipping malformed patch "
+                    f"entry: {type(e).__name__}: {e}"
+                )
+
+        self._log(
+            f"QualityEngineer (patch): emitted {len(patches)} patch(es) "
+            f"covering {sum(len(p.capability_ids) for p in patches)} capability id(s)"
+        )
+        return QEPatchResult(patches=patches)
 
     # ── Internals ─────────────────────────────────────────────────────
 

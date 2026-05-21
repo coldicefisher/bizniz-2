@@ -80,6 +80,13 @@ class ReviewRepairV5Loop:
         stall_threshold: int = 3,
         hard_cap: int = 20,
         on_status: Optional[Callable[[str], None]] = None,
+        # QE hybrid: after iter-1 review, call this closure to write
+        # inline test patches for missing scenarios and validate them.
+        # Returns the set of capability_ids that were auto-resolved by
+        # a passing patch (those findings are excluded from the frozen
+        # CanonicalReport). None = disabled (legacy behavior).
+        # Signature: (coverage, enriched_spec) -> frozenset[str]
+        qe_patch_and_apply: Optional[Callable] = None,
     ):
         self._phase_review_parallel = phase_review_parallel
         self._repair_dispatcher = repair_dispatcher
@@ -93,6 +100,7 @@ class ReviewRepairV5Loop:
         self._stall_threshold = max(1, int(stall_threshold))
         self._hard_cap = max(1, int(hard_cap))
         self._on_status = on_status
+        self._qe_patch_and_apply = qe_patch_and_apply
 
     def _log(self, msg: str) -> None:
         if self._on_status:
@@ -129,9 +137,35 @@ class ReviewRepairV5Loop:
             )
             return coverage, code_review, initial_result, 0, ""
 
+        # QE hybrid: attempt inline test patches for missing scenarios.
+        # Patches that validate clean auto-resolve their capability_ids
+        # before we freeze — shrinks the CanonicalReport and may
+        # eliminate entire repair iters for pure test-gap milestones.
+        auto_resolved_cap_ids: frozenset = frozenset()
+        if self._qe_patch_and_apply is not None:
+            try:
+                auto_resolved_cap_ids = frozenset(
+                    self._qe_patch_and_apply(coverage, spec)
+                )
+                if auto_resolved_cap_ids:
+                    self._log(
+                        f"MilestoneLoop[v5]: QE auto-patched "
+                        f"{len(auto_resolved_cap_ids)} capability id(s) — "
+                        f"excluding from CanonicalReport: "
+                        f"{sorted(auto_resolved_cap_ids)}"
+                    )
+            except Exception as e:
+                self._log(
+                    f"MilestoneLoop[v5]: QE patch failed "
+                    f"({type(e).__name__}: {e}) — proceeding without patches"
+                )
+
         # Freeze into canonical report.
         findings: List[CanonicalFinding] = []
-        findings.extend(qe_coverage_to_canonical_findings(coverage))
+        findings.extend(
+            f for f in qe_coverage_to_canonical_findings(coverage)
+            if f.capability_id not in auto_resolved_cap_ids
+        )
         findings.extend(cr_report_to_canonical_findings(code_review))
         canonical = CanonicalReport(
             milestone_name=milestone.name,

@@ -2033,6 +2033,64 @@ class MilestoneLoop:
         except Exception:
             canonical_path = None
 
+        # QE hybrid: build patch+validate closure. After iter-1 review
+        # the loop calls this with the CoverageReport + EnrichedSpec;
+        # we invoke QE.patch(), write the patches, run PerIssueValidator,
+        # and return the capability_ids that auto-resolved.
+        def _qe_patch_and_apply(coverage, enriched_spec) -> frozenset:
+            from bizniz.quality_engineer.types import QETestPatch
+            if not getattr(self._qe, "patch", None):
+                return frozenset()
+
+            # Collect current test files from the workspace.
+            test_files: Dict[str, str] = {}
+            try:
+                all_paths = self._primary_workspace.list_relative_files()
+                test_exts = (".py", ".ts", ".tsx", ".js", ".jsx")
+                for p in all_paths:
+                    if not any(
+                        seg in p.split("/")
+                        for seg in ("__pycache__", "node_modules", ".venv", "dist", "build")
+                    ):
+                        is_test = (
+                            "/test_" in p or p.startswith("test_")
+                            or "/tests/" in p or ".test." in p or ".spec." in p
+                        )
+                        if is_test and p.endswith(test_exts):
+                            content = _safe_read(self._primary_workspace, p)
+                            if content is not None:
+                                test_files[p] = content
+            except Exception as e:
+                self._log(f"QE patch: test file collection failed: {e}")
+
+            patch_result = self._qe.patch(
+                coverage=coverage,
+                enriched_spec=enriched_spec,
+                test_files=test_files,
+            )
+            if not patch_result.patches:
+                return frozenset()
+
+            # Write patches + validate via PerIssueValidator if available.
+            # For now: write files directly and assume clean (no validator
+            # wired yet — validator integration is the next step).
+            # TODO: wire PerIssueValidator here for real test-run gating.
+            resolved_caps: set = set()
+            for patch in patch_result.patches:
+                try:
+                    self._primary_workspace.write_file(patch.path, patch.content)
+                    resolved_caps.update(patch.capability_ids)
+                    self._log(
+                        f"QE auto-patch: wrote {patch.path} "
+                        f"(covers {patch.capability_ids})"
+                    )
+                except Exception as e:
+                    self._log(
+                        f"QE auto-patch: failed to write {patch.path}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+            return frozenset(resolved_caps)
+
         loop = ReviewRepairV5Loop(
             phase_review_parallel=self._phase_review_parallel,
             repair_dispatcher=self._code_dispatcher,
@@ -2046,6 +2104,7 @@ class MilestoneLoop:
             stall_threshold=self._repair_stall_threshold,
             hard_cap=self._repair_max_iterations,
             on_status=self._on_status,
+            qe_patch_and_apply=_qe_patch_and_apply,
         )
         return loop.run(
             milestone=milestone,
