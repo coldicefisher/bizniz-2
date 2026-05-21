@@ -89,6 +89,127 @@ Deferred (do NOT pull forward unless explicitly asked):
 - Production-mode Dockerfile variants (until dev-mode loop is
   stable).
 
+## Session state — 2026-05-20 (mid-flight)
+
+**Live build in progress: `recipe_v4_v16` (--use-v5).** Started
+14:53:39. As of 16:55: M1 in repair iter 3, ResolutionChecker
+running. Auto-kill watcher armed (background bash, task id
+`bxrygrnq9`) — fires `pkill -f v2_build.*recipe_v4_v16` the
+moment `MilestoneLoop: M2` appears in the log. User wants M1
+only; M2+ deferred to next week.
+
+Log: `/tmp/bizniz_runs/recipe_v4_v16.log`.
+
+### What shipped tonight (5 commits, all on main)
+
+1. `7fceb71` v5 hotfix: edit-mode supports new_files
+2. `f7742de` container_rebuild image-only path when container down
+3. `4a97770` container_rebuild health check best-effort (warn, not fail)
+4. `f28a1e2` FIX-1: flatten layers at IMPLEMENT — concurrent services
+5. `0ef4b27` FIX-2: ResolutionChecker balanced verdict (drop "prefer still_present")
+6. `c153ebe` v5 hotfix: ResolutionChecker now sees workspace files
+   (the night's main fix — `_collect_files_for_check` now uses a
+   `discover_workspace_files()` closure that walks the workspace
+   and returns code/test paths. Pre-fix: checker got ZERO files
+   for QE coverage findings → judged everything `still_present`
+   forever. Post-fix: checker gets 60 files.)
+7. `5b4a511` v5 hotfix bundle (three fixes, one commit):
+   - **Fix A**: `_materialize_seed` protects manifest files
+     (`_PROTECTED_MANIFEST_FILES` set: requirements.txt,
+     package.json, Dockerfile, pyproject.toml, etc.) so
+     ServicePlanner can't stomp the skeleton's pytest/asyncpg
+     by emitting a hallucinated "summary" requirements.txt.
+   - **Fix B**: `system_prompt_with_scaffold.py` explicitly
+     forbids seeding manifests + tells the planner that runtime
+     dep changes flow through Coder's `requested_deps`.
+   - **Fix C**: `PerIssueValidator` takes an `on_deps_changed`
+     callback; `V4MilestoneCodeDispatcher` provides a closure
+     wrapping `_apply_requested_deps` + `maybe_rebuild`. Fires
+     after each fix iter that returned `requested_deps`. Pre-fix:
+     agent could request pytest mid-loop, request was dropped
+     on the floor, validator stalled forever on the same import
+     finding.
+
+Tests: 24 + 4 + 4 + 4 = 36 new tests, 0 regressions across
+per_issue_validator + driver + resolution_checker + service_planner.
+
+### v16 run evidence (the data the night was about)
+
+**IMPLEMENT phase (the big win):**
+- Backend: 10/10 issues CLEAN, 0 debug iters, 191s wall
+- Frontend: 8/8 issues CLEAN, 0 debug iters, 239s wall
+- Total IMPLEMENT: ~4 min vs typical 30-60 min (~8-15×)
+- Live `requirements.txt` preserved as full skeleton content
+  (pytest, pytest-asyncio, asyncpg, alembic, all 16 lines).
+  Fix A validated.
+- No `SKIPPED seeding` warnings → planner didn't try. Fix B
+  validated.
+- Fix C exercised live at 15:23:33 on BA-fix1-1: agent
+  requested `respx`, `_apply_requested_deps` appended,
+  container rebuilt, validator clean after 1 debug iter. ✅
+
+**Review/repair convergence (tonight's main fix):**
+```
+Iter 1: 48 findings (47 blockers) frozen as CanonicalReport
+        ResolutionChecker: 48 findings checked against 60 files ✅
+        (would have been 0 files pre-fix → 70/70 still_present)
+Iter 2: 6 findings remain (87% closed in one cycle)
+        CR side: all resolved (nothing to check)
+        QE side: 6 still_present → PerMilestoneDebugger fires
+        PerMilestoneDebugger: clean in 11min, touched 4 files
+        Re-check: still 6 still_present (checker disagrees w/ debugger)
+Iter 3: dispatched 4 BE fix-issues + 4 FE fix-issues
+        ALL agents returning empty edits + new_files → BROKEN
+```
+
+### Two NEW bugs surfaced in v16 (next-week tickets)
+
+1. **"Empty edits + new_files" no-op refusal.** When the
+   fix-pass agent decides "the seeded scaffold already
+   addresses this, nothing to change," it returns empty
+   `edits` + empty `new_files`. Validator's salvage refuses
+   the no-op → issue marked BROKEN. Hit FR-fix2-4, FR-fix2-5,
+   BA-fix3-1, BA-fix3-2, BA-fix3-3, BA-fix3-4, FR-fix3-3
+   (and counting). Fix: salvage should accept "no-changes-
+   needed with notes" as a CLEAN no-op signal, not BROKEN.
+   File: `bizniz/coder_tester/agent.py` (search "empty edits +
+   new_files. Refusing to ship a no-op result.").
+
+2. **ResolutionChecker too conservative on some QE findings.**
+   Post-Fix-2 the prompt is balanced, but the checker still
+   says `still_present` for findings 5 different agent votes
+   say are addressed (PerMilestoneDebugger + 4 fix-issue
+   Coders). Weight of evidence says checker is wrong on these.
+   Could be: (a) prompt needs more guidance on scenario
+   findings vs file-anchored, (b) needs to see actual test
+   run output not just code, (c) the QE finding text itself
+   is ambiguous. Worth investigating before next live build.
+
+### Three deterministic-context levers (user-requested 2026-05-20)
+
+User asked: "what can we load deterministically as context, cross-
+language + cross-platform, simple, universal?" Top three picks:
+
+1. **AST-extracted symbol tables** (tree-sitter, every language).
+   Pre-digest "what's exported from each file" instead of LLM
+   re-reading.
+2. **Workspace diff since last call** (`git diff`). Tells LLM
+   "you saw old state; here's what changed" instead of paying
+   to re-read.
+3. **Structured test failure extraction** (parse pytest/jest
+   output into (file, line, assertion, expected, actual)
+   tuples). Currently dumps raw output.
+
+Cheap first experiment: add `outcome_signal` field to the cost
+ledger entries; pick CoderTesterAgent in IMPLEMENT; A/B test
+WorkspaceDiff context vs none. Measure `tokens / finding_resolved`
+across 3 builds with vs 3 without.
+
+### Open backlog (from prior session, still valid)
+
+- Skeleton Tailwind wiring (UX fixes don't render).
+- Stage 2b refactorer iteration if quality varies.
+
 ## What bizniz is (one paragraph)
 
 Bizniz is a multi-agent AI pipeline that takes a natural-language
